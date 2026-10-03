@@ -67,8 +67,7 @@ test_that("scalars unbox, vectors become arrays, empties and NA are handled", {
   expect_identical(sr_canonical_json(list(a = NULL, b = NA)), '{"a":null,"b":null}')
   expect_identical(sr_canonical_json(factor(c("lo", "hi", NA))), '["lo","hi",null]')
   expect_identical(sr_canonical_json(factor("lo")), '"lo"')
-  # names on atomic vectors and other attributes are ignored
-  expect_identical(sr_canonical_json(c(a = 1, b = 2)), "[1,2]")
+  # other attributes (not names, class or dim) are ignored
   expect_identical(sr_canonical_json(structure(1, units = "mg")), "1")
 })
 
@@ -202,4 +201,43 @@ test_that("content hash changes with any of data, spec, seed, lib and hw", {
     sr_content_hash("dh", spec, 1L),
     sr_content_hash("dh", spec, 1L, libsnap_hash = sr_libsnap_hash(), hw_fp = sr_hw_fingerprint())
   )
+})
+
+test_that("named atomic vectors serialise as objects, never as bare arrays", {
+  expect_identical(sr_canonical_json(c(a = 1, b = 2)), '{"a":1,"b":2}')
+  expect_identical(sr_canonical_json(c(b = 2, a = 1)), '{"a":1,"b":2}')
+  expect_false(identical(sr_canonical_json(c(a = 1, b = 2)), sr_canonical_json(c(x = 1, y = 2))))
+  expect_identical(sr_canonical_json(c(a = 1)), '{"a":1}')
+  expect_identical(sr_canonical_json(c(a = "x")), '{"a":"x"}')
+  expect_identical(sr_canonical_json(c(a = TRUE, b = NA)), '{"a":true,"b":null}')
+  expect_identical(sr_canonical_json(c(a = 1L, B = 2L)), '{"B":2,"a":1}')
+  expect_identical(sr_canonical_json(list(p = c(k = "v"))), '{"p":{"k":"v"}}')
+  expect_identical(sr_canonical_json(setNames(character(0), character(0))), "{}")
+  # unnamed vectors are unchanged
+  expect_identical(sr_canonical_json(c(1, 2)), "[1,2]")
+  # a named factor: labels as values, object keyed by names
+  f <- factor(c("lo", "hi"))
+  names(f) <- c("n1", "n2")
+  expect_identical(sr_canonical_json(f), '{"n1":"lo","n2":"hi"}')
+  # the same object checks as lists
+  expect_error(sr_canonical_json(c(a = 1, 2)), "named")
+  expect_error(sr_canonical_json(c(a = 1, a = 2)), "duplicate")
+  expect_error(sr_canonical_json(structure(1:2, names = c("a", NA))), "named")
+})
+
+test_that("structure that would be silently dropped is an error", {
+  expect_error(sr_canonical_json(matrix(1:4, 2)), "unsupported class 'matrix'")
+  expect_error(sr_canonical_json(matrix(1:4, 1)), "unsupported class 'matrix'")
+  expect_error(sr_canonical_json(array(1:8, c(2, 2, 2))), "unsupported class 'array'")
+  expect_error(sr_canonical_json(table(c("a", "b", "a"))), "unsupported class 'table'")
+  expect_error(sr_canonical_json(structure(1, class = "foo")), "unsupported class 'foo'")
+  expect_error(sr_canonical_json(structure(1:2, class = "integer64")), "unsupported class 'integer64'")
+  expect_error(sr_canonical_json(as.difftime(1, units = "secs")), "difftime")
+  expect_error(sr_canonical_json(list(m = matrix(1:4, 2))), "unsupported class 'matrix'")
+  expect_error(sr_canonical_json(structure(1, class = c("foo", "bar"))), "unsupported class 'foo'")
+  # plain vectors and factors are unaffected
+  expect_identical(sr_canonical_json(1:4), "[1,2,3,4]")
+  expect_identical(sr_canonical_json(factor(c("a", "b"))), '["a","b"]')
+  # a data.frame (a classed list) keeps its current behaviour: an object of columns
+  expect_identical(sr_canonical_json(data.frame(b = 1:2, a = c("x", "y"))), '{"a":["x","y"],"b":[1,2]}')
 })

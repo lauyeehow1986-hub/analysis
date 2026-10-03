@@ -60,10 +60,20 @@
 
 .sr_cj <- function(x) {
   if (is.null(x)) return("null")
-  if (inherits(x, c("Date", "POSIXct", "POSIXlt", "difftime"))) {
-    stop("canonical JSON cannot serialise class ", class(x)[1L], call. = FALSE)
+  unsupported <- function() {
+    stop("sr_canonical_json: unsupported class '", class(x)[1L], "'", call. = FALSE)
   }
-  if (is.factor(x)) x <- as.character(x)
+  if (inherits(x, c("POSIXlt", "difftime"))) unsupported()
+  if (is.factor(x)) {
+    # labels as values, names (if any) kept so a named factor becomes an object
+    nm <- names(x)
+    x <- as.character(x)
+    names(x) <- nm
+  } else if (!is.list(x) && !is.null(attr(x, "class"))) {
+    unsupported()  # Date, POSIXct, table, integer64, any classed atomic
+  }
+  if (is.atomic(x) && !is.null(dim(x))) unsupported()  # matrix / array
+  if (is.atomic(x) && !is.null(names(x))) return(.sr_cj(as.list(x)))  # named atomic -> object
   if (is.list(x)) {
     nms <- names(x)
     if (is.null(nms)) {
@@ -96,7 +106,8 @@
 
 #' Canonical JSON of an R value: one UTF-8 string, sorted keys, no whitespace (see file header).
 #' Named lists are objects, unnamed lists arrays; length-1 atomics unbox to scalars; NA and NULL
-#' are null; attributes other than names (and names on atomic vectors) are ignored.
+#' are null; named atomic vectors are objects; atomics with a dim or a class other than factor are
+#' an error; other attributes are ignored.
 sr_canonical_json <- function(x) {
   out <- .sr_cj(x)
   out <- enc2utf8(out)
