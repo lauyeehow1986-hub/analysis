@@ -8,11 +8,13 @@ design; this file holds *what has happened* and *what we learned*.
 |---|---|
 | 2026-10-03 | Design approved after 4 rounds of critique and research; spec committed (`docs/specs/2026-10-03-statrouter-design.md`) |
 | 2026-10-03 | Repo initialised and pushed to github.com/lauyeehow1986-hub/analysis (public) |
+| 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
 
 **Next:**
-1. User reviews the spec.
-2. Run `writing-plans` for **P0** (feasibility spike on the locked-down PC) and **P1** (MVP).
-3. Create a worktree and implement.
+1. User reviews the plans and picks the execution method.
+2. Execute P0 spike on the laptop, then the user runs `run_spike.bat` on the locked PC; record the go/no-go.
+3. Execute P1a in a worktree (branch `p1a-foundation`).
+4. Write the plans for P1b (data: import/DuckDB/profiling/DQ/suggestor), P1c (analysis routes), P1d (router + writer + freeze + UI).
 
 ## Decisions (with the user)
 | Topic | Decision |
