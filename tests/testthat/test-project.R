@@ -1,0 +1,288 @@
+# Tests for the portable project folder, schema migration and lock (core/project.R).
+
+new_dir <- function() file.path(withr::local_tempdir(.local_envir = parent.frame()), "proj")
+this_host <- function() Sys.info()[["nodename"]]
+norm <- function(p) normalizePath(p, winslash = "/", mustWork = FALSE)
+
+write_lock <- function(paths, host, pid, user = "someone", ts = "2026-01-01T00:00:00.000Z") {
+  .sr_write_json_file(paths$lock, list(host = host, pid = pid, user = user, ts = ts))
+}
+audit_actions <- function(paths) sr_audit_read(paths$audit)$action
+
+# Create, add a note and close: returns the (closed) project.
+make_closed <- function(dir, name = "demo") {
+  p <- sr_project_create(dir, name, profile = "laptop")
+  p <- sr_project_append(p, "note", list(text = "a"))
+  sr_project_close(p)
+  p
+}
+
+test_that("paths are relative to dir and normalised", {
+  d <- new_dir()
+  dir.create(d)
+  p <- sr_project_paths(d)
+  expect_named(p, c("dir", "json", "events", "audit", "data", "fits", "out", "lock"))
+  expect_equal(p$dir, norm(d))
+  expect_equal(p$json, paste0(norm(d), "/project.json"))
+  expect_equal(p$events, paste0(norm(d), "/events.jsonl"))
+  expect_equal(p$audit, paste0(norm(d), "/audit.log"))
+  expect_equal(p$lock, paste0(norm(d), "/.lock"))
+  expect_equal(p$data, paste0(norm(d), "/data"))
+  expect_equal(p$fits, paste0(norm(d), "/fits"))
+  expect_equal(p$out, paste0(norm(d), "/out"))
+})
+
+test_that("create lays out the folder, meta and lock; reopen replays state", {
+  d <- new_dir()
+  name <- paste0("Caf", intToUtf8(0xE9), " study")
+  p <- sr_project_create(d, name, profile = "laptop")
+  expect_false(p$readonly)
+  expect_true(dir.exists(p$paths$data) && dir.exists(p$paths$fits) && dir.exists(p$paths$out))
+  expect_true(file.exists(p$paths$json) && file.exists(p$paths$events) && file.exists(p$paths$audit))
+  expect_true(file.exists(p$paths$lock))
+  expect_identical(p$meta$schema_version, 1L)
+  expect_match(p$meta$id, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+  expect_equal(p$meta$name, name)
+  expect_equal(p$meta$profile, "laptop")
+  expect_equal(p$meta$mode, sr_mode())
+  expect_match(p$meta$created, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$")
+  expect_equal(p$state$project$name, name)
+
+  p <- sr_project_append(p, "note", list(text = "a"))
+  expect_equal(p$state$notes, "a")
+  p <- sr_project_append(p, "note", list(text = "b"))
+  expect_equal(p$state$notes, c("a", "b"))
+  sr_project_close(p)
+  expect_false(file.exists(p$paths$lock))
+
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_equal(q$state$notes, c("a", "b"))
+  expect_equal(q$state$project$name, name)
+  expect_equal(q$meta, p$meta)
+  expect_true(sr_audit_verify(q$paths$audit)$ok)
+  expect_equal(audit_actions(q$paths), c("event:project.created", "event:note", "event:note"))
+  sr_project_close(q)
+})
+
+test_that("project.json and the lock are one-line UTF-8 JSON with no absolute paths", {
+  d <- new_dir()
+  p <- sr_project_create(d, "demo", profile = "laptop")
+  for (f in c(p$paths$json, p$paths$lock)) {
+    raw <- readBin(f, "raw", n = file.size(f))
+    expect_equal(sum(raw == as.raw(0x0A)), 1L)
+    expect_equal(raw[length(raw)], as.raw(0x0A))
+    expect_true(jsonlite::validate(rawToChar(raw[-length(raw)])))
+  }
+  expect_false(grepl(norm(d), paste(readLines(p$paths$json, warn = FALSE), collapse = ""), fixed = TRUE))
+  expect_false(grepl(norm(d), paste(readLines(p$paths$events, warn = FALSE), collapse = ""), fixed = TRUE))
+  lock <- jsonlite::fromJSON(p$paths$lock, simplifyVector = FALSE)
+  expect_named(lock, c("host", "pid", "user", "ts"))
+  expect_equal(lock$host, this_host())
+  expect_equal(as.integer(lock$pid), Sys.getpid())
+  sr_project_close(p)
+})
+
+test_that("each project gets a distinct id", {
+  a <- sr_project_create(new_dir(), "a", profile = "laptop")
+  b <- sr_project_create(new_dir(), "b", profile = "laptop")
+  expect_false(a$meta$id == b$meta$id)
+  sr_project_close(a)
+  sr_project_close(b)
+})
+
+test_that("create errors on a non-empty directory but accepts an empty or missing one", {
+  d <- new_dir()
+  dir.create(d)
+  writeLines("x", file.path(d, ".hidden"))
+  expect_error(sr_project_create(d, "demo", profile = "laptop"))
+  d2 <- new_dir()
+  dir.create(d2)
+  p <- sr_project_create(d2, "demo", profile = "laptop")
+  expect_true(file.exists(p$paths$json))
+  sr_project_close(p)
+  d3 <- file.path(new_dir(), "deep", "er")
+  p3 <- sr_project_create(d3, "demo", profile = "laptop")
+  expect_true(file.exists(p3$paths$json))
+  sr_project_close(p3)
+})
+
+test_that("a moved project opens at the new root with identical state and audit tip", {
+  d <- new_dir()
+  p <- make_closed(d)
+  tip <- sr_audit_tip(p$paths$audit)
+  root2 <- withr::local_tempdir()
+  expect_true(all(file.copy(d, root2, recursive = TRUE)))
+  d2 <- file.path(root2, basename(d))
+  q <- sr_project_open(d2)
+  expect_equal(q$paths$dir, norm(d2))
+  expect_false(q$readonly)
+  expect_equal(q$state, p$state)
+  expect_equal(q$meta, p$meta)
+  expect_equal(sr_audit_tip(q$paths$audit), tip)
+  sr_project_close(q)
+})
+
+test_that("a stale lock from this host is taken over and audited", {
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, this_host(), 999999L, user = "ghost")
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  a <- sr_audit_read(q$paths$audit)
+  i <- which(a$action == "lock.takeover")
+  expect_length(i, 1L)
+  expect_equal(a$detail[[i]]$host, this_host())
+  expect_equal(a$detail[[i]]$pid, 999999L)
+  expect_equal(a$detail[[i]]$user, "ghost")
+  expect_equal(a$detail[[i]]$ts, "2026-01-01T00:00:00.000Z")
+  expect_true(sr_audit_verify(q$paths$audit)$ok)
+  lock <- jsonlite::fromJSON(q$paths$lock, simplifyVector = FALSE)
+  expect_equal(as.integer(lock$pid), Sys.getpid())
+  sr_project_close(q)
+})
+
+test_that("a live lock from another host makes the project read-only", {
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, "OTHERHOST", 1L)
+  tip <- sr_audit_tip(p$paths$audit)
+  q <- sr_project_open(d)
+  expect_true(q$readonly)
+  expect_equal(q$state$notes, "a")
+  expect_error(sr_project_append(q, "note", list(text = "b")), "read-only")
+  expect_equal(sr_audit_tip(q$paths$audit), tip)
+  # closing a read-only project must not remove someone else's lock
+  sr_project_close(q)
+  expect_true(file.exists(q$paths$lock))
+  expect_equal(jsonlite::fromJSON(q$paths$lock, simplifyVector = FALSE)$host, "OTHERHOST")
+})
+
+test_that("a running process on this host holds the lock", {
+  ppid <- tryCatch(ps::ps_ppid(), error = function(e) NA_integer_)
+  skip_if(is.na(ppid), "parent pid unavailable")
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, this_host(), as.integer(ppid))
+  q <- sr_project_open(d)
+  expect_true(q$readonly)
+  expect_false("lock.takeover" %in% audit_actions(q$paths))
+})
+
+test_that("force takes over a live foreign lock and audits it", {
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, "OTHERHOST", 1L, user = "someone")
+  q <- sr_project_open(d, force = TRUE)
+  expect_false(q$readonly)
+  a <- sr_audit_read(q$paths$audit)
+  i <- which(a$action == "lock.takeover")
+  expect_length(i, 1L)
+  expect_equal(a$detail[[i]]$host, "OTHERHOST")
+  sr_project_append(q, "note", list(text = "b"))
+  sr_project_close(q)
+  expect_false(file.exists(q$paths$lock))
+})
+
+test_that("reopening in the same process is not locked out; close releases only our lock", {
+  d <- new_dir()
+  p <- sr_project_create(d, "demo", profile = "laptop")
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_false("lock.takeover" %in% audit_actions(q$paths))
+  sr_project_close(q)
+  expect_false(file.exists(p$paths$lock))
+  # a foreign lock written after we closed survives a stray close
+  write_lock(p$paths, "OTHERHOST", 1L)
+  sr_project_close(p)
+  expect_true(file.exists(p$paths$lock))
+})
+
+test_that("a lock that cannot be parsed is treated as stale", {
+  d <- new_dir()
+  p <- make_closed(d)
+  writeLines("not json", p$paths$lock)
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_true("lock.takeover" %in% audit_actions(q$paths))
+  sr_project_close(q)
+})
+
+test_that("opening a folder without project.json errors", {
+  d <- withr::local_tempdir()
+  expect_error(sr_project_open(d), "project.json")
+})
+
+test_that("a newer schema errors and leaves no lock behind", {
+  d <- new_dir()
+  p <- make_closed(d)
+  meta <- .sr_read_json_file(p$paths$json)
+  meta$schema_version <- 99L
+  .sr_write_json_file(p$paths$json, meta)
+  expect_error(sr_project_open(d), "newer StatRouter")
+  expect_false(file.exists(p$paths$lock))
+})
+
+test_that("migrations run from the file's version, are written back and audited", {
+  fake <- list("0" = function(meta) {
+    meta$schema_version <- 1L
+    meta$migrated <- TRUE
+    meta
+  })
+  env <- environment(.sr_migrate)
+  old <- get("sr_schema_migrations", envir = env)
+  assign("sr_schema_migrations", fake, envir = env)
+  withr::defer(assign("sr_schema_migrations", old, envir = env))
+
+  d <- new_dir()
+  p <- make_closed(d)
+  meta <- .sr_read_json_file(p$paths$json)
+  meta$schema_version <- 0L
+  .sr_write_json_file(p$paths$json, meta)
+
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_identical(q$meta$schema_version, 1L)
+  expect_true(q$meta$migrated)
+  expect_identical(.sr_read_json_file(q$paths$json)$schema_version, 1L)
+  a <- sr_audit_read(q$paths$audit)
+  i <- which(a$action == "schema.migrated")
+  expect_length(i, 1L)
+  expect_equal(a$detail[[i]]$from, 0L)
+  expect_equal(a$detail[[i]]$to, 1L)
+  expect_true(sr_audit_verify(q$paths$audit)$ok)
+  sr_project_close(q)
+})
+
+test_that("a read-only open migrates in memory only", {
+  fake <- list("0" = function(meta) {
+    meta$schema_version <- 1L
+    meta
+  })
+  env <- environment(.sr_migrate)
+  old <- get("sr_schema_migrations", envir = env)
+  assign("sr_schema_migrations", fake, envir = env)
+  withr::defer(assign("sr_schema_migrations", old, envir = env))
+
+  d <- new_dir()
+  p <- make_closed(d)
+  meta <- .sr_read_json_file(p$paths$json)
+  meta$schema_version <- 0L
+  .sr_write_json_file(p$paths$json, meta)
+  write_lock(p$paths, "OTHERHOST", 1L)
+  tip <- sr_audit_tip(p$paths$audit)
+
+  q <- sr_project_open(d)
+  expect_true(q$readonly)
+  expect_identical(q$meta$schema_version, 1L)
+  expect_identical(.sr_read_json_file(q$paths$json)$schema_version, 0L)
+  expect_equal(sr_audit_tip(q$paths$audit), tip)
+})
+
+test_that(".sr_migrate requires a migration for every step and progress", {
+  expect_error(.sr_migrate(list(schema_version = 0L), migrations = list()), "no migration")
+  stuck <- list("0" = function(meta) meta)
+  expect_error(.sr_migrate(list(schema_version = 0L), migrations = stuck), "did not advance")
+  expect_identical(.sr_migrate(list(schema_version = 1L), migrations = list())$schema_version, 1L)
+  expect_error(.sr_migrate(list(schema_version = 2L), migrations = list()), "newer StatRouter")
+})
