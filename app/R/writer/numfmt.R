@@ -47,7 +47,7 @@ sr_mcse_digits <- function(mcse, digits = as.integer(sr_opt("digits", 2))) {
   out <- rep("NA", length(x))
   ok <- !is.na(x)
   out[ok] <- vapply(which(ok), function(i) {
-    formatC(round(x[i], d[i]), format = "f", digits = d[i])
+    formatC(round(x[i], d[i]), format = "f", digits = d[i], decimal.mark = ".")
   }, character(1))
   sub("^-(0[.]?0*)$", "\\1", out)
 }
@@ -69,7 +69,7 @@ sr_fmt_ci <- function(est, lo, hi, mcse = NA, digits = as.integer(sr_opt("digits
   if (any(lens != n & lens != 1L)) {
     stop("`est`, `lo` and `hi` must have the same length (or length 1)", call. = FALSE)
   }
-  if (any(lens == 0L)) n <- 0L
+  if (n == 0L || any(lens == 0L)) return(character(0))
   est <- rep_len(est, n)
   lo <- rep_len(lo, n)
   hi <- rep_len(hi, n)
@@ -86,7 +86,7 @@ sr_fmt_ci <- function(est, lo, hi, mcse = NA, digits = as.integer(sr_opt("digits
     while (round(p, dp) >= 0.05 && dp < 6L) dp <- dp + 1L
     if (round(p, dp) >= 0.05) return("<0.05")
   }
-  formatC(round(p, dp), format = "f", digits = dp)
+  formatC(round(p, dp), format = "f", digits = dp, decimal.mark = ".")
 }
 
 #' Format p-values: "<0.001", ">0.99", 3 dp below 0.01, else 2 dp; a p < 0.05 never prints as

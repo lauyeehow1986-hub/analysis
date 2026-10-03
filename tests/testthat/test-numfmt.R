@@ -121,3 +121,21 @@ test_that("invalid inputs stop with a clear message", {
   expect_error(sr_fmt_ci(1, 0, "x"), "numeric")
   expect_error(sr_fmt_ci(1, 0, 2, mcse = -1), "mcse")
 })
+
+test_that("zero-length input gives character(0)", {
+  expect_identical(sr_fmt_num(numeric(0)), character(0))
+  expect_identical(sr_fmt_p(numeric(0)), character(0))
+  expect_identical(sr_fmt_ci(numeric(0), numeric(0), numeric(0)), character(0))
+})
+
+test_that("output uses '.' whatever options(OutDec) says", {
+  old <- options(OutDec = ",")
+  on.exit(options(old), add = TRUE)
+  expect_identical(sr_fmt_num(1.5), "1.50")
+  expect_identical(sr_fmt_num(-0.001), "0.00")
+  expect_identical(sr_fmt_num(-0.4, mcse = 5), "0")
+  expect_identical(sr_fmt_p(0.32), "0.32")
+  expect_identical(sr_fmt_p(0.0496), "0.0496")
+  expect_identical(sr_fmt_ci(0.4237, 0.301, 0.5799), "0.42 (0.30 to 0.58)")
+  expect_identical(sr_fmt_ci(-0.001, -0.004, 0.002), "0.00 (0.00 to 0.00)")
+})
