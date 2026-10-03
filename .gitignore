@@ -1,0 +1,39 @@
+# --- never commit data or project state (real patient data must not enter git) ---
+data/
+projects/
+*.srproj
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sav
+*.zsav
+*.dta
+*.sas7bdat
+*.xpt
+*.rds
+*.RData
+*.rda
+# synthetic samples are generated, not committed (regenerate with samples/make_samples.R)
+samples/*
+!samples/*.R
+!samples/README.md
+
+# --- bundled runtimes / model weights / build outputs ---
+bin/
+models/
+dist/
+*.gguf
+*.onnx
+*.safetensors
+*.zip
+
+# --- R / Python / editor noise ---
+.Rhistory
+.Rproj.user/
+.RData
+__pycache__/
+*.pyc
+.venv/
+*.log
+.DS_Store
+Thumbs.db
