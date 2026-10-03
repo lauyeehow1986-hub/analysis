@@ -31,10 +31,32 @@ SR_PURPOSES <- c("describe", "predict", "explain-causal")
   is.character(x) && length(x) >= 1L && !anyNA(x) && all(nzchar(trimws(x)))
 }
 
+.sr_estimand_levels <- c("marginal", "conditional", "not-applicable")
+
+#' TRUE for a genuine estimand: the class plus all five fields valid (same rules as sr_estimand()).
+.sr_is_estimand <- function(x) {
+  inherits(x, "sr_estimand") && is.list(x) &&
+    .sr_is_text1(x[["population"]]) && .sr_is_text_vec(x[["variables"]]) &&
+    .sr_is_text1(x[["intercurrent"]]) && .sr_is_text1(x[["summary"]]) &&
+    .sr_is_text1(x[["level"]]) && x[["level"]] %in% .sr_estimand_levels
+}
+
+#' Stop unless `id` is a single non-blank string and `version` a single finite whole number in
+#' 1..integer max. Shared by sr_route() and sr_route_register().
+.sr_check_id_version <- function(id, version) {
+  if (!.sr_is_text1(id)) stop("route 'id' must be a single non-empty string", call. = FALSE)
+  if (!is.numeric(version) || length(version) != 1L || !is.finite(version) || version < 1 ||
+      version > .Machine$integer.max || version != floor(version)) {
+    stop("route 'version' must be a single whole number from 1 to ", .Machine$integer.max,
+         " (route '", id, "')", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 #' Build an estimand: who/what is estimated, how intercurrent events are handled, which summary.
 #' Every field is required and non-empty; `variables` may name several variables.
 sr_estimand <- function(population, variables, intercurrent, summary,
-                        level = c("marginal", "conditional", "not-applicable")) {
+                        level = .sr_estimand_levels) {
   level <- match.arg(level)
   if (missing(population) || !.sr_is_text1(population)) {
     stop("sr_estimand: 'population' must be a single non-empty string", call. = FALSE)
@@ -57,13 +79,7 @@ sr_estimand <- function(population, variables, intercurrent, summary,
 sr_route <- function(id, version, family, purpose = NULL, estimand = NULL, spec_schema = list(),
                      compile = NULL, present = NULL, composes_with = character(),
                      applicable = function(spec, ctx) list(ok = TRUE, reasons = character())) {
-  if (missing(id) || !.sr_is_text1(id)) {
-    stop("sr_route: 'id' must be a single non-empty string", call. = FALSE)
-  }
-  if (missing(version) || !is.numeric(version) || length(version) != 1L || is.na(version) ||
-      version < 1 || version != floor(version)) {
-    stop("sr_route: 'version' must be a single positive whole number (route '", id, "')", call. = FALSE)
-  }
+  .sr_check_id_version(if (missing(id)) NULL else id, if (missing(version)) NULL else version)
   if (missing(family)) family <- NA_character_
   structure(list(id = id, version = as.integer(version), family = family, purpose = purpose,
                  estimand = estimand, spec_schema = spec_schema, compile = compile,
@@ -113,6 +129,7 @@ sr_route <- function(id, version, family, purpose = NULL, estimand = NULL, spec_
 #' Register a route, enforcing the contract. Errors name the broken rule.
 sr_route_register <- function(route) {
   if (!inherits(route, "sr_route")) stop("sr_route_register: not an sr_route", call. = FALSE)
+  .sr_check_id_version(route[["id"]], route[["version"]])
   key <- .sr_route_key(route$id, route$version)
   if (!.sr_is_text1(route$family)) {
     stop("sr_route_register: route '", key, "' needs a single non-empty family", call. = FALSE)
@@ -123,7 +140,7 @@ sr_route_register <- function(route) {
          paste(SR_PURPOSES, collapse = ", "), call. = FALSE)
   }
   e <- route$estimand
-  if (!(inherits(e, "sr_estimand") || is.function(e))) {
+  if (!(.sr_is_estimand(e) || is.function(e))) {
     stop("sr_route_register: route '", key,
          "' needs an estimand (an sr_estimand or a function of the spec returning one)", call. = FALSE)
   }
@@ -207,16 +224,24 @@ sr_spec_validate <- function(spec, route) {
   for (f in names(schema)) {
     d <- schema[[f]]
     x <- spec[[f]]
-    if (is.null(x)) {
-      if (isTRUE(d$required)) add("field '", f, "' is required")
+    # NULL, length 0 and all-NA values count as missing for a required field
+    missing_like <- is.null(x) || length(x) == 0L || (is.atomic(x) && all(is.na(x)))
+    if (is.null(x) || (isTRUE(d[["required"]]) && missing_like)) {
+      if (isTRUE(d[["required"]])) add("field '", f, "' is required")
       next
     }
-    if (!isTRUE(.sr_spec_types[[d$type]](x))) {
-      add("field '", f, "' must be of type ", d$type)
+    if (!isTRUE(.sr_spec_types[[d[["type"]]]](x))) {
+      add("field '", f, "' must be of type ", d[["type"]])
       next
     }
-    if (!is.null(d$values) && !is.list(x) && !all(x %in% d$values)) {
-      add("field '", f, "' must be one of: ", paste(d$values, collapse = ", "))
+    if (d[["type"]] == "chr" && (anyNA(x) || any(!nzchar(trimws(x))))) {
+      add("field '", f, "'", if (isTRUE(d[["required"]])) " is required:" else "",
+          " must not contain NA or blank values")
+      next
+    }
+    # values is ignored for list fields; a length-0 value never satisfies it
+    if (!is.null(d[["values"]]) && !is.list(x) && (length(x) == 0L || !all(x %in% d[["values"]]))) {
+      add("field '", f, "' must be one of: ", paste(d[["values"]], collapse = ", "))
     }
   }
   hashable <- tryCatch({
@@ -228,7 +253,7 @@ sr_spec_validate <- function(spec, route) {
     est <- tryCatch(route$estimand(spec), error = function(e) e)
     if (inherits(est, "error")) {
       add("estimand function failed: ", conditionMessage(est))
-    } else if (!inherits(est, "sr_estimand")) {
+    } else if (!.sr_is_estimand(est)) {
       add("estimand function must return an sr_estimand")
     }
   }

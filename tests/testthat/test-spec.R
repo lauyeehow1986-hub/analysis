@@ -267,6 +267,92 @@ test_that("sr_compile requires compile() to return one non-NA string", {
   expect_error(sr_compile(toy_route(compile = function(spec) NULL), spec), "compile")
 })
 
+test_that("empty values count as missing for required fields", {
+  r <- toy_route(schema = list(var = list(type = "chr", required = TRUE),
+                               n = list(type = "num", required = TRUE),
+                               k = list(type = "chr", required = FALSE, values = c("a", "b"))))
+  chk <- function(...) sr_spec_validate(c(list(purpose = "describe"), list(...)), r)
+  good <- chk(var = "x", n = 1)
+  expect_true(good$ok)
+  for (bad in list("", "  ", NA_character_, character(0), c(NA_character_, NA_character_))) {
+    v <- chk(var = bad, n = 1)
+    expect_false(v$ok)
+    expect_true(any(grepl("var", v$errors)))
+  }
+  expect_true(any(grepl("required", chk(var = "", n = 1)$errors)))
+  expect_true(any(grepl("required", chk(var = character(0), n = 1)$errors)))
+  v <- chk(var = "x", n = NA_real_)
+  expect_false(v$ok)
+  expect_true(any(grepl("n", v$errors)))
+  expect_false(chk(var = "x", n = numeric(0))$ok)
+})
+
+test_that("a present chr value must have no NA or blank element", {
+  r <- toy_route()
+  v <- sr_spec_validate(list(purpose = "describe", var = c("ok", "")), r)
+  expect_false(v$ok)
+  expect_true(any(grepl("var", v$errors)))
+  v2 <- sr_spec_validate(list(purpose = "describe", var = "x", kind = c("a", NA)), r)
+  expect_false(v2$ok)
+  expect_true(any(grepl("kind", v2$errors)))
+  expect_false(sr_spec_validate(list(purpose = "describe", var = "x", kind = ""), r)$ok)
+})
+
+test_that("a length-0 value never satisfies a values constraint", {
+  r <- toy_route()
+  v <- sr_spec_validate(list(purpose = "describe", var = "x", kind = character(0)), r)
+  expect_false(v$ok)
+  expect_true(any(grepl("kind", v$errors)))
+})
+
+test_that("sr_route rejects a non-finite or oversized version", {
+  expect_error(toy_route(version = Inf), "version")
+  expect_error(toy_route(version = 1e10), "version")
+  expect_error(toy_route(version = "1"), "version")
+  expect_error(toy_route(version = TRUE), "version")
+  expect_equal(toy_route(version = .Machine$integer.max)$version, .Machine$integer.max)
+})
+
+test_that("sr_route_register re-checks id and version on a mutated route", {
+  .sr_routes_reset()
+  for (bad in list("x", NULL, Inf, 0, 1.5, 1e10, NA_real_, c(1, 2), TRUE)) {
+    r <- toy_route()
+    r["version"] <- list(bad)
+    expect_error(sr_route_register(r), "version")
+  }
+  for (bad in list(NULL, "", NA_character_, c("a", "b"), 3)) {
+    r <- toy_route()
+    r["id"] <- list(bad)
+    expect_error(sr_route_register(r), "id")
+  }
+  expect_equal(nrow(sr_routes()), 0L)
+  sr_route_register(toy_route())
+  expect_equal(nrow(sr_routes()), 1L)
+  expect_equal(sr_routes()$id, "toy.mean")
+  .sr_routes_reset()
+})
+
+test_that("an empty or forged sr_estimand shell is not an estimand", {
+  .sr_routes_reset()
+  shell <- structure(list(), class = "sr_estimand")
+  expect_error(sr_route_register(toy_route(est = shell)), "estimand")
+  forged <- mk_est()
+  forged$level <- "bogus"
+  expect_error(sr_route_register(toy_route(est = forged)), "estimand")
+  forged2 <- mk_est()
+  forged2$variables <- character()
+  expect_error(sr_route_register(toy_route(est = forged2)), "estimand")
+  expect_equal(nrow(sr_routes()), 0L)
+  r <- toy_route(est = function(spec) structure(list(), class = "sr_estimand"))
+  v <- sr_spec_validate(list(purpose = "describe", var = "x"), r)
+  expect_false(v$ok)
+  expect_true(any(grepl("estimand", v$errors)))
+  r2 <- toy_route(est = function(spec) forged)
+  expect_false(sr_spec_validate(list(purpose = "describe", var = "x"), r2)$ok)
+  expect_silent(sr_route_register(toy_route(est = mk_est())))
+  .sr_routes_reset()
+})
+
 test_that("composes_with and applicable have defaults", {
   r <- toy_route()
   expect_equal(r$composes_with, character())
