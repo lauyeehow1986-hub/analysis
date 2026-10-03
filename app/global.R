@@ -33,3 +33,9 @@ for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
   if (file.exists(.f)) source(.f, local = FALSE, encoding = "UTF-8")
 }
 rm(.f)
+
+# UI modules (Shiny): every file under R/ui, in sorted order, after the core.
+for (.f in sort(list.files(file.path(sr_root, "R", "ui"), pattern = "[.][Rr]$", full.names = TRUE))) {
+  source(.f, local = FALSE, encoding = "UTF-8")
+}
+rm(.f)
