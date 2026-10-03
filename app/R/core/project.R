@@ -8,7 +8,10 @@
 # A lock held by a live process (or by another machine, which we cannot probe) makes the open read-only;
 # a stale lock (same host, process gone) is taken over and audited as "lock.takeover".
 #
-# Opening writes nothing to the audit log except "lock.takeover" and, when migrating, "schema.migrated".
+# Opening writes nothing to the audit log except "lock.takeover", "schema.migrated" when migrating, and
+# "events.recovered" for a single trailing event whose audit entry a crash prevented (core/events.R).
+# Every open runs sr_project_verify() and returns the result as `$verify`; a failed check is reported,
+# not refused, so the data can still be inspected.
 
 SR_SCHEMA_VERSION <- 1L
 
@@ -205,7 +208,7 @@ sr_project_open <- function(dir, force = FALSE) {
     # so a failed open never leaves this process holding a lock it does not know about.
     json0 <- .sr_read_bytes(paths$json)
     json_written <- FALSE
-    tryCatch({
+    verify <- tryCatch({
       if (!is.null(lock$takeover)) sr_audit_append(paths$audit, "lock.takeover", .sr_actor(), lock$takeover)
       if (migrated) {
         json_written <- TRUE
@@ -213,13 +216,55 @@ sr_project_open <- function(dir, force = FALSE) {
         sr_audit_append(paths$audit, "schema.migrated", .sr_actor(),
                         list(from = as.integer(disk$schema_version), to = SR_SCHEMA_VERSION))
       }
+      .sr_project_recover(paths)
     }, error = function(err) {
       if (json_written) try(.sr_write_atomic(paths$json, json0), silent = TRUE)
       try(.sr_lock_restore(paths$lock, lock), silent = TRUE)
       stop(err)
     })
   }
-  list(paths = paths, meta = meta, state = state, readonly = !lock$held)
+  if (!lock$held) verify <- sr_project_verify(list(paths = paths))
+  list(paths = paths, meta = meta, state = state, readonly = !lock$held, verify = verify)
+}
+
+#' Cross-check a project's events.jsonl against its audit log.
+#'
+#' Checks that the audit hash chain verifies, that event seqs run 1, 2, 3, ... with no gap, and that
+#' every event line has exactly one audit entry ("event:<type>" or "events.recovered") whose seq, type,
+#' payload hash and line hash match, and every such audit entry has its event. A single trailing event
+#' with no audit entry is tolerated (a crash between the two writes) and reported as `unaudited`.
+#' Torn final fragments of either file are ignored (they were never committed).
+#'
+#' @return list(ok, problems = character(), unaudited = seq or NULL)
+sr_project_verify <- function(project) {
+  paths <- project$paths
+  problems <- character()
+  av <- sr_audit_verify(paths$audit)
+  if (!isTRUE(av$ok)) {
+    problems <- c(problems, sprintf("audit.log hash chain broken at line %d", av$broken_at))
+  }
+  ld <- tryCatch(.sr_events_load(paths$events), error = function(e) e)
+  if (inherits(ld, "error")) {
+    return(list(ok = FALSE, problems = c(problems, conditionMessage(ld)), unaudited = NULL))
+  }
+  entries <- lapply(.sr_audit_lines(paths$audit), .sr_audit_parse)
+  chk <- .sr_events_audit_check(ld, entries)
+  problems <- c(problems, chk$problems)
+  list(ok = !length(problems), problems = problems, unaudited = chk$unaudited)
+}
+
+# Writable open: verify, and record a single trailing unaudited event as "events.recovered" (only when
+# that is the sole finding). Returns the (re-run) verification.
+.sr_project_recover <- function(paths) {
+  v <- sr_project_verify(list(paths = paths))
+  if (!v$ok || is.null(v$unaudited)) return(v)
+  ld <- .sr_events_load(paths$events)
+  n <- length(ld$events)
+  e <- ld$events[[n]]
+  d <- .sr_event_audit_detail(ld$lines[n], e)
+  sr_audit_append(paths$audit, "events.recovered", .sr_actor(),
+                  list(seq = d$seq, type = e$type, payload_sha = d$payload_sha, event_sha = d$event_sha))
+  sr_project_verify(list(paths = paths))
 }
 
 #' Release the lock if this process holds it. Returns TRUE when a lock was removed.

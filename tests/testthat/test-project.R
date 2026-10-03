@@ -432,3 +432,161 @@ test_that("a failing schema.migrated audit releases the new lock and restores pr
   expect_true("schema.migrated" %in% audit_actions(q$paths))
   sr_project_close(q)
 })
+
+# ---- final review I3: events.jsonl is cross-checked against the audit log --------------------------
+
+ev_lines <- function(paths) .sr_split_lf(.sr_read_bytes(paths$events))$lines
+put_ev_lines <- function(paths, lines) {
+  writeBin(charToRaw(paste0(paste(lines, collapse = "\n"), "\n")), paths$events)
+}
+# A project with events 1..3 (project.created, note a, note b), closed.
+make_three <- function(dir) {
+  p <- make_closed(dir)
+  p <- sr_project_open(dir)
+  p <- sr_project_append(p, "note", list(text = "b"))
+  sr_project_close(p)
+  p
+}
+
+test_that("a clean project verifies ok, on open and directly (I3)", {
+  d <- new_dir()
+  make_three(d)
+  q <- sr_project_open(d)
+  expect_true(q$verify$ok)
+  expect_identical(q$verify$problems, character())
+  v <- sr_project_verify(q)
+  expect_true(v$ok)
+  expect_identical(v$problems, character())
+  sr_project_close(q)
+})
+
+test_that("an edited event payload is not ok and names the seq; open still succeeds (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  l <- ev_lines(p$paths)
+  l[2] <- sub("\"text\":\"a\"", "\"text\":\"z\"", l[2], fixed = TRUE)
+  put_ev_lines(p$paths, l)
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_false(q$verify$ok)
+  expect_true(any(grepl("seq 2", q$verify$problems, fixed = TRUE)))
+  expect_false(any(grepl("seq 3", q$verify$problems, fixed = TRUE)))
+  expect_false("events.recovered" %in% audit_actions(q$paths))
+  sr_project_close(q)
+})
+
+test_that("an edited event actor or ts is not ok (the audit entry pins the whole line) (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  l <- ev_lines(p$paths)
+  l[3] <- sub("\"ts\":\"[^\"]*\"", "\"ts\":\"2020-01-01T00:00:00.000Z\"", l[3])
+  put_ev_lines(p$paths, l)
+  v <- sr_project_verify(list(paths = p$paths))
+  expect_false(v$ok)
+  expect_true(any(grepl("seq 3", v$problems, fixed = TRUE)))
+})
+
+test_that("a deleted event line is not ok (seq gap and an audit entry with no event) (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  put_ev_lines(p$paths, ev_lines(p$paths)[-2])
+  v <- sr_project_verify(list(paths = p$paths))
+  expect_false(v$ok)
+  expect_true(any(grepl("gap", v$problems, fixed = TRUE)))
+  expect_true(any(grepl("seq 2", v$problems, fixed = TRUE)))
+})
+
+test_that("a deleted last event line is not ok (its audit entry has no event) (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  put_ev_lines(p$paths, ev_lines(p$paths)[-3])
+  v <- sr_project_verify(list(paths = p$paths))
+  expect_false(v$ok)
+  expect_true(any(grepl("seq 3", v$problems, fixed = TRUE)))
+})
+
+test_that("one trailing unaudited event is ok and recorded as events.recovered on the next writable open (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  line <- .sr_json(list(seq = 4L, ts = "2026-01-01T00:00:00.000Z", type = "note", actor = "alice",
+                        payload = list(text = "c")))
+  put_ev_lines(p$paths, c(ev_lines(p$paths), line))   # crash after the event line, before its audit
+  v <- sr_project_verify(list(paths = p$paths))
+  expect_true(v$ok)
+  expect_equal(v$unaudited, 4L)
+
+  # a read-only open tolerates it but writes nothing
+  write_lock(p$paths, "other-host", 4242L)
+  r <- sr_project_open(d)
+  expect_true(r$readonly)
+  expect_true(r$verify$ok)
+  expect_false("events.recovered" %in% audit_actions(p$paths))
+  unlink(p$paths$lock)
+
+  q <- sr_project_open(d)
+  expect_true(q$verify$ok)
+  expect_null(q$verify$unaudited)
+  a <- sr_audit_read(q$paths$audit)
+  i <- which(a$action == "events.recovered")
+  expect_length(i, 1L)
+  expect_equal(a$detail[[i]]$seq, 4L)
+  expect_equal(a$detail[[i]]$type, "note")
+  expect_equal(a$detail[[i]]$payload_sha, .sr_sha256(.sr_json(list(text = "c"))))
+  expect_equal(q$state$notes, c("a", "b", "c"))
+  sr_project_close(q)
+
+  q <- sr_project_open(d)                            # recovered once, never again
+  expect_true(q$verify$ok)
+  expect_equal(sum(audit_actions(q$paths) == "events.recovered"), 1L)
+  q <- sr_project_append(q, "note", list(text = "d"))
+  expect_true(sr_project_verify(q)$ok)
+  sr_project_close(q)
+})
+
+test_that("two trailing unaudited events are not ok and are not recovered (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  mk <- function(s) .sr_json(list(seq = s, ts = "2026-01-01T00:00:00.000Z", type = "note",
+                                  actor = "alice", payload = list(text = "c")))
+  put_ev_lines(p$paths, c(ev_lines(p$paths), mk(4L), mk(5L)))
+  q <- sr_project_open(d)
+  expect_false(q$verify$ok)
+  expect_true(any(grepl("seq 4", q$verify$problems, fixed = TRUE)))
+  expect_false("events.recovered" %in% audit_actions(q$paths))
+  sr_project_close(q)
+})
+
+test_that("a broken audit chain or an unreadable events.jsonl is not ok (I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  au <- readLines(p$paths$audit, warn = FALSE)
+  au[1] <- sub("\"actor\":\"[^\"]*\"", "\"actor\":\"mallory\"", au[1])
+  writeBin(charToRaw(paste0(paste(au, collapse = "\n"), "\n")), p$paths$audit)
+  v <- sr_project_verify(list(paths = p$paths))
+  expect_false(v$ok)
+  expect_true(any(grepl("audit.log", v$problems, fixed = TRUE)))
+
+  d2 <- new_dir()
+  p2 <- make_three(d2)
+  put_ev_lines(p2$paths, c(ev_lines(p2$paths)[1:2], "not json", ev_lines(p2$paths)[3]))
+  v2 <- sr_project_verify(list(paths = p2$paths))
+  expect_false(v2$ok)
+  expect_true(any(grepl("events.jsonl", v2$problems, fixed = TRUE)))
+})
+
+test_that("a crash mid audit write is repaired and recovered on the next open (I1 + I3)", {
+  d <- new_dir()
+  p <- make_three(d)
+  b <- readBin(p$paths$audit, "raw", n = file.size(p$paths$audit))
+  lf <- which(b == as.raw(0x0A))
+  writeBin(b[seq_len(lf[length(lf) - 1L] + 30L)], p$paths$audit)  # event 3's entry torn
+  q <- sr_project_open(d)
+  expect_true(q$verify$ok)
+  acts <- audit_actions(q$paths)
+  expect_equal(tail(acts, 2), c("audit.repair", "events.recovered"))
+  expect_true(sr_audit_verify(q$paths$audit)$ok)
+  expect_equal(q$state$notes, c("a", "b"))
+  q <- sr_project_append(q, "note", list(text = "c"))
+  expect_true(sr_project_verify(q)$ok)
+  sr_project_close(q)
+})

@@ -113,12 +113,17 @@ mod_project_server <- function(id) {
 
     shiny::observeEvent(input$open, {
       load_project(function() sr_project_open(dir_in()), function(p) {
-        if (isTRUE(p$readonly)) {
+        msg <- if (isTRUE(p$readonly)) {
           sprintf("Opened project '%s' - read-only (locked by %s)", p$meta$name,
                   .sr_lock_host_label(p$paths))
         } else {
           sprintf("Opened project '%s' at %s", p$meta$name, p$paths$dir)
         }
+        # A failed integrity check is reported, not refused: the project still opens for inspection.
+        if (is.list(p$verify) && !isTRUE(p$verify$ok)) {
+          msg <- paste0(msg, "\nIntegrity check failed: ", paste(p$verify$problems, collapse = "; "))
+        }
+        msg
       })
     })
 

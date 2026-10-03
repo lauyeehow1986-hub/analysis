@@ -172,3 +172,31 @@ test_that("ending the session with no project, or a read-only one, is harmless",
   })
   expect_true(file.exists(p0$paths$lock))
 })
+
+test_that("a project failing the integrity check still opens and the status says why (I3)", {
+  d <- new_dir()
+  p0 <- make_closed(d)
+  b <- readBin(p0$paths$events, "raw", n = file.size(p0$paths$events))
+  txt <- sub("\"name\":\"demo\"", "\"name\":\"dem0\"", rawToChar(b), fixed = TRUE)
+  writeBin(charToRaw(txt), p0$paths$events)
+  shiny::testServer(mod_project_server, {
+    session$setInputs(dir = d, name = "", open = 1)
+    p <- session$returned()
+    expect_false(is.null(p))
+    expect_false(p$readonly)
+    expect_match(output$status, "Opened project 'demo'", fixed = TRUE)
+    expect_match(output$status, "Integrity check failed: ", fixed = TRUE)
+    expect_match(output$status, "seq 1", fixed = TRUE)
+    sr_project_close(p)
+  })
+})
+
+test_that("a clean project opens with no integrity warning (I3)", {
+  d <- new_dir()
+  make_closed(d)
+  shiny::testServer(mod_project_server, {
+    session$setInputs(dir = d, name = "", open = 1)
+    expect_false(grepl("Integrity", output$status, fixed = TRUE))
+    sr_project_close(session$returned())
+  })
+})
