@@ -92,8 +92,10 @@ sr_event_append <- function(events_path, audit_path, type, payload = list(),
 
   prior <- sr_events_read(events_path)
   seq <- if (length(prior)) as.integer(prior[[length(prior)]]$seq) + 1L else 1L
-  event <- list(seq = seq, ts = .sr_now(), type = type, actor = actor, payload = payload)
-  .sr_write_lines_append(events_path, .sr_json(event))
+  line <- .sr_json(list(seq = seq, ts = .sr_now(), type = type, actor = actor, payload = payload))
+  .sr_write_lines_append(events_path, line)
+  # Return the event as a re-read parses it (NA -> NULL, vectors -> lists), so live folding == replay.
+  event <- jsonlite::fromJSON(line, simplifyVector = FALSE)
   sr_audit_append(audit_path, paste0("event:", type), actor,
                   list(seq = seq, payload_sha = .sr_sha256(.sr_json(payload))))
   event

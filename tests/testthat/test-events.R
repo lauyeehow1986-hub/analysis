@@ -139,3 +139,29 @@ test_that("non-ASCII payload text round-trips identically", {
   expect_identical(sr_state_replay(ev)$notes, txt)
   expect_true(sr_audit_verify(p$au)$ok)
 })
+
+test_that("the returned event is exactly what a re-read yields", {
+  p <- new_paths()
+  sr_reducer_register("tmp.shape", function(state, event) state)
+  e <- sr_event_append(p$ev, p$au, "tmp.shape",
+                       list(a = NA, v = 1:3, e = character(0), s = "x"), actor = "alice")
+  expect_identical(e, sr_events_read(p$ev)[[1]])
+})
+
+test_that("a valid-JSON final line without its LF is torn on read and repaired on append", {
+  p <- new_paths()
+  add_k(p, 1)
+  add_k(p, 2)
+  b <- read_bytes(p$ev)
+  expect_equal(b[length(b)], as.raw(0x0A))
+  writeBin(b[-length(b)], p$ev)
+  expect_warning(ev <- sr_events_read(p$ev), "torn")
+  expect_length(ev, 1L)
+  e <- add_k(p, 3)
+  expect_equal(e$seq, 2L)
+  expect_silent(ev2 <- sr_events_read(p$ev))
+  expect_equal(sr_state_replay(ev2)$n, 4)
+  d <- sr_audit_read(p$au)
+  expect_true("events.repair" %in% d$action)
+  expect_true(sr_audit_verify(p$au)$ok)
+})
