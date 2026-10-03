@@ -130,6 +130,7 @@ sr_route <- function(id, version, family, purpose = NULL, estimand = NULL, spec_
 sr_route_register <- function(route) {
   if (!inherits(route, "sr_route")) stop("sr_route_register: not an sr_route", call. = FALSE)
   .sr_check_id_version(route[["id"]], route[["version"]])
+  route$version <- as.integer(route$version)  # whole doubles are stored (and keyed) as integers
   key <- .sr_route_key(route$id, route$version)
   if (!.sr_is_text1(route$family)) {
     stop("sr_route_register: route '", key, "' needs a single non-empty family", call. = FALSE)

@@ -332,6 +332,28 @@ test_that("sr_route_register re-checks id and version on a mutated route", {
   .sr_routes_reset()
 })
 
+test_that("a whole double version is stored as an integer", {
+  .sr_routes_reset()
+  r <- toy_route(id = "dbl.route")
+  r["version"] <- list(2)
+  expect_true(is.double(r$version))
+  sr_route_register(r)
+  r5 <- toy_route(id = "dbl.route")
+  r5["version"] <- list(1e5)
+  sr_route_register(r5)
+  tab <- sr_routes()
+  expect_true(is.integer(tab$version))
+  expect_equal(tab$version, c(2L, 100000L))
+  expect_true(is.integer(sr_route_get("dbl.route")$version))
+  expect_equal(sr_route_get("dbl.route")$version, 100000L)
+  expect_true(is.integer(sr_route_get("dbl.route", 2L)$version))
+  expect_equal(sr_route_get("dbl.route", 2L)$version, 2L)
+  expect_true(exists("dbl.route@100000", envir = .sr_routes, inherits = FALSE))
+  expect_false(exists("dbl.route@1e+05", envir = .sr_routes, inherits = FALSE))
+  expect_error(sr_route_register(r5), "dbl.route@100000")
+  .sr_routes_reset()
+})
+
 test_that("an empty or forged sr_estimand shell is not an estimand", {
   .sr_routes_reset()
   shell <- structure(list(), class = "sr_estimand")
