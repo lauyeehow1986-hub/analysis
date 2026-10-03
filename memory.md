@@ -9,7 +9,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | Design approved after 4 rounds of critique and research; spec committed (`docs/specs/2026-10-03-statrouter-design.md`) |
 | 2026-10-03 | Repo initialised and pushed to github.com/lauyeehow1986-hub/analysis (public) |
 | 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
-| 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. 2127 tests pass, `LINT OK` |
+| 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. final-review fixes (I1 torn/failed audit writes, I2 parse_json only, I3 events/audit cross-check on open, M1 atomic rewrites). 2295 tests pass, `LINT OK` |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -86,6 +86,8 @@ design; this file holds *what has happened* and *what we learned*.
 - **ASCII source and badges:** build the middle-dot separator with `intToUtf8(0xB7)`; never type it.
 - **Bundle dependency lists** must include the full transitive closure, or packages fail on the
   target machine.
+- **Base R has no fsync;** appends use flush() (survives process crash, not power loss/unplug) --
+  torn-tail repair on both logs is the mitigation (spec says fsync).
 - **TLS on the dev laptop:** AVG Web-Shield can intercept HTTPS (MITM), and `uv` needs
   `--system-certs`.
 
