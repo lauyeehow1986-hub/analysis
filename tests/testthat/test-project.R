@@ -76,6 +76,13 @@ test_that("project.json and the lock are one-line UTF-8 JSON with no absolute pa
   }
   expect_false(grepl(norm(d), paste(readLines(p$paths$json, warn = FALSE), collapse = ""), fixed = TRUE))
   expect_false(grepl(norm(d), paste(readLines(p$paths$events, warn = FALSE), collapse = ""), fixed = TRUE))
+  p <- sr_project_append(p, "note", list(text = "a"))
+  # no takeover happened, so nothing in the folder's history may name this host or path
+  for (f in c(p$paths$json, p$paths$events, p$paths$audit)) {
+    txt <- paste(readLines(f, warn = FALSE), collapse = "")
+    expect_false(grepl(norm(d), txt, fixed = TRUE))
+    expect_false(grepl(this_host(), txt, fixed = TRUE))
+  }
   lock <- jsonlite::fromJSON(p$paths$lock, simplifyVector = FALSE)
   expect_named(lock, c("host", "pid", "user", "ts"))
   expect_equal(lock$host, this_host())
@@ -158,15 +165,52 @@ test_that("a live lock from another host makes the project read-only", {
   expect_equal(jsonlite::fromJSON(q$paths$lock, simplifyVector = FALSE)$host, "OTHERHOST")
 })
 
-test_that("a running process on this host holds the lock", {
-  ppid <- tryCatch(ps::ps_ppid(), error = function(e) NA_integer_)
-  skip_if(is.na(ppid), "parent pid unavailable")
+test_that("a running process on this host holds the lock; once it is gone the lock is stale", {
+  exe <- file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+  child <- processx::process$new(exe, c("-e", "Sys.sleep(30)"))
+  withr::defer(if (child$is_alive()) child$kill())
+  expect_true(child$is_alive())
   d <- new_dir()
   p <- make_closed(d)
-  write_lock(p$paths, this_host(), as.integer(ppid))
+  write_lock(p$paths, this_host(), as.integer(child$get_pid()))
   q <- sr_project_open(d)
   expect_true(q$readonly)
   expect_false("lock.takeover" %in% audit_actions(q$paths))
+  child$kill()
+  child$wait()
+  q2 <- sr_project_open(d)
+  expect_false(q2$readonly)
+  expect_true("lock.takeover" %in% audit_actions(q2$paths))
+  sr_project_close(q2)
+})
+
+test_that("a process we cannot open (access denied) is assumed to be running", {
+  probe <- tryCatch({ ps::ps_handle(4L); NULL }, error = function(e) e)
+  skip_if(inherits(probe, "no_such_process"), "PID 4 does not exist here")
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, this_host(), 4L)
+  q <- sr_project_open(d)
+  expect_true(q$readonly)
+  expect_false("lock.takeover" %in% audit_actions(q$paths))
+})
+
+test_that(".sr_pid_running: only a nonexistent process is not running", {
+  expect_false(.sr_pid_running(999999L))
+  expect_false(.sr_pid_running(NA))
+  expect_false(.sr_pid_running(1e10))
+  expect_true(.sr_pid_running(Sys.getpid()))
+})
+
+test_that("a lock with an out-of-range pid is treated as damaged, without warnings", {
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, this_host(), 1e10)
+  expect_no_warning(q <- sr_project_open(d))
+  expect_false(q$readonly)
+  a <- sr_audit_read(q$paths$audit)
+  expect_true("lock.takeover" %in% a$action)
+  sr_project_close(q)
 })
 
 test_that("force takes over a live foreign lock and audits it", {
@@ -285,4 +329,15 @@ test_that(".sr_migrate requires a migration for every step and progress", {
   expect_error(.sr_migrate(list(schema_version = 0L), migrations = stuck), "did not advance")
   expect_identical(.sr_migrate(list(schema_version = 1L), migrations = list())$schema_version, 1L)
   expect_error(.sr_migrate(list(schema_version = 2L), migrations = list()), "newer StatRouter")
+})
+
+test_that("a failing create leaves no debris, so a retry works", {
+  d <- new_dir()
+  withr::with_envvar(c(SR_MODE = "bogus"), {
+    expect_error(sr_project_create(d, "demo", profile = "laptop"), "airgap")
+  })
+  expect_true(!dir.exists(d) || length(list.files(d, all.files = TRUE, no.. = TRUE)) == 0L)
+  p <- sr_project_create(d, "demo", profile = "laptop")
+  expect_false(p$readonly)
+  sr_project_close(p)
 })

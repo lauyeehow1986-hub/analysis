@@ -97,20 +97,29 @@ sr_project_paths <- function(dir) {
   if (!file.exists(path)) return(NULL)
   l <- tryCatch(.sr_read_json_file(path), error = function(e) NULL)
   if (!is.list(l) || !is.character(l$host) || length(l$host) != 1L ||
-      !is.numeric(l$pid) || length(l$pid) != 1L || is.na(l$pid)) {
+      !.sr_pid_valid(l$pid)) {
     return(list(unreadable = TRUE))
   }
   l
 }
 
-# Any error from the process probe (nonexistent PID, no permission) means "not running".
+# TRUE when `pid` is a valid PID. Out-of-range, fractional or NA values are not PIDs.
+.sr_pid_valid <- function(pid) {
+  is.numeric(pid) && length(pid) == 1L && is.finite(pid) && pid >= 1 && pid == floor(pid) &&
+    pid <= .Machine$integer.max
+}
+
+# Only a PID that does not exist (or is not a valid PID) is "not running". Any other probe error, e.g.
+# access denied for an elevated, SYSTEM or another user's process, is assumed to mean it is running.
 .sr_pid_running <- function(pid) {
-  tryCatch(isTRUE(ps::ps_is_running(ps::ps_handle(as.integer(pid)))), error = function(e) FALSE)
+  if (!.sr_pid_valid(pid)) return(FALSE)
+  tryCatch(isTRUE(ps::ps_is_running(ps::ps_handle(as.integer(pid)))),
+           error = function(e) !inherits(e, "no_such_process"))
 }
 
 .sr_lock_is_mine <- function(l) {
   is.list(l) && is.null(l$unreadable) &&
-    identical(l$host, Sys.info()[["nodename"]]) && identical(as.integer(l$pid), Sys.getpid())
+    identical(l$host, Sys.info()[["nodename"]]) && identical(suppressWarnings(as.integer(l$pid)), Sys.getpid())
 }
 
 # The previous lock's fields as an audit detail.
@@ -145,6 +154,8 @@ sr_project_paths <- function(dir) {
 #'
 #' @return list(paths, meta, state, readonly = FALSE)
 sr_project_create <- function(dir, name, profile = sr_profile(), mode = sr_mode()) {
+  force(profile)  # evaluate the lazy defaults first: a bad SR_MODE / missing profile must not leave debris
+  force(mode)
   if (!is.character(name) || length(name) != 1L || is.na(name) || !nzchar(name)) {
     stop("name must be a single non-empty string", call. = FALSE)
   }
@@ -152,9 +163,13 @@ sr_project_create <- function(dir, name, profile = sr_profile(), mode = sr_mode(
   if (dir.exists(dir) && length(list.files(dir, all.files = TRUE, no.. = TRUE))) {
     stop("project directory is not empty: ", dir, call. = FALSE)
   }
-  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+  if (!dir.exists(dir) && !isTRUE(dir.create(dir, showWarnings = FALSE, recursive = TRUE))) {
+    stop("cannot create project directory: ", dir, call. = FALSE)
+  }
   paths <- sr_project_paths(dir)
-  for (d in c(paths$data, paths$fits, paths$out)) dir.create(d, showWarnings = FALSE)
+  for (d in c(paths$data, paths$fits, paths$out)) {
+    if (!isTRUE(dir.create(d, showWarnings = FALSE))) stop("cannot create ", basename(d), "/ in ", dir, call. = FALSE)
+  }
 
   meta <- list(schema_version = SR_SCHEMA_VERSION, id = .sr_uuid4(), name = name,
                created = .sr_now(), profile = profile, mode = mode)
