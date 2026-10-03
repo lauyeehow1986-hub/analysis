@@ -397,3 +397,23 @@ test_that("tools/lint.R exits 2 on a missing directory or a directory with no R 
   expect_identical(r$status, 2L)
   expect_false(any(grepl("LINT OK", r$out, fixed = TRUE)))
 })
+
+# ---- fix round 2: long emitted-code strings ---------------------------------------------------
+
+test_that("p-gate sees the full text of a string longer than 1000 characters", {
+  pad <- strrep("a", 1200)
+  r <- .pg(c(
+    'compile <- function(spec) {',
+    paste0('  tpl <- "', pad, ' if (shapiro.test(x)$p.value < .05) wilcox.test(x) else t.test(x)"'),
+    '  tpl',
+    '}'
+  ))
+  expect_identical(r$line, 2L)
+  r <- .pg(c(
+    'compile <- function(spec) {',
+    paste0('  tpl <- "', pad, ' cox.zph(fit)"'),
+    '  tpl',
+    '}'
+  ))
+  expect_identical(nrow(r), 0L)
+})

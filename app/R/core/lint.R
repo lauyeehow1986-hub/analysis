@@ -32,6 +32,11 @@
     txt <- sub(intToUtf8(0xFEFFL), "", txt, fixed = TRUE)
     txt <- gsub(intToUtf8(13L), "", txt, fixed = TRUE)
     pd <- utils::getParseData(parse(text = txt, keep.source = TRUE), includeText = NA)
+    if (!is.null(pd) && nrow(pd)) {
+      # getParseData abbreviates string tokens over ~1000 chars; restore their full text
+      long <- pd$token == "STR_CONST" & startsWith(pd$text, "[") & grepl(" chars quoted", pd$text, fixed = TRUE)
+      if (any(long)) pd$text[long] <- utils::getParseText(pd, pd$id[long])
+    }
     if (is.null(pd) || !nrow(pd)) {
       pd <- data.frame(id = integer(), parent = integer(), token = character(), text = character(),
                        line1 = integer(), col1 = integer(), line2 = integer(), col2 = integer(),
