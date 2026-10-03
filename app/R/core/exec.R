@@ -66,6 +66,9 @@ sr_streams <- function(seed, n) {
       (is.null(nms) || anyNA(nms) || any(!nzchar(nms)) || anyDuplicated(nms) > 0L))) {
     stop("inputs must be a list whose elements all have unique, non-empty names", call. = FALSE)
   }
+  if (length(inputs) > 0L && any(startsWith(nms, ".sr_"))) {
+    stop("inputs names must not start with \".sr_\" (reserved for the runner)", call. = FALSE)
+  }
   if (!is.numeric(timeout) || length(timeout) != 1L || !is.finite(timeout) || timeout <= 0) {
     stop("timeout must be a single positive number of seconds", call. = FALSE)
   }
@@ -79,17 +82,25 @@ sr_streams <- function(seed, n) {
 sr_exec <- function(code, inputs = list(), seed, timeout = 3600) {
   .sr_check_exec_args(code, inputs, seed, timeout)
   code_run <- paste(sr_rng_preamble(seed), code, sep = "\n")
-  worker <- function(code, inputs) {
-    list2env(inputs, environment())
-    eval(parse(text = code))
+  # Inputs live in their own environment under the global env, so no input name (code, eval,
+  # parse, c, ...) can shadow what the worker itself uses. The result is wrapped so a worker that
+  # quit before finishing (even with status 0) cannot pass for a value of NULL.
+  worker <- function(.sr_code, .sr_inputs) {
+    env <- list2env(.sr_inputs, parent = globalenv())
+    list(.sr_done = TRUE, value = eval(parse(text = .sr_code), envir = env))
   }
+  environment(worker) <- globalenv()
   t0 <- proc.time()[["elapsed"]]
-  res <- tryCatch(
-    list(ok = TRUE, value = callr::r(worker, args = list(code = code_run, inputs = inputs),
-                                     timeout = timeout, user_profile = FALSE,
-                                     libpath = .libPaths(), show = FALSE)),
-    error = function(e) list(ok = FALSE, error = .sr_exec_error_text(e, timeout))
-  )
+  res <- tryCatch({
+    out <- callr::r(worker, args = list(.sr_code = code_run, .sr_inputs = inputs),
+                    timeout = timeout, user_profile = FALSE, libpath = .libPaths(),
+                    wd = tempdir(), show = FALSE)
+    if (is.list(out) && isTRUE(out$.sr_done)) {
+      list(ok = TRUE, value = out$value)
+    } else {
+      list(ok = FALSE, error = "worker exited before completing")
+    }
+  }, error = function(e) list(ok = FALSE, error = .sr_exec_error_text(e, timeout)))
   elapsed <- as.numeric(proc.time()[["elapsed"]] - t0)
   list(ok = res$ok, value = if (res$ok) res$value else NULL,
        error = if (res$ok) NA_character_ else res$error,
@@ -114,32 +125,39 @@ sr_exec <- function(code, inputs = list(), seed, timeout = 3600) {
   m
 }
 
-# A stored result is a hit only if it is a successful sr_exec list for exactly this code.
-.sr_cache_read <- function(path, code_run) {
+# Hash of the inputs as the worker receives them (serialisation version pinned).
+.sr_inputs_hash <- function(inputs) .sr_sha256(serialize(inputs, NULL, version = 3))
+
+# A stored result is a hit only if it is a successful sr_exec list for exactly this code and
+# these inputs. The inputs_hash field is cache bookkeeping and is not returned.
+.sr_cache_read <- function(path, code_run, inputs_hash) {
   if (!file.exists(path)) return(NULL)
   stored <- tryCatch(suppressWarnings(readRDS(path)), error = function(e) NULL)
   need <- c("ok", "value", "error", "elapsed", "code_run")
   if (!is.list(stored) || !all(need %in% names(stored))) return(NULL)
   if (!isTRUE(stored$ok) || !is.character(stored$code_run) ||
       !identical(stored$code_run, code_run)) return(NULL)
+  if (!is.character(stored$inputs_hash) || !identical(stored$inputs_hash, inputs_hash)) return(NULL)
   stored[need]
 }
 
 # Atomic write (temp file in the same folder, then rename). Failure is silent: the cache is
 # only a speed-up.
 .sr_cache_write <- function(dir, key_hash, result) {
-  tryCatch({
+  tmp <- tempfile(pattern = paste0(key_hash, "-"), tmpdir = dir, fileext = ".tmp")
+  ok <- tryCatch({
     if (!dir.exists(dir)) dir.create(dir, recursive = TRUE)
-    tmp <- tempfile(pattern = paste0(key_hash, "-"), tmpdir = dir, fileext = ".tmp")
     saveRDS(result, tmp)
-    if (!file.rename(tmp, file.path(dir, paste0(key_hash, ".rds")))) unlink(tmp)
-  }, error = function(e) NULL)
+    suppressWarnings(file.rename(tmp, file.path(dir, paste0(key_hash, ".rds"))))
+  }, error = function(e) FALSE, warning = function(w) FALSE)
+  if (!isTRUE(ok)) unlink(tmp)
   invisible(NULL)
 }
 
 #' sr_exec behind the project's fits/ cache. A hit needs fits/<key_hash>.rds to be readable and
-#' to hold the same code_run; otherwise the code runs and an ok result replaces the file (never in
-#' a read-only project). Returns the sr_exec list plus `cached`. `...` goes to sr_exec.
+#' to hold the same code_run and inputs hash; otherwise the code runs and an ok result replaces
+#' the file (never in a read-only project). Returns the sr_exec list plus `cached` (the stored
+#' inputs_hash is not returned). `...` goes to sr_exec.
 sr_exec_cached <- function(project, key_hash, code, inputs = list(), seed, ...) {
   if (!is.character(key_hash) || length(key_hash) != 1L || is.na(key_hash) ||
       !grepl("^[0-9a-f]{64}$", key_hash)) {
@@ -149,9 +167,12 @@ sr_exec_cached <- function(project, key_hash, code, inputs = list(), seed, ...) 
   .sr_check_exec_args(code, inputs, seed, if ("timeout" %in% names(dots)) dots$timeout else 3600)
   fits <- project$paths$fits
   code_run <- paste(sr_rng_preamble(seed), code, sep = "\n")
-  hit <- .sr_cache_read(file.path(fits, paste0(key_hash, ".rds")), code_run)
+  inputs_hash <- .sr_inputs_hash(inputs)
+  hit <- .sr_cache_read(file.path(fits, paste0(key_hash, ".rds")), code_run, inputs_hash)
   if (!is.null(hit)) return(c(hit, list(cached = TRUE)))
   res <- sr_exec(code, inputs, seed, ...)
-  if (isTRUE(res$ok) && !isTRUE(project$readonly)) .sr_cache_write(fits, key_hash, res)
+  if (isTRUE(res$ok) && !isTRUE(project$readonly)) {
+    .sr_cache_write(fits, key_hash, c(res, list(inputs_hash = inputs_hash)))
+  }
   c(res, list(cached = FALSE))
 }

@@ -265,3 +265,88 @@ test_that("a read-only project reads hits but never writes to fits/", {
   expect_false(other$cached)
   expect_equal(readRDS(file.path(p$paths$fits, paste0(k, ".rds")))$value, 11)
 })
+
+test_that("input names cannot hijack execution (code, inputs, eval, parse, c)", {
+  base <- sr_exec("c(sum(x), runif(1))", inputs = list(x = 1:3), seed = 5)
+  expect_true(base$ok)
+  expect_equal(base$value[1], 6)
+  r <- sr_exec("sum(x)", inputs = list(code = "1+1", x = 1:3), seed = 1)
+  expect_true(r$ok)
+  expect_equal(r$value, 6L)
+  expect_identical(r$code_run, paste(sr_rng_preamble(1), "sum(x)", sep = "\n"))
+  # the seeded draw is unchanged by an input named code
+  r2 <- sr_exec("c(sum(x), runif(1))", inputs = list(code = "1+1", x = 1:3), seed = 5)
+  expect_identical(r2$value, base$value)
+  r3 <- sr_exec("length(inputs)", inputs = list(inputs = 1:7), seed = 1)
+  expect_equal(r3$value, 7L)
+  r4 <- sr_exec("sum(x)", inputs = list(eval = function(...) 99, parse = 1, c = 2, x = 1:3),
+                seed = 1)
+  expect_true(r4$ok)
+  expect_equal(r4$value, 6L)
+  expect_error(sr_exec("1", inputs = list(.sr_x = 1), seed = 1), "inputs")
+  expect_error(sr_exec("1", inputs = list(.sr_code = 1), seed = 1), "inputs")
+})
+
+test_that("a zero-status quit is a failure, never cached; a NULL value is a success", {
+  for (code in c("quit(status = 0)", "q('no')")) {
+    r <- sr_exec(code, seed = 1)
+    expect_false(r$ok)
+    expect_identical(r$error, "worker exited before completing")
+    expect_null(r$value)
+  }
+  p <- new_proj()
+  c1 <- sr_exec_cached(p, key("q"), "quit(status = 0)", list(), 1)
+  expect_false(c1$ok)
+  expect_identical(rds_files(p), character(0))
+  n <- sr_exec("NULL", seed = 1)
+  expect_true(n$ok)
+  expect_null(n$value)
+  expect_true("value" %in% names(n))
+  n2 <- sr_exec_cached(p, key("null"), "invisible(NULL)", list(), 1)
+  expect_true(n2$ok)
+  expect_true(sr_exec_cached(p, key("null"), "invisible(NULL)", list(), 1)$cached)
+})
+
+test_that("the worker runs in the session temp dir, not the caller's working directory", {
+  r <- sr_exec("getwd()", seed = 1)
+  expect_true(r$ok)
+  expect_false(identical(normalizePath(r$value, winslash = "/"),
+                         normalizePath(getwd(), winslash = "/")))
+})
+
+test_that("the cache also keys on the inputs", {
+  p <- new_proj()
+  k <- key("inputs")
+  a <- sr_exec_cached(p, k, "sum(x)", list(x = 1:3), 1)
+  expect_equal(a$value, 6L)
+  expect_true(sr_exec_cached(p, k, "sum(x)", list(x = 1:3), 1)$cached)
+  b <- sr_exec_cached(p, k, "sum(x)", list(x = 1:4), 1)
+  expect_false(b$cached)
+  expect_equal(b$value, 10L)
+  expect_equal(readRDS(file.path(p$paths$fits, paste0(k, ".rds")))$value, 10L)
+  expect_true(sr_exec_cached(p, k, "sum(x)", list(x = 1:4), 1)$cached)
+  # the stored entry from before the inputs hash existed is a miss
+  old <- b[c("ok", "value", "error", "elapsed", "code_run")]
+  saveRDS(old, file.path(p$paths$fits, paste0(k, ".rds")))
+  expect_false(sr_exec_cached(p, k, "sum(x)", list(x = 1:4), 1)$cached)
+  # the hit has the same fields as a fresh run (plus cached)
+  expect_identical(sort(names(sr_exec_cached(p, k, "sum(x)", list(x = 1:4), 1))),
+                   sort(c(names(old), "cached")))
+})
+
+test_that("a failed cache write leaves no temp file and no warning, even under warn = 2", {
+  p <- new_proj()
+  k <- key("w")
+  res <- sr_exec("1", seed = 1)
+  # the target name is an existing directory, so the rename fails
+  dir.create(file.path(p$paths$fits, paste0(k, ".rds")))
+  old <- options(warn = 2)
+  on.exit(options(old), add = TRUE)
+  expect_no_warning(.sr_cache_write(p$paths$fits, k, res))
+  # the folder cannot be created (its parent is a file): also silent
+  blocker <- file.path(p$paths$fits, "blocker")
+  writeLines("x", blocker)
+  expect_no_warning(.sr_cache_write(file.path(blocker, "sub"), k, res))
+  options(old)
+  expect_identical(list.files(p$paths$fits, pattern = "[.]tmp$"), character(0))
+})
