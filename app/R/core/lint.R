@@ -285,8 +285,12 @@ sr_lint_pgate <- function(file) {
   "update.packages", "install_miniconda", "conda_install", "virtualenv_create", "virtualenv_install",
   "font_google", "font_link"
 )
+# jsonlite::fromJSON / read_json fetch a non-JSON string that looks like a URL and read one that names
+# a file, so text read from disk could trigger a fetch: app code parses with jsonlite::parse_json.
+.sr_lint_json_calls <- c("fromJSON", "read_json")
 # names flagged even when only referenced (lapply(u, download.file)); url stays call-only
-.sr_lint_net_refs <- c("download.file", "install.packages", "socketConnection", "py_install")
+.sr_lint_net_refs <- c("download.file", "install.packages", "socketConnection", "py_install",
+                       .sr_lint_json_calls)
 .sr_lint_net_pkgs <- c("curl", "httr", "httr2", "RCurl", "remotes", "pak")
 .sr_lint_lib_pkgs <- c("curl", "httr", "httr2", "RCurl")
 .sr_lint_lib_calls <- c("library", "require", "requireNamespace", "loadNamespace", "attachNamespace")
@@ -349,15 +353,19 @@ sr_lint_airgap <- function(files, allow = "app/R/router/backends/jev.R") {
       add(id, sprintf("network call: %s::%s (air-gap)", pd[as.character(id), "text"], fn))
     }
 
+    json_msg <- "network %s: %s (fetches URLs, reads files; use jsonlite::parse_json) (air-gap)"
+
     # bare references: lapply(u, download.file), dl <- download.file
     for (id in pd$id[pd$token == "SYMBOL" & pd$text %in% .sr_lint_net_refs]) {
       x <- ctx(id)
       if (accessed(x) || net_qualified(x)) next
-      add(id, sprintf("network reference: %s (air-gap)", pd[as.character(id), "text"]))
+      nm <- pd[as.character(id), "text"]
+      add(id, if (nm %in% .sr_lint_json_calls) sprintf(json_msg, "reference", nm)
+              else sprintf("network reference: %s (air-gap)", nm))
     }
 
     # calls
-    watched <- c(.sr_lint_net_calls, "py_available", "options", .sr_lint_lib_calls)
+    watched <- c(.sr_lint_net_calls, .sr_lint_json_calls, "py_available", "options", .sr_lint_lib_calls)
     for (id in pd$id[pd$token == "SYMBOL_FUNCTION_CALL" & pd$text %in% watched]) {
       nm <- pd[as.character(id), "text"]
       x <- ctx(id)
@@ -367,6 +375,8 @@ sr_lint_airgap <- function(files, allow = "app/R/router/backends/jev.R") {
       nms <- vapply(args, function(a) a$name, character(1))
       if (nm %in% .sr_lint_net_calls) {
         add(id, sprintf("network call: %s (air-gap)", nm))
+      } else if (nm %in% .sr_lint_json_calls) {
+        add(id, sprintf(json_msg, "call", nm))
       } else if (nm %in% .sr_lint_lib_calls) {
         pick <- if ("package" %in% nms) match("package", nms) else match("", nms)
         if (!is.na(pick)) {

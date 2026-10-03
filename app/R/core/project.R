@@ -30,7 +30,7 @@ sr_schema_migrations <- list()
 .sr_read_json_file <- function(path) {
   txt <- rawToChar(readBin(path, "raw", n = file.size(path)))
   Encoding(txt) <- "UTF-8"
-  jsonlite::fromJSON(txt, simplifyVector = FALSE)
+  .sr_parse_json(txt)
 }
 
 # RFC 4122 version-4 UUID from the OS entropy source via openssl.

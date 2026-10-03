@@ -22,7 +22,7 @@
 
 # Parse one log line; NULL when it is not a well-formed entry.
 .sr_audit_parse <- function(line) {
-  e <- tryCatch(jsonlite::fromJSON(line, simplifyVector = FALSE), error = function(err) NULL)
+  e <- tryCatch(.sr_parse_json(line), error = function(err) NULL)
   if (!is.list(e)) return(NULL)
   # Exactly these keys in this order: extra or duplicated keys are tampering (parsers disagree on them).
   need <- c("ts", "action", "actor", "detail", "prev_hash", "hash")

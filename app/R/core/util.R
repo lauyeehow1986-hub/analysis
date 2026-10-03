@@ -26,6 +26,11 @@ sr_mode <- function() {
   as.character(jsonlite::toJSON(x, auto_unbox = TRUE, digits = NA, null = "null", na = "null"))
 }
 
+#' Parse one JSON text into lists (simplifyVector = FALSE: arrays stay lists, null stays NULL).
+#' Never use jsonlite::fromJSON / read_json on text read from disk: when the text is not valid JSON
+#' they fetch it as a URL (https?://...) or read it as a file path. parse_json() only parses.
+.sr_parse_json <- function(txt) jsonlite::parse_json(txt, simplifyVector = FALSE)
+
 #' Lowercase hex SHA-256 of a character string (UTF-8) or a raw vector.
 .sr_sha256 <- function(x) {
   if (is.character(x)) x <- charToRaw(enc2utf8(paste(x, collapse = "")))

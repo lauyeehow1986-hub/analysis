@@ -417,3 +417,21 @@ test_that("p-gate sees the full text of a string longer than 1000 characters", {
   ))
   expect_identical(nrow(r), 0L)
 })
+
+# ---- final review I2: jsonlite::fromJSON / read_json fetch URLs and read files ----------------
+
+test_that("air-gap flags fromJSON and read_json (URL / file overloading) but not parse_json", {
+  r <- .ag(c(
+    'e <- jsonlite::fromJSON(line, simplifyVector = FALSE)',
+    'fromJSON(x)',
+    'jsonlite::read_json(p)',
+    'lapply(lines, jsonlite::fromJSON)',
+    'jsonlite::parse_json(x, simplifyVector = FALSE)',
+    'jsonlite::toJSON(x)',
+    'jsonlite::validate(x)',
+    'x$fromJSON(y)'
+  ))
+  expect_identical(r$line, 1:4)
+  expect_true(all(grepl("parse_json", r$msg, fixed = TRUE)))
+  expect_true(all(grepl("air-gap", r$msg, fixed = TRUE)))
+})

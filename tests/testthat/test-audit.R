@@ -151,3 +151,35 @@ test_that("a duplicated key in an entry is a break at that line", {
   expect_false(v$ok)
   expect_equal(v$broken_at, 2L)
 })
+
+# ---- final review I2: a log line is parsed as JSON text only, never fetched or read as a file -----
+
+test_that("an audit line holding a URL is a break and is never fetched (I2)", {
+  p <- new_log()
+  append3(p)
+  marker <- "https://example.invalid/beacon.json"
+  ln <- read_raw_lines(p)
+  ln[2] <- marker
+  write_raw_lines(ln, p)
+  spy <- local_fetch_spy(marker)
+  v <- sr_audit_verify(p)
+  expect_false(v$ok)
+  expect_equal(v$broken_at, 2L)
+  expect_error(sr_audit_read(p), "line 2")
+  expect_identical(spy$calls, character())
+})
+
+test_that("an audit line naming an existing file is a break and the file is never read (I2)", {
+  p <- new_log()
+  sr_audit_append(p, "open", "alice", list(file = "a.csv"))
+  # a decoy file holding the genuine entry: reading it would make the log verify
+  decoy <- file.path(dirname(p), "entry.json")
+  writeBin(charToRaw(paste0(read_raw_lines(p)[1], "\n")), decoy)
+  writeBin(charToRaw(paste0(decoy, "\n")), p)
+  spy <- local_fetch_spy(decoy)
+  v <- sr_audit_verify(p)
+  expect_false(v$ok)
+  expect_equal(v$broken_at, 1L)
+  expect_error(sr_audit_tip(p), "not a valid entry")
+  expect_identical(spy$calls, character())
+})

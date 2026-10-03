@@ -341,3 +341,35 @@ test_that("a failing create leaves no debris, so a retry works", {
   expect_false(p$readonly)
   sr_project_close(p)
 })
+
+# ---- final review I2: project.json and .lock are parsed as JSON text only ------------------------
+
+test_that("a .lock naming a file or a URL is unreadable and is never read or fetched (I2)", {
+  d <- new_dir()
+  p <- make_closed(d)
+  # a decoy holding a live foreign lock: reading it would make the open read-only
+  decoy <- file.path(dirname(d), "decoy.json")
+  .sr_write_json_file(decoy, list(host = "OTHERHOST", pid = 1L, user = "x", ts = "2026-01-01T00:00:00.000Z"))
+  marker <- "https://example.invalid/lock.json"
+  spy <- local_fetch_spy(c(decoy, marker))
+  writeBin(charToRaw(decoy), p$paths$lock)
+  expect_true(isTRUE(.sr_lock_read(p$paths$lock)$unreadable))
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_true("lock.takeover" %in% audit_actions(q$paths))
+  sr_project_close(q)
+
+  writeBin(charToRaw(marker), p$paths$lock)
+  expect_true(isTRUE(.sr_lock_read(p$paths$lock)$unreadable))
+  expect_identical(spy$calls, character())
+})
+
+test_that("a project.json holding a URL fails to open and is never fetched (I2)", {
+  d <- new_dir()
+  p <- make_closed(d)
+  marker <- "https://example.invalid/project.json"
+  writeBin(charToRaw(marker), p$paths$json)
+  spy <- local_fetch_spy(marker)
+  expect_error(sr_project_open(d))
+  expect_identical(spy$calls, character())
+})

@@ -60,7 +60,7 @@ sr_events_read <- function(events_path) {
   for (i in seq_len(n)) {
     ln <- parts$lines[i]
     e <- if (isTRUE(jsonlite::validate(ln))) {
-      tryCatch(jsonlite::fromJSON(ln, simplifyVector = FALSE), error = function(err) NULL)
+      tryCatch(.sr_parse_json(ln), error = function(err) NULL)
     } else NULL
     if (!is.list(e) || is.null(names(e)) || !is.numeric(e$seq) || !is.character(e$type)) {
       stop("corrupt events.jsonl at line ", i, call. = FALSE)
@@ -95,7 +95,7 @@ sr_event_append <- function(events_path, audit_path, type, payload = list(),
   line <- .sr_json(list(seq = seq, ts = .sr_now(), type = type, actor = actor, payload = payload))
   .sr_write_lines_append(events_path, line)
   # Return the event as a re-read parses it (NA -> NULL, vectors -> lists), so live folding == replay.
-  event <- jsonlite::fromJSON(line, simplifyVector = FALSE)
+  event <- .sr_parse_json(line)
   sr_audit_append(audit_path, paste0("event:", type), actor,
                   list(seq = seq, payload_sha = .sr_sha256(.sr_json(payload))))
   event
