@@ -25,7 +25,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
 # files (and Task 12 appends R/ui/*.R).
 .sr_core_files <- c(
   "core/util", "core/audit", "core/events", "core/project", "core/hardware",
-  "core/libsnap", "core/hash", "core/exec", "design/spec", "design/compose",
+  "core/libsnap", "core/hash", "core/lint", "core/exec", "design/spec", "design/compose",
   "writer/numfmt"
 )
 
