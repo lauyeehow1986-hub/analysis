@@ -41,3 +41,47 @@ test_that(".sr_write_lines_append appends LF-terminated lines", {
   expect_identical(b[length(b)], as.raw(0x0A))
   expect_identical(readLines(p), c("first", "second"))
 })
+
+# ---- final review M1: whole-file rewrites go through <path>.tmp + rename --------------------------
+
+test_that(".sr_write_atomic writes or replaces a file through <path>.tmp and leaves no .tmp", {
+  d <- withr::local_tempdir()
+  p <- file.path(d, "f.txt")
+  spy <- local_rename_spy()
+  .sr_write_atomic(p, charToRaw("one"))
+  expect_identical(readBin(p, "raw", 100), charToRaw("one"))
+  .sr_write_atomic(p, charToRaw("two!"))
+  expect_identical(readBin(p, "raw", 100), charToRaw("two!"))
+  .sr_write_atomic(p, raw(0))
+  expect_identical(file.size(p), 0)
+  expect_identical(spy$to, rep(normalizePath(p, winslash = "/", mustWork = FALSE), 3L))
+  expect_identical(list.files(d, all.files = TRUE, no.. = TRUE), "f.txt")
+})
+
+test_that(".sr_write_atomic stops, removes its .tmp and leaves the target alone when it cannot replace", {
+  d <- withr::local_tempdir()
+  target <- file.path(d, "busy")
+  dir.create(target)                         # a directory cannot be replaced by a file
+  writeLines("keep", file.path(target, "inside.txt"))
+  expect_error(.sr_write_atomic(target, charToRaw("x")), "cannot replace")
+  expect_false(file.exists(paste0(target, ".tmp")))
+  expect_true(dir.exists(target))
+  expect_identical(readLines(file.path(target, "inside.txt")), "keep")
+})
+
+test_that(".sr_truncate_tail cuts an unterminated tail atomically and returns it", {
+  d <- withr::local_tempdir()
+  p <- file.path(d, "log")
+  writeBin(charToRaw("a\nb\npartial"), p)
+  spy <- local_rename_spy()
+  tail <- .sr_truncate_tail(p)
+  expect_identical(tail, charToRaw("partial"))
+  expect_identical(readBin(p, "raw", 100), charToRaw("a\nb\n"))
+  expect_identical(.sr_truncate_tail(p), raw(0))            # nothing left to cut: no rewrite
+  expect_length(spy$to, 1L)
+  expect_identical(list.files(d, all.files = TRUE, no.. = TRUE), "log")
+  writeBin(charToRaw("no newline at all"), p)
+  expect_identical(.sr_truncate_tail(p), charToRaw("no newline at all"))
+  expect_identical(file.size(p), 0)
+  expect_identical(.sr_truncate_tail(file.path(d, "missing")), raw(0))
+})

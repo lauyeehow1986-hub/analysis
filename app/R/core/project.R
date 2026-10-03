@@ -20,10 +20,9 @@ sr_schema_migrations <- list()
 
 .sr_actor <- function() sr_opt("user", Sys.info()[["user"]])
 
-# Write `x` as one LF-terminated line of UTF-8 JSON.
+# Write `x` as one LF-terminated line of UTF-8 JSON, replacing the file atomically (<path>.tmp + rename).
 .sr_write_json_file <- function(path, x) {
-  writeBin(c(charToRaw(enc2utf8(.sr_json(x))), as.raw(0x0A)), path)
-  invisible(path)
+  .sr_write_atomic(path, c(charToRaw(enc2utf8(.sr_json(x))), as.raw(0x0A)))
 }
 
 # Read a JSON file written by .sr_write_json_file (UTF-8 regardless of the platform locale).

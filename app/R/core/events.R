@@ -28,33 +28,12 @@ sr_reducer_register <- function(type, fn) {
   get(type, envir = .sr_reducers, inherits = FALSE)
 }
 
-# Raw bytes of a file ("" -> raw(0) for a missing or empty file).
-.sr_events_bytes <- function(path) {
-  if (!file.exists(path) || file.size(path) == 0) return(raw(0))
-  readBin(path, "raw", n = file.size(path))
-}
-
-# Split bytes into LF-terminated lines (as UTF-8 strings) and the unterminated tail (raw, maybe empty).
-.sr_events_split <- function(bytes) {
-  lf <- which(bytes == as.raw(0x0A))
-  last <- if (length(lf)) lf[length(lf)] else 0L
-  starts <- c(1L, lf + 1L)[seq_along(lf)]
-  lines <- vapply(seq_along(lf), function(i) {
-    seg <- if (lf[i] > starts[i]) bytes[starts[i]:(lf[i] - 1L)] else raw(0)
-    out <- rawToChar(seg)
-    Encoding(out) <- "UTF-8"
-    out
-  }, character(1))
-  tail <- if (last < length(bytes)) bytes[(last + 1L):length(bytes)] else raw(0)
-  list(lines = lines, tail = tail, last_lf = last)
-}
-
 #' Read events.jsonl as a list of events (list(seq, ts, type, actor, payload)).
 #'
 #' A missing or empty file is `list()`. An unterminated final fragment (torn write) is dropped with a
 #' warning; a malformed line anywhere else is an error.
 sr_events_read <- function(events_path) {
-  parts <- .sr_events_split(.sr_events_bytes(events_path))
+  parts <- .sr_split_lf(.sr_read_bytes(events_path))
   n <- length(parts$lines)
   events <- vector("list", n)
   for (i in seq_len(n)) {
@@ -81,13 +60,10 @@ sr_event_append <- function(events_path, audit_path, type, payload = list(),
   if (!is.list(payload)) stop("payload must be a list", call. = FALSE)
   dir.create(dirname(events_path), showWarnings = FALSE, recursive = TRUE)
 
-  bytes <- .sr_events_bytes(events_path)
-  parts <- .sr_events_split(bytes)
-  if (length(parts$tail)) {
-    keep <- if (parts$last_lf > 0L) bytes[seq_len(parts$last_lf)] else raw(0)
-    writeBin(keep, events_path)
+  torn <- .sr_truncate_tail(events_path)
+  if (length(torn)) {
     sr_audit_append(audit_path, "events.repair", actor,
-                    list(removed_bytes = length(parts$tail), removed_sha = .sr_sha256(parts$tail)))
+                    list(removed_bytes = length(torn), removed_sha = .sr_sha256(torn)))
   }
 
   prior <- sr_events_read(events_path)

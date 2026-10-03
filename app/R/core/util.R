@@ -45,3 +45,56 @@ sr_mode <- function() {
   flush(con)
   invisible(path)
 }
+
+#' Raw bytes of a file (raw(0) for a missing or empty file).
+.sr_read_bytes <- function(path) {
+  if (!file.exists(path) || file.size(path) == 0) return(raw(0))
+  readBin(path, "raw", n = file.size(path))
+}
+
+#' Split bytes into LF-terminated lines (as UTF-8 strings) and the unterminated tail (raw, maybe
+#' empty). `last_lf` is the byte position of the last LF (0 when there is none).
+.sr_split_lf <- function(bytes) {
+  lf <- which(bytes == as.raw(0x0A))
+  last <- if (length(lf)) lf[length(lf)] else 0L
+  starts <- c(1L, lf + 1L)[seq_along(lf)]
+  lines <- vapply(seq_along(lf), function(i) {
+    seg <- if (lf[i] > starts[i]) bytes[starts[i]:(lf[i] - 1L)] else raw(0)
+    out <- rawToChar(seg)
+    Encoding(out) <- "UTF-8"
+    out
+  }, character(1))
+  tail <- if (last < length(bytes)) bytes[(last + 1L):length(bytes)] else raw(0)
+  list(lines = lines, tail = tail, last_lf = last)
+}
+
+#' Replace the whole content of `path` with `bytes` atomically: write "<path>.tmp" in the same
+#' directory, then rename it over `path`, so a crash leaves either the old or the new file, never a
+#' truncated one. On failure the .tmp is removed and the call stops; the target is left as it was.
+.sr_write_atomic <- function(path, bytes) {
+  tmp <- paste0(path, ".tmp")
+  ok <- tryCatch({
+    con <- file(tmp, "wb")
+    tryCatch({
+      writeBin(bytes, con)
+      flush(con)
+    }, finally = close(con))
+    isTRUE(suppressWarnings(file.rename(tmp, path)))
+  }, error = function(e) FALSE)
+  if (!ok) {
+    unlink(tmp)
+    stop("cannot replace ", basename(path), " (write to ", basename(tmp), " and rename failed)",
+         call. = FALSE)
+  }
+  invisible(path)
+}
+
+#' Cut an unterminated final fragment (a torn append: no trailing LF) off `path`, rewriting the file
+#' atomically. Returns the removed bytes, or raw(0) when the file is missing, empty or ends in LF.
+.sr_truncate_tail <- function(path) {
+  bytes <- .sr_read_bytes(path)
+  parts <- .sr_split_lf(bytes)
+  if (!length(parts$tail)) return(raw(0))
+  .sr_write_atomic(path, if (parts$last_lf > 0L) bytes[seq_len(parts$last_lf)] else raw(0))
+  parts$tail
+}

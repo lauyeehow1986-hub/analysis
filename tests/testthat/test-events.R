@@ -165,3 +165,18 @@ test_that("a valid-JSON final line without its LF is torn on read and repaired o
   expect_true("events.repair" %in% d$action)
   expect_true(sr_audit_verify(p$au)$ok)
 })
+
+# ---- final review M1: the torn-tail repair is an atomic rewrite ------------------------------------
+
+test_that("the events torn-tail repair goes through events.jsonl.tmp + rename and leaves no .tmp", {
+  p <- new_paths()
+  add_k(p, 1)
+  append_bytes(p$ev, charToRaw("{\"seq\":2,\"ty"))
+  spy <- local_rename_spy()
+  add_k(p, 2)
+  expect_true(normalizePath(p$ev, winslash = "/", mustWork = FALSE) %in% spy$to)
+  expect_false(file.exists(paste0(p$ev, ".tmp")))
+  ev <- sr_events_read(p$ev)
+  expect_equal(vapply(ev, function(e) e$seq, numeric(1)), 1:2)
+  expect_equal(sr_state_replay(ev)$n, 3)
+})

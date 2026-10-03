@@ -373,3 +373,15 @@ test_that("a project.json holding a URL fails to open and is never fetched (I2)"
   expect_error(sr_project_open(d))
   expect_identical(spy$calls, character())
 })
+
+# ---- final review M1: project.json and .lock are replaced atomically -------------------------------
+
+test_that("project.json and .lock writes go through <path>.tmp + rename and leave no .tmp", {
+  d <- new_dir()
+  spy <- local_rename_spy()
+  p <- sr_project_create(d, "demo", profile = "laptop")
+  expect_true(all(c(norm(p$paths$json), norm(p$paths$lock)) %in% spy$to))
+  expect_false(any(grepl("[.]tmp$", list.files(d, all.files = TRUE, recursive = TRUE))))
+  expect_equal(.sr_read_json_file(p$paths$json)$name, "demo")
+  sr_project_close(p)
+})

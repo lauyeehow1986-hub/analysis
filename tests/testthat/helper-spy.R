@@ -29,3 +29,14 @@ local_fetch_spy <- function(markers, env = parent.frame()) {
   }, envir = env)
   seen
 }
+
+# local_rename_spy() records the `to` argument of every base::file.rename call for the rest of the
+# calling test (the calls still run). Returns an environment whose `to` holds them.
+local_rename_spy <- function(env = parent.frame()) {
+  seen <- new.env(parent = emptyenv())
+  seen$to <- character()
+  rec <- function(x) seen$to <- c(seen$to, normalizePath(x, winslash = "/", mustWork = FALSE))
+  suppressMessages(trace("file.rename", tracer = bquote(.(rec)(to)), where = baseenv(), print = FALSE))
+  withr::defer(suppressMessages(untrace("file.rename", where = baseenv())), envir = env)
+  seen
+}
