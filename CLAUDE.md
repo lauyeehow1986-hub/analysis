@@ -89,5 +89,8 @@ docs/specs/ docs/roadmap.md
 - This is a standalone repo, decoupled from the stray `%USERPROFILE%\.git`.
   - `origin` = https://github.com/lauyeehow1986-hub/analysis (**PUBLIC**).
   - Check `git rev-parse --show-toplevel` before committing.
+  - **Never commit personal details:** no Windows/git usernames, emails, hostnames, absolute user
+    paths (`C:\Users\<name>`), keys or tokens in any file. Use placeholders such as
+    `%USERPROFILE%`, `<repo root>` or `<laptop-host>`. Grep the diff for them before every push.
 - `main` holds the specs and finished phases. Build each phase on a worktree branch.
 - **Ask before pushing** or starting a new phase.
