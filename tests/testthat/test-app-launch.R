@@ -3,11 +3,15 @@
 
 test_that("tools/run_app.R serves the StatRouter shell", {
   skip_on_cran()
+  skip_if_not_installed("processx")
+  skip_if_not_installed("curl")
+  skip_if_not_installed("withr")
   root <- normalizePath(testthat::test_path("../.."), winslash = "/")
   rscript <- file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
   out <- withr::local_tempfile(fileext = ".out")
   err <- withr::local_tempfile(fileext = ".err")
-  child <- processx::process$new(rscript, c("tools/run_app.R"), wd = root, stdout = out, stderr = err)
+  child <- processx::process$new(rscript, c("tools/run_app.R"), wd = root, stdout = out, stderr = err,
+                                 env = c("current", SR_PORT = "7790"))
   withr::defer(if (child$is_alive()) child$kill())
 
   fetch <- function() {
@@ -24,8 +28,12 @@ test_that("tools/run_app.R serves the StatRouter shell", {
   }
   info <- if (is.null(res)) paste(c(readLines(err, warn = FALSE), readLines(out, warn = FALSE)), collapse = "\n") else ""
   expect_false(is.null(res), info = info)
+  # The page must come from our own child, not a stale server already sitting on the port.
+  expect_true(child$is_alive(), info = paste(readLines(err, warn = FALSE), collapse = "\n"))
   expect_equal(res$status_code, 200L)
   body <- rawToChar(res$content)
   expect_match(body, "StatRouter", fixed = TRUE)
   expect_match(body, "Reviewer", fixed = TRUE)
+  expect_match(body, "no network", fixed = TRUE)
+  expect_match(body, "Coming in P1b-P1d", fixed = TRUE)
 })

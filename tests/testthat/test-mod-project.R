@@ -1,8 +1,5 @@
 # Tests for the project create/open module (ui/mod_project.R), driven through shiny::testServer.
 
-# testServer attaches shiny; do it up front so a "built under R x.y.z" version note is not a test warning.
-suppressWarnings(suppressPackageStartupMessages(library(shiny)))
-
 new_dir <- function() file.path(withr::local_tempdir(.local_envir = parent.frame()), "proj")
 
 # A closed project on disk, ready to be opened from the module.
@@ -69,6 +66,46 @@ test_that("the lock host label falls back to unknown host", {
   expect_identical(.sr_lock_host_label(p0$paths), "other-host")
   writeLines("not json", p0$paths$lock)
   expect_identical(.sr_lock_host_label(p0$paths), "unknown host")           # damaged lock
+})
+
+test_that("a pasted path is cleaned: surrounding quotes and spaces are removed", {
+  d <- new_dir()
+  shiny::testServer(mod_project_server, {
+    session$setInputs(dir = paste0("\"", d, "\""), name = "quoted", create = 1)  # "Copy as path"
+    p <- session$returned()
+    expect_equal(p$meta$name, "quoted")
+    expect_equal(p$paths$dir, normalizePath(d, winslash = "/", mustWork = FALSE))
+    expect_true(file.exists(file.path(d, "project.json")))
+    expect_match(output$status, p$paths$dir, fixed = TRUE)
+    sr_project_close(p)
+    session$setInputs(dir = paste0("  \"", d, "\"  "), open = 1)
+    expect_equal(session$returned()$meta$name, "quoted")
+    expect_false(session$returned()$readonly)
+    sr_project_close(session$returned())
+  })
+  d2 <- new_dir()
+  shiny::testServer(mod_project_server, {
+    session$setInputs(dir = paste0("   ", d2, "   "), name = "spaced", create = 1)
+    expect_equal(session$returned()$meta$name, "spaced")
+    expect_true(file.exists(file.path(d2, "project.json")))
+    sr_project_close(session$returned())
+    session$setInputs(dir = paste0("\t", d2, " "), open = 1)
+    expect_equal(session$returned()$meta$name, "spaced")
+    sr_project_close(session$returned())
+  })
+})
+
+test_that("a relative path is resolved against the working directory and shown in full", {
+  base <- withr::local_tempdir()
+  withr::local_dir(base)
+  shiny::testServer(mod_project_server, {
+    session$setInputs(dir = "rel_proj", name = "rel", create = 1)
+    p <- session$returned()
+    expect_true(file.exists(file.path(base, "rel_proj", "project.json")))
+    expect_equal(p$paths$dir, normalizePath(file.path(base, "rel_proj"), winslash = "/"))
+    expect_match(output$status, p$paths$dir, fixed = TRUE)
+    sr_project_close(p)
+  })
 })
 
 test_that("errors are shown in the status and do not crash or open anything", {

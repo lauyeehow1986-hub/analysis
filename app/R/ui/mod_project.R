@@ -92,10 +92,14 @@ mod_project_server <- function(id) {
       if (is.character(v) && length(v) == 1L && !is.na(v)) trimws(v) else ""
     }
 
+    # The folder path as typed or pasted: trimmed, one pair of surrounding double quotes removed
+    # (Windows "Copy as path" adds them), then made absolute (relative paths resolve against the
+    # process working directory, which is app/ under Shiny) so the status shows where it really is.
     dir_in <- function() {
       d <- text_in("dir")
+      if (nchar(d) >= 2L && startsWith(d, "\"") && endsWith(d, "\"")) d <- trimws(substr(d, 2L, nchar(d) - 1L))
       if (!nzchar(d)) stop("enter a project folder path", call. = FALSE)
-      path.expand(d)
+      normalizePath(path.expand(d), winslash = "/", mustWork = FALSE)
     }
 
     shiny::observeEvent(input$create, {

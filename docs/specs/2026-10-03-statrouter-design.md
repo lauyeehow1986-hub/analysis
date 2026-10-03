@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Status | Draft for review (approved plan, 2026-10-03) |
-| Repo | `%USERPROFILE%/Downloads/analysis` (standalone; `main` holds specs, build in worktrees) |
+| Repo | `<repo root>` (the `analysis` folder) (standalone; `main` holds specs, build in worktrees) |
 | Prefix | `sr_` |
 | Scope note | Research/governance tool; outputs require statistician review. Never commit real patient data — synthetic samples only. |
 
@@ -30,7 +30,7 @@ Two evidence-based design principles came out of the critical review:
 ### Decisions made with the user
 | Topic | Decision |
 |---|---|
-| Name / prefix | **StatRouter**, `sr_` (internal `.sr_`); repo/folder `%USERPROFILE%\Downloads\analysis` |
+| Name / prefix | **StatRouter**, `sr_` (internal `.sr_`); repo/folder `analysis` |
 | Router backends | All pluggable behind TypeSafe's `POST /v1/systemone` protocol: `rules` (always) · `jev` (cloud; user will get a key) · `local` (Von by default) · `clm` (Contrastive-LM, laptop GPU) |
 | Hardware switch | Profiles **`locked16`** (CPU-only 16 GB) ↔ **`laptop`** (i7-13650HX, 24 GB, RTX 4060 8 GB); auto-detected, overridable; caps workers, model tier and RAM use |
 | Modes | `airgap` (real data; no network ever) and `connected` (de-identified data; Jev with key + per-session consent + payload preview) |

@@ -48,7 +48,7 @@ M1 Global validity rules, Phases → P1, Verification.
   UTF-8 with `\n` line endings.
 - The time format is ISO-8601 UTC with milliseconds: `format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")`.
 - Synthetic data only. Tests write to `withr::local_tempdir()` (or `tempfile()`), never to the repo.
-- Work on branch `p1a-foundation` in a worktree of `%USERPROFILE%\Downloads\analysis`. Before any
+- Work on branch `p1a-foundation` in a worktree of `analysis`. Before any
   commit, check that `git rev-parse --show-toplevel` is that repo.
 
 ## Review Focus
