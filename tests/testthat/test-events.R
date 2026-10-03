@@ -180,3 +180,106 @@ test_that("the events torn-tail repair goes through events.jsonl.tmp + rename an
   expect_equal(vapply(ev, function(e) e$seq, numeric(1)), 1:2)
   expect_equal(sr_state_replay(ev)$n, 3)
 })
+
+# ---- final review I1: a torn or failed audit write never strands or duplicates events -------------
+
+seqs <- function(p) vapply(sr_events_read(p$ev), function(e) as.integer(e$seq), integer(1))
+
+test_that("a torn audit.log tail is repaired and audited; the append commits exactly one event (I1)", {
+  p <- new_paths()
+  add_k(p, 1)
+  add_k(p, 2)
+  add_k(p, 3)
+  # crash mid audit write: the last audit line (event 3's) lost its end and its LF
+  b <- read_bytes(p$au)
+  lf <- which(b == as.raw(0x0A))
+  cut <- lf[length(lf) - 1L] + 40L
+  writeBin(b[seq_len(cut)], p$au)
+  frag <- b[(lf[length(lf) - 1L] + 1L):cut]
+  expect_true(sr_audit_verify(p$au)$ok)            # the unterminated fragment is not an entry
+  expect_true(sr_audit_verify(p$au)$torn)
+  e4 <- add_k(p, 4)
+  expect_equal(e4$seq, 4L)
+  expect_identical(seqs(p), 1:4)
+  v <- sr_audit_verify(p$au)
+  expect_true(v$ok)
+  expect_false(v$torn)
+  d <- sr_audit_read(p$au)
+  i <- which(d$action == "audit.repair")
+  expect_length(i, 1L)
+  expect_equal(d$detail[[i]]$removed_bytes, length(frag))
+  expect_equal(d$detail[[i]]$removed_sha, .sr_sha256(frag))
+  expect_equal(d$action[length(d$action)], "event:counter.add")
+  expect_equal(sr_state_replay(sr_events_read(p$ev))$n, 10)
+  expect_false(file.exists(paste0(p$au, ".tmp")))
+})
+
+test_that("an audit.log that is only a fragment is truncated to empty and restarts the chain (I1)", {
+  p <- new_paths()
+  writeBin(charToRaw("{\"ts\":\"2026"), p$au)
+  e <- add_k(p, 1)
+  expect_equal(e$seq, 1L)
+  d <- sr_audit_read(p$au)
+  expect_equal(d$action, c("audit.repair", "event:counter.add"))
+  expect_equal(d$prev_hash[1], "GENESIS")
+  expect_true(sr_audit_verify(p$au)$ok)
+})
+
+test_that("a complete but invalid last audit line fails the append before the event is written (I1)", {
+  p <- new_paths()
+  add_k(p, 1)
+  add_k(p, 2)
+  append_bytes(p$au, charToRaw("not an entry\n"))
+  before <- read_bytes(p$ev)
+  expect_error(add_k(p, 3), "audit log is corrupt")
+  expect_error(add_k(p, 3), "audit log is corrupt")
+  expect_identical(read_bytes(p$ev), before)
+  expect_false(sr_audit_verify(p$au)$ok)            # tamper evidence: never repaired away
+})
+
+test_that("a failing audit append rolls the event line back; retries never duplicate (I1)", {
+  p <- new_paths()
+  add_k(p, 1)
+  add_k(p, 2)
+  before <- read_bytes(p$ev)
+  local({
+    local_failing_audit("^event:")
+    expect_error(add_k(p, 3), "simulated audit write failure")
+    expect_identical(read_bytes(p$ev), before)
+    expect_error(add_k(p, 3), "simulated audit write failure")
+    expect_identical(read_bytes(p$ev), before)
+  })
+  e <- add_k(p, 3)
+  expect_equal(e$seq, 3L)
+  expect_identical(seqs(p), 1:3)
+  expect_equal(sr_state_replay(sr_events_read(p$ev))$n, 6)
+  expect_true(sr_audit_verify(p$au)$ok)
+  expect_false(file.exists(paste0(p$ev, ".tmp")))
+})
+
+test_that("a torn audit write during an append rolls the event back; the next append repairs (I1)", {
+  p <- new_paths()
+  add_k(p, 1)
+  before <- read_bytes(p$ev)
+  local({
+    local_failing_audit("^event:", torn = TRUE)
+    expect_error(add_k(p, 2), "simulated audit write failure")
+  })
+  expect_identical(read_bytes(p$ev), before)
+  e <- add_k(p, 2)
+  expect_equal(e$seq, 2L)
+  expect_identical(seqs(p), 1:2)
+  d <- sr_audit_read(p$au)
+  expect_equal(d$action, c("event:counter.add", "audit.repair", "event:counter.add"))
+  expect_true(sr_audit_verify(p$au)$ok)
+})
+
+test_that("the first event's failed audit removes the events file it created (I1)", {
+  p <- new_paths()
+  local({
+    local_failing_audit("^event:")
+    expect_error(add_k(p, 1), "simulated audit write failure")
+  })
+  expect_false(file.exists(p$ev))
+  expect_equal(add_k(p, 1)$seq, 1L)
+})

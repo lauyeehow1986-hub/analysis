@@ -40,3 +40,24 @@ local_rename_spy <- function(env = parent.frame()) {
   withr::defer(suppressMessages(untrace("file.rename", where = baseenv())), envir = env)
   seen
 }
+
+# local_failing_audit(pattern) makes sr_audit_append fail, for the rest of the calling test, for
+# every action matching the regex `pattern` (other actions are written normally). With
+# `torn = TRUE` the failing call first writes the start of its line with no LF, as a crash mid
+# write would. The core is sourced into the global environment, so the mock is a rebinding there.
+local_failing_audit <- function(pattern, torn = FALSE, env = parent.frame()) {
+  real <- get("sr_audit_append", envir = globalenv())
+  assign("sr_audit_append", function(log_path, action, actor, detail = list()) {
+    if (grepl(pattern, action)) {
+      if (torn) {
+        con <- file(log_path, "ab")
+        writeBin(charToRaw(paste0("{\"ts\":\"2026-01-01T00:00:00.000Z\",\"action\":\"", action)), con)
+        close(con)
+      }
+      stop("simulated audit write failure", call. = FALSE)
+    }
+    real(log_path, action, actor, detail)
+  }, envir = globalenv())
+  withr::defer(assign("sr_audit_append", real, envir = globalenv()), envir = env)
+  invisible(real)
+}

@@ -129,22 +129,32 @@ sr_project_paths <- function(dir) {
        user = one(l$user, as.character), ts = one(l$ts, as.character))
 }
 
-# Decide and (if free) take the lock. Returns list(held, takeover): `takeover` is the previous lock's
-# detail when we replaced a stale, damaged or forced one, else NULL.
+# Decide and (if free) take the lock. Returns list(held, takeover, written, prev): `takeover` is the
+# previous lock's detail when we replaced a stale, damaged or forced one, else NULL; `written` is TRUE
+# when this call wrote the lock file, and `prev` is the bytes it replaced (NULL when there was none),
+# so a caller that fails afterwards can give the lock back (.sr_lock_restore).
 .sr_lock_acquire <- function(lock_path, force = FALSE) {
   cur <- .sr_lock_read(lock_path)
   if (is.null(cur)) {
     .sr_write_json_file(lock_path, .sr_lock_me())
-    return(list(held = TRUE, takeover = NULL))
+    return(list(held = TRUE, takeover = NULL, written = TRUE, prev = NULL))
   }
-  if (.sr_lock_is_mine(cur)) return(list(held = TRUE, takeover = NULL))
+  if (.sr_lock_is_mine(cur)) return(list(held = TRUE, takeover = NULL, written = FALSE, prev = NULL))
   stale <- isTRUE(cur$unreadable) ||
     (identical(cur$host, Sys.info()[["nodename"]]) && !.sr_pid_running(cur$pid))
   if (force || stale) {
+    prev <- .sr_read_bytes(lock_path)
     .sr_write_json_file(lock_path, .sr_lock_me())
-    return(list(held = TRUE, takeover = .sr_lock_detail(cur)))
+    return(list(held = TRUE, takeover = .sr_lock_detail(cur), written = TRUE, prev = prev))
   }
-  list(held = FALSE, takeover = NULL)
+  list(held = FALSE, takeover = NULL, written = FALSE, prev = NULL)
+}
+
+# Undo a .sr_lock_acquire() that wrote the lock: put the replaced lock back, or remove ours.
+.sr_lock_restore <- function(lock_path, lock) {
+  if (!isTRUE(lock$written)) return(invisible(FALSE))
+  if (is.null(lock$prev)) unlink(lock_path) else .sr_write_atomic(lock_path, lock$prev)
+  invisible(TRUE)
 }
 
 # ---- create / open / close / append ---------------------------------------------------------------
@@ -191,12 +201,23 @@ sr_project_open <- function(dir, force = FALSE) {
 
   lock <- .sr_lock_acquire(paths$lock, force = force)
   if (lock$held) {
-    if (!is.null(lock$takeover)) sr_audit_append(paths$audit, "lock.takeover", .sr_actor(), lock$takeover)
-    if (migrated) {
-      .sr_write_json_file(paths$json, meta)
-      sr_audit_append(paths$audit, "schema.migrated", .sr_actor(),
-                      list(from = as.integer(disk$schema_version), to = SR_SCHEMA_VERSION))
-    }
+    # If an audit write fails, give the lock back (and project.json, if migrated) before re-throwing,
+    # so a failed open never leaves this process holding a lock it does not know about.
+    json0 <- .sr_read_bytes(paths$json)
+    json_written <- FALSE
+    tryCatch({
+      if (!is.null(lock$takeover)) sr_audit_append(paths$audit, "lock.takeover", .sr_actor(), lock$takeover)
+      if (migrated) {
+        json_written <- TRUE
+        .sr_write_json_file(paths$json, meta)
+        sr_audit_append(paths$audit, "schema.migrated", .sr_actor(),
+                        list(from = as.integer(disk$schema_version), to = SR_SCHEMA_VERSION))
+      }
+    }, error = function(err) {
+      if (json_written) try(.sr_write_atomic(paths$json, json0), silent = TRUE)
+      try(.sr_lock_restore(paths$lock, lock), silent = TRUE)
+      stop(err)
+    })
   }
   list(paths = paths, meta = meta, state = state, readonly = !lock$held)
 }

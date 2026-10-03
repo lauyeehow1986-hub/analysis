@@ -385,3 +385,50 @@ test_that("project.json and .lock writes go through <path>.tmp + rename and leav
   expect_equal(.sr_read_json_file(p$paths$json)$name, "demo")
   sr_project_close(p)
 })
+
+# ---- final review I1: a failed audit write on open gives the lock (and project.json) back ---------
+
+test_that("a failing lock.takeover audit restores the previous lock and re-throws (I1)", {
+  d <- new_dir()
+  p <- make_closed(d)
+  write_lock(p$paths, this_host(), 999999L, user = "ghost")
+  stale <- readBin(p$paths$lock, "raw", n = file.size(p$paths$lock))
+  local({
+    local_failing_audit("^lock[.]takeover$")
+    expect_error(sr_project_open(d), "simulated audit write failure")
+  })
+  expect_identical(readBin(p$paths$lock, "raw", n = file.size(p$paths$lock)), stale)
+  expect_false(file.exists(paste0(p$paths$lock, ".tmp")))
+  q <- sr_project_open(d)                          # a retry takes the stale lock over normally
+  expect_false(q$readonly)
+  expect_true("lock.takeover" %in% audit_actions(q$paths))
+  sr_project_close(q)
+})
+
+test_that("a failing schema.migrated audit releases the new lock and restores project.json (I1)", {
+  fake <- list("0" = function(meta) {
+    meta$schema_version <- 1L
+    meta
+  })
+  env <- environment(.sr_migrate)
+  old <- get("sr_schema_migrations", envir = env)
+  assign("sr_schema_migrations", fake, envir = env)
+  withr::defer(assign("sr_schema_migrations", old, envir = env))
+
+  d <- new_dir()
+  p <- make_closed(d)
+  meta <- .sr_read_json_file(p$paths$json)
+  meta$schema_version <- 0L
+  .sr_write_json_file(p$paths$json, meta)
+  json0 <- readBin(p$paths$json, "raw", n = file.size(p$paths$json))
+  local({
+    local_failing_audit("^schema[.]migrated$")
+    expect_error(sr_project_open(d), "simulated audit write failure")
+  })
+  expect_false(file.exists(p$paths$lock))
+  expect_identical(readBin(p$paths$json, "raw", n = file.size(p$paths$json)), json0)
+  q <- sr_project_open(d)
+  expect_false(q$readonly)
+  expect_true("schema.migrated" %in% audit_actions(q$paths))
+  sr_project_close(q)
+})

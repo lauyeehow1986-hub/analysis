@@ -52,13 +52,16 @@ sr_events_read <- function(events_path) {
 
 #' Append one event; returns it. Errors if `type` has no reducer.
 #'
-#' Repairs a torn tail first (truncating back to the last LF and auditing "events.repair"), then
-#' writes the event line and audits "event:<type>".
+#' Order: fail early if the audit tip is unreadable; repair a torn events tail (truncating back to the
+#' last LF and auditing "events.repair"); write the event line; audit "event:<type>". If that audit
+#' write fails, events.jsonl is restored to its previous bytes before the error is re-thrown, so an
+#' event never stays committed without its audit entry and a retry never duplicates it.
 sr_event_append <- function(events_path, audit_path, type, payload = list(),
                             actor = sr_opt("user", Sys.info()[["user"]])) {
   .sr_reducer_get(type)
   if (!is.list(payload)) stop("payload must be a list", call. = FALSE)
   dir.create(dirname(events_path), showWarnings = FALSE, recursive = TRUE)
+  sr_audit_tip(audit_path)
 
   torn <- .sr_truncate_tail(events_path)
   if (length(torn)) {
@@ -66,15 +69,38 @@ sr_event_append <- function(events_path, audit_path, type, payload = list(),
                     list(removed_bytes = length(torn), removed_sha = .sr_sha256(torn)))
   }
 
+  existed <- file.exists(events_path)
+  before <- .sr_read_bytes(events_path)
   prior <- sr_events_read(events_path)
   seq <- if (length(prior)) as.integer(prior[[length(prior)]]$seq) + 1L else 1L
   line <- .sr_json(list(seq = seq, ts = .sr_now(), type = type, actor = actor, payload = payload))
   .sr_write_lines_append(events_path, line)
   # Return the event as a re-read parses it (NA -> NULL, vectors -> lists), so live folding == replay.
   event <- .sr_parse_json(line)
-  sr_audit_append(audit_path, paste0("event:", type), actor,
-                  list(seq = seq, payload_sha = .sr_sha256(.sr_json(payload))))
+  action <- paste0("event:", type)
+  tryCatch(
+    sr_audit_append(audit_path, action, actor,
+                    list(seq = seq, payload_sha = .sr_sha256(.sr_json(payload)))),
+    error = function(err) {
+      last <- tryCatch(.sr_audit_last(audit_path), error = function(e) NULL)
+      audited <- is.list(last) && identical(last$action, action) &&
+        identical(suppressWarnings(as.integer(last$detail$seq)), seq)
+      if (!audited) .sr_events_rollback(events_path, existed, before, err)
+      stop(err)
+    })
   event
+}
+
+# Put events.jsonl back as it was before an append whose audit entry could not be written.
+.sr_events_rollback <- function(events_path, existed, before, err) {
+  ok <- tryCatch({
+    if (existed) .sr_write_atomic(events_path, before) else unlink(events_path)
+    existed || !file.exists(events_path)
+  }, error = function(e) FALSE)
+  if (!ok) {
+    stop(conditionMessage(err), "; and events.jsonl could not be rolled back", call. = FALSE)
+  }
+  invisible(TRUE)
 }
 
 #' Fold `events` through their reducers in seq order, starting from `init`.
