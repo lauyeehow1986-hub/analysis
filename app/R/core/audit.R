@@ -24,9 +24,10 @@
 .sr_audit_parse <- function(line) {
   e <- tryCatch(jsonlite::fromJSON(line, simplifyVector = FALSE), error = function(err) NULL)
   if (!is.list(e)) return(NULL)
-  need <- c("ts", "action", "actor", "prev_hash", "hash")
-  if (!all(need %in% names(e)) || !"detail" %in% names(e)) return(NULL)
-  ok <- vapply(e[need], function(v) is.character(v) && length(v) == 1L && !is.na(v), logical(1))
+  # Exactly these keys in this order: extra or duplicated keys are tampering (parsers disagree on them).
+  need <- c("ts", "action", "actor", "detail", "prev_hash", "hash")
+  if (!identical(names(e), need)) return(NULL)
+  ok <- vapply(e[setdiff(need, "detail")],function(v) is.character(v) && length(v) == 1L && !is.na(v), logical(1))
   if (!all(ok)) return(NULL)
   e
 }

@@ -127,3 +127,27 @@ test_that("append creates missing parent directories and rejects a non-list deta
   expect_true(sr_audit_verify(p)$ok)
   expect_error(sr_audit_append(p, "open", "alice", detail = "text"))
 })
+
+test_that("an extra key injected into an entry is a break at that line", {
+  p <- new_log()
+  append3(p)
+  ln <- read_raw_lines(p)
+  ln[2] <- sub("}$", ",\"extra\":1}", ln[2])
+  expect_false(identical(ln[2], read_raw_lines(p)[2]))
+  write_raw_lines(ln, p)
+  v <- sr_audit_verify(p)
+  expect_false(v$ok)
+  expect_equal(v$broken_at, 2L)
+})
+
+test_that("a duplicated key in an entry is a break at that line", {
+  p <- new_log()
+  append3(p)
+  ln <- read_raw_lines(p)
+  ln[2] <- sub("\"actor\":\"alice\"", "\"actor\":\"alice\",\"actor\":\"evil\"", ln[2], fixed = TRUE)
+  expect_false(identical(ln[2], read_raw_lines(p)[2]))
+  write_raw_lines(ln, p)
+  v <- sr_audit_verify(p)
+  expect_false(v$ok)
+  expect_equal(v$broken_at, 2L)
+})
