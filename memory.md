@@ -9,12 +9,13 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | Design approved after 4 rounds of critique and research; spec committed (`docs/specs/2026-10-03-statrouter-design.md`) |
 | 2026-10-03 | Repo initialised and pushed to github.com/lauyeehow1986-hub/analysis (public) |
 | 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
+| 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. 2127 tests pass, `LINT OK` |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
 2. Execute P0 spike on the laptop, then the user runs `run_spike.bat` on the locked PC; record the go/no-go.
-3. Execute P1a in a worktree (branch `p1a-foundation`).
-4. Write the plans for P1b (data: import/DuckDB/profiling/DQ/suggestor), P1c (analysis routes), P1d (router + writer + freeze + UI).
+3. ~~Execute P1a in a worktree (branch `p1a-foundation`)~~ done 2026-10-03; review and merge the branch.
+4. Next: write the plans for P1b (data: import/DuckDB/profiling/DQ/suggestor), P1c (analysis routes) and P1d (router + writer + freeze + UI), then execute them in that order.
 
 ## Decisions (with the user)
 | Topic | Decision |
@@ -74,6 +75,15 @@ design; this file holds *what has happened* and *what we learned*.
   - There is no compiler, so use only precompiled packages (rstanarm, not brms).
   - There is no cairo/GTK, so use ragg/systemfonts with an Arial fallback.
   - No webshot, chromote or DiagrammeR PNG export.
+- **Shiny app.R + autoload off:** with `options(shiny.autoload.r = FALSE)` Shiny runs app.R with the
+  app dir as the working directory but does NOT source `global.R`; `app.R` sources it itself
+  (guarded by `exists("sr_root")`). `tools/run_app.R` also sets the option and serves 127.0.0.1 only.
+- **Tests that launch the app:** `testthat::test_dir` does not set `NOT_CRAN`, so `skip_on_cran()`
+  silently skips; `tools/run_tests.R` sets it. Poll the child with curl handles that bypass proxies
+  (`proxy = "", noproxy = "*"`), as a corporate proxy swallows loopback requests.
+- **Shiny sessions share one R process:** the project lock is per process (host + pid), so two
+  sessions opening the same project both get write access. Fine for the one-user desktop app.
+- **ASCII source and badges:** build the middle-dot separator with `intToUtf8(0xB7)`; never type it.
 - **Bundle dependency lists** must include the full transitive closure, or packages fail on the
   target machine.
 - **TLS on the dev laptop:** AVG Web-Shield can intercept HTTPS (MITM), and `uv` needs
