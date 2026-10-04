@@ -39,7 +39,7 @@ SR_SAMPLE_NOTES <- c("Uneventful recovery", "Mild post-op AF, resolved", "Delaye
     row("sex", "Sex", "categorical", levels = "F|M"),
     row("weight_kg", "Body weight", "numeric", "kg", "30", "250"),
     row("height_cm", "Body height", "numeric", "cm", "120", "220"),
-    row("bmi", "Body mass index", "numeric", "kg/m2", "12", "70"),
+    row("bmi", "Body mass index", "numeric", "kg/m2", "10", "70"),
     row("sbp", "Systolic blood pressure", "numeric", "mmHg", "60", "260"),
     row("creatinine_umol", "Serum creatinine", "numeric", "umol/L", "20", "1500"),
     row("hba1c_pct", "Glycated haemoglobin", "numeric", "%", "3", "18"),
@@ -56,7 +56,7 @@ SR_SAMPLE_NOTES <- c("Uneventful recovery", "Mild post-op AF, resolved", "Delaye
     row("followup_days", "Follow-up from surgery", "numeric", "days", "0", "4000"),
     row("notes", "Free-text clinical note", "text"),
     row("const_flag", "Registry flag", "categorical", levels = "Y|N"),
-    row("bmi_copy", "Second BMI measurement", "numeric", "kg/m2", "12", "70"),
+    row("bmi_copy", "Second BMI measurement", "numeric", "kg/m2", "10", "70"),
     row("lab_status", "Laboratory status", "categorical",
         levels = "normal|abnormal|repeat|deceased")
   ))
@@ -108,9 +108,16 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
   death_date <- as.Date(rep(NA_real_, n))
   death_date[dead] <- surgery_date[dead] + sample(1:30, sum(dead), replace = TRUE)
   discharge_date[dead] <- death_date[dead]
+  # Neither death_date nor followup_days may mirror the 30-day outcome: ~3% of survivors die later
+  # (death after day 30, mortality_30d stays 0) and ~4% of the rest are lost to follow-up before day 30.
+  late <- !dead & stats::rbinom(n, 1L, 0.03) == 1L
+  death_date[late] <- surgery_date[late] + sample(31:400, sum(late), replace = TRUE)
+  cens <- !dead & !late & stats::rbinom(n, 1L, 0.04) == 1L
   fu_cap <- as.integer(as.Date("2025-12-31") - surgery_date)
   followup_days <- pmin(sample(30:1500, n, replace = TRUE), fu_cap)
-  followup_days[dead] <- as.integer(death_date[dead] - surgery_date[dead])
+  followup_days[cens] <- sample(5:29, sum(cens), replace = TRUE)
+  has_death <- !is.na(death_date)
+  followup_days[has_death] <- as.integer(death_date[has_death] - surgery_date[has_death])
   followup_days <- as.integer(followup_days)
 
   statin <- stats::rbinom(n, 1L, stats::plogis(-0.9 + 0.8 * diabetes + 0.015 * (age - 64)))
@@ -120,7 +127,7 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
 
   notes <- sample(SR_SAMPLE_NOTES, n, replace = TRUE)
   const_flag <- sample(c("Y", "N"), n, replace = TRUE, prob = c(.6, .4))
-  bmi_copy <- round(stats::rnorm(n, 27, 4.5), 1)
+  bmi_copy <- clamp(round(stats::rnorm(n, 27, 4.5), 1), 15, 50)
   lab_status <- sample(c("normal", "abnormal", "repeat"), n, replace = TRUE, prob = c(.70, .20, .10))
 
   planted <- data.frame(check = character(), column = character(), rows_hint = character(),
@@ -178,6 +185,7 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
     lab_status[dead] <- "deceased"
     # dates
     discharge_date[r_order] <- admit_date[r_order] - sample(1:10, length(r_order), replace = TRUE)
+    # only surgery_date moves, so these rows also have surgery after discharge (and statin NA)
     surgery_date[fut_rows] <- as.Date("2099-01-01") + sample(0:300, length(fut_rows))
     statin_start_date[r_immortal] <- surgery_date[r_immortal] +
       sample(1:60, length(r_immortal), replace = TRUE)
@@ -192,7 +200,7 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
                  "const_flag", "notes", "bmi_copy", "lab_status", "glucose_mmol"),
       rows_hint = c(h(r_pending), h(r_levels), h(r_miss), h(r_age), h(r_lb), h(r_mgdl),
                     h(r_heap, paste0("n=", length(r_heap), " (rounded to a multiple of 10)")),
-                    h(r_order), h(fut_rows), h(r_immortal), h(dup_tgt), h(id_rows),
+                    h(r_order), h(fut_rows, paste0(h(fut_rows), "; surgery is also after discharge")), h(r_immortal), h(dup_tgt), h(id_rows),
                     h(r_nzv, paste0("n=", length(r_nzv), " minority rows")),
                     h(NULL, "all rows (unique suffix per note)"),
                     h(NULL, "all rows (bmi + N(0, 0.01))"),

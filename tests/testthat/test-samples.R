@@ -58,11 +58,52 @@ test_that("the clean twin has no planted defects", {
 
 test_that("the clean twin is the defect cohort before planting (same base draws)", {
   a <- sr_sample_cardiac(n = 600L, seed = 3L, defects = FALSE)$data
-  b <- sr_sample_cardiac(n = 600L, seed = 3L, defects = TRUE)$data
-  expect_identical(a$mortality_30d, b$mortality_30d)
-  # only the 5 rows overwritten by exact duplicates may differ
-  expect_lte(sum(a$bmi != b$bmi), 5L)
-  expect_lte(sum(a$age != b$age), 8L)  # 3 planted ages + the 5 overwritten rows
+  s <- sr_sample_cardiac(n = 600L, seed = 3L, defects = TRUE)
+  b <- s$data
+  hint <- s$planted$rows_hint[s$planted$check == "dup_rows"]
+  dup <- as.integer(strsplit(sub("^.*rows ", "", hint), ",", fixed = TRUE)[[1]])
+  expect_length(dup, 5L)
+  # every column no defect touches is identical, except on the 5 rows overwritten by duplicates
+  untouched <- setdiff(names(a), s$planted$column)
+  expect_gt(length(untouched), 10L)
+  for (col in untouched) expect_identical(a[-dup, col], b[-dup, col], label = col)
+  # a touched column differs only where a defect was planted (spot check: age, 3 rows + dups)
+  expect_lte(sum(a$age != b$age), 8L)
+})
+
+test_that("the clean twin stays within its own dictionary on several seeds", {
+  for (sd in 1:6) {
+    s <- sr_sample_cardiac(n = 2000L, seed = sd, defects = FALSE)
+    for (k in seq_len(nrow(s$dict))) {
+      v <- s$dict$variable[k]
+      x <- s$data[[v]]
+      type <- s$dict$type[k]
+      lab <- paste0(v, " (seed ", sd, ")")
+      if (type %in% c("numeric", "date") && nzchar(s$dict$min[k])) {
+        conv <- if (type == "date") as.Date else as.numeric
+        expect_true(all(x >= conv(s$dict$min[k]) & x <= conv(s$dict$max[k]), na.rm = TRUE), label = lab)
+      }
+      if (type %in% c("categorical", "ordinal", "binary")) {
+        expect_true(all(as.character(x) %in% strsplit(s$dict$levels[k], "|", fixed = TRUE)[[1]]),
+                    label = lab)
+      }
+    }
+  }
+})
+
+test_that("the clean twin has no outcome-separating column other than the planted leak", {
+  for (defects in c(FALSE, TRUE)) {
+    df <- sr_sample_cardiac(n = 2000L, seed = 1L, defects = defects)$data
+    expect_false(identical(as.integer(!is.na(df$death_date)), as.integer(df$mortality_30d)))
+    expect_false(identical(as.integer(df$followup_days <= 30), as.integer(df$mortality_30d)))
+    # some survivors die later (death after day 30), some survivors are censored before day 30
+    late <- !is.na(df$death_date) & df$mortality_30d == 0
+    expect_gt(sum(late), 20L)
+    expect_true(all(as.integer(df$death_date[late] - df$surgery_date[late]) > 30L))
+    cens <- df$followup_days < 30 & df$mortality_30d == 0
+    expect_gt(sum(cens), 20L)
+    expect_true(all(df$followup_days[df$mortality_30d == 1] <= 30L))
+  }
 })
 
 test_that("planted lists one row per defect with the specified checks", {
