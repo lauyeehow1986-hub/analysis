@@ -72,8 +72,12 @@ test_that("the clean twin is the defect cohort before planting (same base draws)
 })
 
 test_that("the clean twin stays within its own dictionary on several seeds", {
-  for (sd in 1:6) {
+  for (sd in 1:12) {
     s <- sr_sample_cardiac(n = 2000L, seed = sd, defects = FALSE)
+    # BMI is bounded by the generator, so the dictionary minimum is a sensible clinical one
+    expect_gte(as.numeric(s$dict$min[s$dict$variable == "bmi"]), 15)
+    expect_gte(as.numeric(s$dict$min[s$dict$variable == "bmi_copy"]), 15)
+    expect_gte(min(s$data$bmi), 15)
     for (k in seq_len(nrow(s$dict))) {
       v <- s$dict$variable[k]
       x <- s$data[[v]]
@@ -189,6 +193,18 @@ test_that("mortality rises with age, creatinine and NYHA class", {
   expect_gt(stats::coef(fit)[["nyhaIV"]], 0)
   expect_gt(mean(df$mortality_30d), 0.02)
   expect_lt(mean(df$mortality_30d), 0.12)
+})
+
+test_that("no death date precedes surgery or the statin start, with or without planted defects", {
+  for (sd in 1:12) for (defects in c(FALSE, TRUE)) {
+    df <- sr_sample_cardiac(n = 2000L, seed = sd, defects = defects)$data
+    lab <- paste0("seed ", sd, " defects ", defects)
+    expect_true(all(df$death_date > df$surgery_date, na.rm = TRUE), label = lab)
+    expect_true(all(df$statin_start_date <= df$death_date, na.rm = TRUE), label = lab)
+    expect_true(all(df$death_date <= df$followup_days + df$surgery_date, na.rm = TRUE), label = lab)
+    late <- !is.na(df$death_date) & df$mortality_30d == 0
+    expect_true(all(as.integer(df$death_date[late] - df$surgery_date[late]) > 30L), label = lab)
+  }
 })
 
 test_that(".fx_write_csv round-trips non-ASCII text as UTF-8", {

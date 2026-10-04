@@ -39,7 +39,7 @@ SR_SAMPLE_NOTES <- c("Uneventful recovery", "Mild post-op AF, resolved", "Delaye
     row("sex", "Sex", "categorical", levels = "F|M"),
     row("weight_kg", "Body weight", "numeric", "kg", "30", "250"),
     row("height_cm", "Body height", "numeric", "cm", "120", "220"),
-    row("bmi", "Body mass index", "numeric", "kg/m2", "10", "70"),
+    row("bmi", "Body mass index", "numeric", "kg/m2", "15", "70"),
     row("sbp", "Systolic blood pressure", "numeric", "mmHg", "60", "260"),
     row("creatinine_umol", "Serum creatinine", "numeric", "umol/L", "20", "1500"),
     row("hba1c_pct", "Glycated haemoglobin", "numeric", "%", "3", "18"),
@@ -56,7 +56,7 @@ SR_SAMPLE_NOTES <- c("Uneventful recovery", "Mild post-op AF, resolved", "Delaye
     row("followup_days", "Follow-up from surgery", "numeric", "days", "0", "4000"),
     row("notes", "Free-text clinical note", "text"),
     row("const_flag", "Registry flag", "categorical", levels = "Y|N"),
-    row("bmi_copy", "Second BMI measurement", "numeric", "kg/m2", "10", "70"),
+    row("bmi_copy", "Second BMI measurement", "numeric", "kg/m2", "15", "70"),
     row("lab_status", "Laboratory status", "categorical",
         levels = "normal|abnormal|repeat|deceased")
   ))
@@ -87,6 +87,8 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
   female <- sex == "F"
   height_cm <- clamp(round(stats::rnorm(n, ifelse(female, 158, 170), 6.5)), 140, 200)
   weight_kg <- clamp(round(stats::rnorm(n, ifelse(female, 63, 79), 11), 1), 38, 140)
+  # bound BMI at 15 (consumes no RNG): raise a too-light weight to the BMI-15 weight, rounded up
+  weight_kg <- pmax(weight_kg, ceiling(15 * (height_cm / 100)^2 * 10) / 10)
   bmi <- round(weight_kg / (height_cm / 100)^2, 1)
   nyha <- sample(SR_SAMPLE_NYHA, n, replace = TRUE, prob = c(.20, .40, .28, .12))
   nyha_num <- match(nyha, SR_SAMPLE_NYHA)
@@ -137,7 +139,9 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
   # ---- planted defects (own random draws, after the base cohort) ------------------------------
   if (isTRUE(defects)) {
     cnt <- function(p) max(1L, as.integer(round(n * p)))
-    alive <- which(!dead)
+    # No planted defect lands on a row with a death date (a 2099 surgery or a late statin start
+    # there would create an unplanted death-before-surgery anomaly).
+    alive <- which(!dead & is.na(death_date))
 
     # Rows reserved for the row-level defects that must not overlap anything else: unexposed
     # survivors, so no immortal-time or leakage row is ever copied, renumbered or moved to 2099.
@@ -164,8 +168,8 @@ sr_sample_cardiac <- function(n = 2000L, seed = 1L, defects = TRUE) {
     r_order <- take(cnt(0.01))
     r_outlier <- take(5L)
     r_nzv <- take(cnt(0.002))
-    r_heap <- sample(setdiff(seq_len(n), r_miss), cnt(0.60))
-    r_immortal <- sample(which(statin == 1L), round(0.4 * sum(statin == 1L)))
+    r_heap <- sample(setdiff(which(is.na(death_date)), r_miss), cnt(0.60))
+    r_immortal <- sample(which(statin == 1L & is.na(death_date)), round(0.4 * sum(statin == 1L)))
 
     # numeric columns
     age[r_age] <- 250L
