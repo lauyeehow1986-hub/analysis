@@ -37,3 +37,6 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+
+# generated sample data (see samples/make_samples.R)
+samples/out/
