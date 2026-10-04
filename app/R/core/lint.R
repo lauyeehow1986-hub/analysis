@@ -295,6 +295,21 @@ sr_lint_pgate <- function(file) {
 .sr_lint_lib_pkgs <- c("curl", "httr", "httr2", "RCurl")
 .sr_lint_lib_calls <- c("library", "require", "requireNamespace", "loadNamespace", "attachNamespace")
 
+# DuckDB extensions cannot be fetched on an air-gapped box, and DuckDB read_json needs the (absent)
+# json extension and fetches URL-looking names. Flagged: a SQL string that starts with INSTALL or
+# LOAD (or FORCE INSTALL) followed by a blank, quote or semicolon (so "install.packages" is fine),
+# and one that calls read_json / read_json_auto / read_ndjson ...
+.sr_lint_sql_ext_re <- "^[[:space:]]*(FORCE[[:space:]]+)?(INSTALL|LOAD)(?=[[:space:];'\"]|$)"
+.sr_lint_sql_json_re <- "(?<![A-Za-z0-9_])read_(nd)?json[A-Za-z0-9_]*[[:space:]]*[(]"
+
+#' The value of a STR_CONST token's text (escapes resolved, raw strings handled), or NA.
+.sr_lint_str_value <- function(txt) {
+  tryCatch({
+    v <- parse(text = txt, keep.source = FALSE)[[1L]]
+    if (is.character(v) && length(v) == 1L && !is.na(v)) v else NA_character_
+  }, error = function(e) NA_character_)
+}
+
 #' Is the file covered by the allowlist (normalised, forward-slash, suffix match)?
 .sr_lint_allowed <- function(file, allow) {
   if (!length(allow)) return(FALSE)
@@ -398,6 +413,19 @@ sr_lint_airgap <- function(files, allow = "app/R/router/backends/jev.R") {
         }
       } else if ("repos" %in% nms) {
         add(id, "network call: options(repos = ) (air-gap)")
+      }
+    }
+
+    # SQL written inside string constants: DuckDB extension provisioning and read_json (see the
+    # constants above). The constant is parsed back to its value, so escapes and raw strings count.
+    for (id in pd$id[pd$token == "STR_CONST"]) {
+      val <- .sr_lint_str_value(pd[as.character(id), "text"])
+      if (is.na(val)) next
+      if (grepl(.sr_lint_sql_ext_re, val, ignore.case = TRUE, perl = TRUE)) {
+        add(id, "SQL string issues INSTALL/LOAD (DuckDB extensions are locked down; air-gap)")
+      }
+      if (grepl(.sr_lint_sql_json_re, val, ignore.case = TRUE, perl = TRUE)) {
+        add(id, "SQL string calls read_json, use jsonlite::stream_in on a file connection (air-gap)")
       }
     }
     if (!length(line)) return(.sr_lint_empty())

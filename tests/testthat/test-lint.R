@@ -435,3 +435,50 @@ test_that("air-gap flags fromJSON and read_json (URL / file overloading) but not
   expect_true(all(grepl("parse_json", r$msg, fixed = TRUE)))
   expect_true(all(grepl("air-gap", r$msg, fixed = TRUE)))
 })
+
+# ---- P1b Task 3: DuckDB extension and read_json written as SQL strings ------------------------
+
+test_that("air-gap flags INSTALL / LOAD / read_json SQL in the bad_sql fixture, line by line", {
+  r <- sr_lint_airgap(.fx("bad_sql.R"), allow = character())
+  expect_identical(r$line, c(3L, 4L, 5L, 6L))
+  expect_match(r$msg[1:3], "INSTALL/LOAD", fixed = TRUE)
+  expect_match(r$msg[4], "read_json", fixed = TRUE)
+  expect_true(all(grepl("air-gap", r$msg, fixed = TRUE)))
+})
+
+test_that("air-gap SQL-string rules: case, leading space, FORCE, raw strings and escapes", {
+  bs <- intToUtf8(92L)
+  r <- .ag(c(
+    'a <- "install httpfs"',
+    paste0('b <- "  ', bs, 'n LOAD httpfs"'),            # leading blank, then LOAD
+    'c <- "Force   Install x"',
+    'd <- r"(LOAD x)"',
+    paste0("e <- 'LOAD ", bs, "'p.duckdb_extension", bs, "''"),
+    'f <- "SELECT * FROM read_json_auto(1)"',
+    'g <- "select * from read_ndjson ( 1)"',
+    'h <- "SELECT * FROM READ_JSON(x)"'
+  ))
+  expect_identical(r$line, 1:8)
+})
+
+test_that("air-gap SQL-string rules leave look-alikes alone", {
+  bs <- intToUtf8(92L)
+  r <- .ag(c(
+    'a <- "SELECT 1, load FROM t"',
+    'b <- "reloaded"',
+    'c <- "LOAD_DATA x"',
+    'd <- "uninstall x"',
+    'e <- c("install.packages", "load.csv", "loadNamespace")',
+    'g <- c("read_json", "read_ndjson")',
+    'h <- "the install step"',
+    paste0('i <- "^', bs, bs, 's*(FORCE', bs, bs, 's+INSTALL|LOAD)', bs, bs, 'b"')
+  ))
+  expect_identical(nrow(r), 0L)
+})
+
+test_that("air-gap SQL-string rules apply inside long strings", {
+  pad <- strrep("a", 1200)
+  r <- .ag(c(paste0('x <- "', pad, '"'), paste0('y <- "LOAD ', pad, '"'),
+             paste0('z <- "SELECT * FROM read_json(', pad, ')"')))
+  expect_identical(r$line, 2:3)
+})
