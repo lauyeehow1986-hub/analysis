@@ -466,3 +466,82 @@ test_that("a path on a network share is sniffed with a warning", {
   expect_identical(s$format, "csv")
   expect_true(any(grepl("network share", s$warnings)))
 })
+
+# --- review fixes -----------------------------------------------------------------------------
+
+test_that("thousands separators in tab- or pipe-delimited files are not read as decimal commas", {
+  d <- .sn_dir()
+  tab <- c("id\tamount\tn", "1\t1,234\t5", "2\t2,500\t6", "3\t12,000\t7")
+  s <- sr_sniff(.sn_text(tab, file.path(d, "thou.tsv")))
+  expect_identical(s$delim, "\t")
+  expect_identical(s$decimal, ".")
+  pipe <- gsub("\t", "|", tab, fixed = TRUE)
+  s2 <- sr_sniff(.sn_text(pipe, file.path(d, "thou.txt")))
+  expect_identical(s2$delim, "|")
+  expect_identical(s2$decimal, ".")
+})
+
+test_that("a CSV whose header starts with FEA1 is not mistaken for feather", {
+  d <- .sn_dir()
+  p <- .sn_text(c("FEA1,x", "1,2", "3,4"), file.path(d, "fea.csv"))
+  expect_true(is.na(.sr_magic(p)))
+  s <- sr_sniff(p)
+  expect_identical(s$format, "csv")
+  expect_identical(s$delim, ",")
+})
+
+test_that("NUL bytes after a UTF-8 BOM give a warning, not an error", {
+  d <- .sn_dir()
+  p <- .sn_raw(c(.sn_bytes(0xEF, 0xBB, 0xBF), charToRaw("a,b"), as.raw(0L), charToRaw("\n1,2\n")),
+               file.path(d, "bomnul.csv"))
+  s <- sr_sniff(p)
+  expect_identical(s$encoding, "UTF-8")
+  expect_true(s$bom)
+  expect_true(any(grepl("NUL", s$warnings)))
+})
+
+test_that(".sr_open_text yields UTF-8 text and refuses a non-UTF-8 session", {
+  d <- .sn_dir()
+  mu <- intToUtf8(c(0xB5, 0x6D, 0x6F, 0x6C))
+  raw <- iconv(paste0("id,", mu, "\n1,2\n"), "UTF-8", "latin1", toRaw = TRUE)[[1L]]
+  p <- .sn_raw(raw, file.path(d, "l1.csv"))
+  s <- sr_sniff(p)
+  con <- .sr_open_text(p, s)
+  lines <- readLines(con)
+  close(con)
+  expect_true(validUTF8(lines[1L]))
+  expect_identical(charToRaw(lines[1L]), charToRaw(paste0("id,", mu)))
+  orig <- .sr_native_utf8
+  assign(".sr_native_utf8", function() FALSE, envir = globalenv())
+  withr::defer(assign(".sr_native_utf8", orig, envir = globalenv()))
+  expect_error(.sr_open_text(p, s), "UTF-8")
+})
+
+test_that("bytes beyond sample_bytes never influence the result", {
+  d <- .sn_dir()
+  p <- file.path(d, "tail.csv")
+  con <- file(p, "wb")
+  writeBin(charToRaw("id,v\n"), con)
+  writeBin(rep(charToRaw("123456,7.5\n"), 1000L), con)
+  # Past the 4096-byte sample: invalid UTF-8 and a quoted newline. Reading them would give
+  # latin1 and quoted_newlines = TRUE.
+  writeBin(c(.sn_bytes(0xB5, 0xFF, 0xFE), charToRaw("\n\"a\nb\"\n")), con)
+  close(con)
+  s <- sr_sniff(p, sample_bytes = 4096L)
+  expect_identical(s$encoding, "UTF-8")
+  expect_false(s$quoted_newlines)
+  expect_identical(s$delim, ",")
+  s_all <- sr_sniff(p, sample_bytes = 1048576L)
+  expect_identical(s_all$encoding, "latin1")
+  expect_true(s_all$quoted_newlines)
+})
+
+test_that("a stray unquoted quote character does not defeat delimiter detection", {
+  d <- .sn_dir()
+  lines <- c("id|desc|n", "1|12\" pipe|5", "2|plain|6", "3|plain too|7")
+  s <- sr_sniff(.sn_text(lines, file.path(d, "stray.txt")))
+  expect_identical(s$delim, "|")
+  # The odd quote leaves the rest of the sample "inside quotes", so quoted_newlines comes out
+  # TRUE here. That is the safe direction: ingest then falls back to a single DuckDB pass.
+  expect_true(s$quoted_newlines)
+})

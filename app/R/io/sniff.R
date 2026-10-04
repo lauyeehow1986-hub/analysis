@@ -31,7 +31,7 @@
 .sr_magic_bytes <- function(b) {
   has <- function(s, offset = 0L) .sr_has(b, if (is.character(s)) charToRaw(s) else as.raw(s), offset)
   if (has("PAR1")) return("parquet")
-  if (has("ARROW1") || has("FEA1")) return("feather")
+  if (has("ARROW1")) return("feather")
   if (has(c(charToRaw("SQLite format 3"), 0L))) return("sqlite")
   if (has("DUCK", 8L)) return("duckdb")
   if (has(c(0x50, 0x4B, 0x03, 0x04))) return("zip")
@@ -150,10 +150,16 @@
     b <- b[-(1:2)]
   } else {
     bom <- FALSE
+    enc <- NA_character_
+  }
+  if (is.na(enc) || enc == "UTF-8") {
+    # NULs cannot sit in an R string. They are dropped for sniffing only.
     if (any(b == 0L)) {
-      warnings <- "file contains NUL bytes and no byte-order mark: it may be UTF-16 without a BOM, or not a text file"
+      warnings <- "file contains NUL bytes (dropped for sniffing): it may be UTF-16 without a BOM, or not a text file"
       b <- b[b != 0L]
     }
+  }
+  if (is.na(enc)) {
     probe <- if (truncated) .sr_trim_utf8_tail(b) else b
     enc <- if (validUTF8(rawToChar(probe))) "UTF-8" else "latin1"
   }
@@ -315,7 +321,7 @@
   header <- .sr_sniff_header(m)
   data <- if (header && nrow(m) >= 1L) m[-1L, , drop = FALSE] else m
   decimal <- "."
-  if (delim != "," && length(data)) {
+  if (delim == ";" && length(data)) {
     v <- trimws(as.vector(data))
     if (sum(grepl("^-?[0-9]+,[0-9]+$", v)) > sum(grepl("^-?[0-9]+[.][0-9]+$", v))) decimal <- ","
   }
@@ -456,12 +462,22 @@ sr_sniff <- function(path, sample_bytes = 1048576L, member = NULL) {
   do.call(result, c(list(fmt = "csv", encoding = e$encoding, bom = e$bom), dia))
 }
 
+#' Is the session's native encoding UTF-8? Text read through a connection with `encoding=` is
+#' converted to the native encoding, so it is UTF-8 exactly when this is TRUE (R >= 4.2 on Windows
+#' and any UTF-8 locale elsewhere).
+.sr_native_utf8 <- function() isTRUE(l10n_info()[["UTF-8"]])
+
 #' Open a text connection that reads the file decompressed and re-encoded to UTF-8, on the selected
-#' zip member when there is one. R itself strips the UTF-8, UTF-16LE and UTF-16BE byte-order marks.
-#' `sniff` is the `sr_sniff` result for `path`. The caller closes the connection.
+#' zip member when there is one. The connection's `encoding` is the sniffed one, so R converts the
+#' text to the session's native encoding, which must be UTF-8 (refused otherwise: a conversion
+#' to anything else could lose characters). R itself strips the UTF-8, UTF-16LE and UTF-16BE
+#' byte-order marks. `sniff` is the `sr_sniff` result for `path`. The caller closes the connection.
 .sr_open_text <- function(path, sniff) {
   if (!(sniff$format %in% c("csv", "json", "ndjson"))) {
     stop("not a text format: ", sniff$format, call. = FALSE)
+  }
+  if (!.sr_native_utf8()) {
+    stop("the session's native encoding is not UTF-8: cannot re-encode text to UTF-8", call. = FALSE)
   }
   enc <- sniff$encoding
   cenc <- if (enc == "UTF-8" && isTRUE(sniff$bom)) "UTF-8-BOM" else enc
