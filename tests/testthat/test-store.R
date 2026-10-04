@@ -215,3 +215,17 @@ test_that("sr_sha256_file matches openssl over the whole file, with and without 
   expect_identical(sr_sha256_file(e, progress = function(d, t) NULL), .sr_sha256(raw(0)))
   expect_error(sr_sha256_file(file.path(tempdir(), "no_such_file_zz.bin")), "not found")
 })
+
+test_that("sr_sha256_file falls back to a one-shot hash when the incremental path fails or is off", {
+  f <- .big_file(9 * 1024 * 1024 + 7)                       # more than one 8 MiB block
+  rc <- file(f, "rb")
+  ref <- paste(as.character(unclass(openssl::sha256(rc))), collapse = "")
+  close(rc)
+  withr::local_options(sr.sha256_force_fallback = TRUE)
+  seen <- list()
+  out <- sr_sha256_file(f, progress = function(done, total) seen[[length(seen) + 1L]] <<- c(done, total))
+  expect_identical(out, ref)
+  expect_length(seen, 1L)                                    # one report at the end
+  expect_identical(seen[[1L]], rep(as.numeric(file.size(f)), 2L))
+  expect_identical(sr_sha256_file(f), ref)
+})

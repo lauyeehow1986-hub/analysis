@@ -118,18 +118,122 @@ test_that("the guard refuses scheme:// literals before DuckDB sees them", {
   expect_false(.refused("SELECT \"http://x\" FROM t"))   # an identifier, not a literal
 })
 
-test_that("a raw DBI call cannot load or install an extension either", {
+test_that("a raw DBI call cannot load or install an extension either (settings only; no network)", {
   p <- .duck_project()
   con <- sr_duck(p)
-  expect_error(DBI::dbExecute(con, "LOAD httpfs"))
-  expect_error(DBI::dbExecute(con, "LOAD 'C:/x/httpfs.duckdb_extension'"))
-  # INSTALL must not reach the network nor drop a file into the project-owned extension dir
-  expect_error(DBI::dbExecute(con, "INSTALL httpfs"))
-  ext <- file.path(sr_project_paths(p$paths$dir)$data, "tmp", "duckdb_ext")
+  dd <- sr_project_paths(p$paths$dir)$data
+  norm <- function(x) normalizePath(x, winslash = "/", mustWork = FALSE)
+  ext <- norm(file.path(dd, "tmp", "duckdb_ext"))
+  repo <- norm(file.path(dd, "tmp", "duckdb_ext_repo"))
+  expect_identical(norm(.duck_setting(con, "extension_directory")), ext)
+  expect_identical(norm(.duck_setting(con, "custom_extension_repository")), repo)
+  expect_identical(norm(.duck_setting(con, "autoinstall_extension_repository")), repo)
+  expect_false(as.logical(.duck_setting(con, "autoinstall_known_extensions")))
+  expect_false(as.logical(.duck_setting(con, "autoload_known_extensions")))
+  expect_length(list.files(ext, all.files = TRUE, recursive = TRUE, no.. = TRUE), 0L)
+  expect_length(list.files(repo, all.files = TRUE, recursive = TRUE, no.. = TRUE), 0L)
+  # behavioural: a made-up name without FROM can only resolve against the local empty repo
+  expect_error(DBI::dbExecute(con, "INSTALL zz_sr_fake_ext"))
   expect_length(list.files(ext, all.files = TRUE, recursive = TRUE, no.. = TRUE), 0L)
   expect_error(DBI::dbExecute(con, "SET threads=1"), "locked")
   expect_error(DBI::dbExecute(con, "SET autoinstall_known_extensions=true"), "locked")
-  expect_error(DBI::dbGetQuery(con, "SELECT * FROM read_csv('https://example.invalid/a.csv')"))
+  expect_error(DBI::dbExecute(con, "RESET threads"), "locked")
+  expect_error(DBI::dbExecute(con, "PRAGMA threads=1"), "locked")
+})
+
+test_that("the guard peels EXPLAIN / ANALYZE / (options) and checks what is wrapped", {
+  p <- .duck_project()
+  con <- sr_duck(p)
+  # fake names and a fake local path only: were the guard to miss one, DuckDB fails locally
+  forms <- c(
+    "EXPLAIN ANALYZE INSTALL zz_sr_fake_ext FROM 'C:/zz_sr_nonexistent_dir'",
+    "EXPLAIN ANALYZE FORCE INSTALL zz_sr_fake_ext",
+    "EXPLAIN INSTALL zz_sr_fake_ext",
+    "EXPLAIN LOAD zz_sr_fake_ext",
+    "EXPLAIN (ANALYZE) INSTALL zz_sr_fake_ext",
+    "explain   analyze   load zz_sr_fake_ext",
+    "EXPLAIN (FORMAT JSON, ANALYZE) LOAD zz_sr_fake_ext",
+    "EXPLAIN (FORMAT 'a)b') LOAD zz_sr_fake_ext",
+    "EXPLAIN /* c */ ANALYZE -- c\n INSTALL zz_sr_fake_ext",
+    "EXPLAIN EXPLAIN LOAD zz_sr_fake_ext",
+    "EXPLAIN ANALYSE ANALYZE (ANALYZE) LOAD zz_sr_fake_ext",
+    "EXPLAIN ANALYZE SET threads=1",
+    "EXPLAIN PRAGMA database_list",
+    "EXPLAIN ATTACH 'C:/zz_sr_nonexistent.duckdb' AS zz",
+    "EXPLAIN RESET threads",
+    "SELECT 1; EXPLAIN LOAD zz_sr_fake_ext",
+    "EXPLAIN (ANALYZE LOAD zz_sr_fake_ext"       # unbalanced option list: not guessable
+  )
+  for (s in forms) {
+    expect_true(.refused(s), info = s)
+    expect_error(sr_duck_exec(con, s), "refused", info = s)
+  }
+  expect_error(sr_duck_query(con, "EXPLAIN ANALYZE LOAD 'C:/zz/zz_sr_fake.duckdb_extension'"), "refused")
+  # plain EXPLAIN of a query still works
+  expect_false(.refused("EXPLAIN SELECT 1"))
+  expect_false(.refused("EXPLAIN ANALYZE SELECT 1"))
+  expect_false(.refused("EXPLAIN (ANALYZE) SELECT 1"))
+  expect_identical(nrow(sr_duck_query(con, "EXPLAIN SELECT 1 AS x")) >= 1L, TRUE)
+})
+
+test_that("the guard refuses an INSTALL carrying a FROM clause in any position", {
+  for (s in c("SELECT 1; INSTALL zz_sr_fake_ext FROM 'C:/zz_sr_nonexistent_dir'",
+              "INSTALL zz_sr_fake_ext\nFROM 'C:/zz_sr_nonexistent_dir'",
+              "INSTALL zz_sr_fake_ext /* c */ FROM 'C:/zz_sr_nonexistent_dir'",
+              "WITH a AS (SELECT 1) INSTALL zz_sr_fake_ext FROM 'C:/zz_sr_nonexistent_dir'",
+              "CREATE TABLE t AS INSTALL zz_sr_fake_ext FROM 'C:/zz_sr_nonexistent_dir'")) {
+    expect_true(.refused(s), info = s)
+  }
+  # look-alikes stay allowed: words inside literals and quoted identifiers, longer words
+  expect_false(.refused("SELECT 'install x from y' AS w"))
+  expect_false(.refused("SELECT \"install\" FROM t"))
+  expect_false(.refused("SELECT a FROM installs"))
+  expect_false(.refused("SELECT uninstall FROM t"))
+})
+
+test_that("the scheme check covers dollar-quoted bodies", {
+  for (s in c("SELECT * FROM read_csv($$http://example.invalid/a.csv$$)",
+              "SELECT * FROM read_csv($t$https://example.invalid/a.csv$t$)",
+              "SELECT $$s3://b/k$$",
+              "SELECT $tag_1$ftp://h/f$tag_1$")) {
+    expect_true(.refused(s), info = s)
+  }
+  expect_false(.refused("SELECT $$not a url: //x$$ AS w"))
+  expect_false(.refused("SELECT $$C:/data/a.csv$$ AS w"))
+})
+
+test_that("the tokenizing scanner alone is enough: no match-limit failures, no free-text false positives", {
+  # ~30+ consecutive block comments used to exhaust the PCRE match limit and fail open
+  cm <- strrep("/* c */ ", 40)
+  expect_no_warning(r1 <- .refused(paste0(cm, "LOAD zz_sr_fake_ext")))
+  expect_true(r1)
+  expect_no_warning(r2 <- .refused(paste0("SELECT 1; ", cm, "-- x\n", cm, "SET threads=1")))
+  expect_true(r2)
+  expect_no_warning(r3 <- .refused(paste0(strrep("-- c\n", 60), "INSTALL zz_sr_fake_ext")))
+  expect_true(r3)
+  # free text that merely contains ; and a keyword is data, not a statement
+  p <- .duck_project()
+  con <- sr_duck(p)
+  expect_false(.refused("SELECT 'Discharged; set for review' AS w"))
+  expect_identical(sr_duck_query(con, "SELECT 'Discharged; set for review' AS w")$w, "Discharged; set for review")
+  expect_false(.refused("INSERT INTO t VALUES ('a; load b', 'x;\nattach y')"))
+  expect_false(.refused("SELECT $$a; pragma b$$"))
+  expect_false(.refused("SELECT \"a; set b\" FROM t"))
+})
+
+test_that("E'...' strings (backslash escapes) cannot hide a statement from the scanner", {
+  bs <- intToUtf8(92L)
+  # DuckDB reads E'<bs>'' as one string holding a quote, so the LOAD after it is a real statement
+  s <- paste0("SELECT E'", bs, "''; LOAD zz_sr_fake_ext; --'")
+  expect_true(.refused(s))
+  expect_true(.refused(paste0("SELECT e'", bs, "''; SET threads=1; --'")))
+  p <- .duck_project()
+  con <- sr_duck(p)
+  expect_identical(sr_duck_query(con, paste0("SELECT E'", bs, "'' AS w"))$w, "'")
+  expect_identical(sr_duck_query(con, paste0("SELECT E'a", bs, "'; set x' AS w"))$w, "a'; set x")
+  # an identifier that merely ends in e is not an E-string prefix
+  expect_identical(as.character(sr_duck_query(con, "SELECT DATE'2020-01-01' AS d")$d), "2020-01-01")
+  expect_false(.refused("SELECT DATE'2020-01-01' AS d"))
 })
 
 test_that("the guard validates its input", {

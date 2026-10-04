@@ -482,3 +482,18 @@ test_that("air-gap SQL-string rules apply inside long strings", {
              paste0('z <- "SELECT * FROM read_json(', pad, ')"')))
   expect_identical(r$line, 2:3)
 })
+
+test_that("air-gap flags EXPLAIN-wrapped INSTALL / LOAD SQL strings too", {
+  r <- .ag(c(
+    'a <- "EXPLAIN INSTALL x"',
+    'b <- "explain analyze load x"',
+    'c <- "EXPLAIN (ANALYZE) FORCE INSTALL x"',
+    'd <- "  EXPLAIN   ANALYZE   LOAD x"',
+    'e <- "EXPLAIN (FORMAT JSON) INSTALL x"'
+  ))
+  expect_identical(r$line, 1:5)
+  expect_match(r$msg, "INSTALL/LOAD", fixed = TRUE)
+  ok <- .ag(c('a <- "EXPLAIN SELECT 1"', 'b <- "EXPLAIN ANALYZE SELECT * FROM t"',
+              'c <- "explain the install step"', 'd <- "EXPLAIN (ANALYZE) SELECT 1"'))
+  expect_identical(nrow(ok), 0L)
+})
