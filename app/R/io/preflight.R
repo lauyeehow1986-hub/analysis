@@ -19,8 +19,11 @@
 .sr_pf_json_max <- 512 * .sr_pf_mb
 # Above this on-disk size an external (by-reference) source is suggested instead of a copy.
 .sr_pf_external_above <- 2 * .sr_pf_gb
-# Parse and write throughput by hardware profile, bytes per second.
-.sr_pf_throughput <- c(locked16 = 60 * .sr_pf_mb, laptop = 150 * .sr_pf_mb)
+# Ingest throughput by hardware profile, bytes of UNCOMPRESSED text per second. The laptop figure is
+# measured (the delimited-text ingest of a 36 MB, 1M-row CSV took about 4 s end to end, about 9 MB/s;
+# compressed and re-encoded sources add a staging pass, so they are no faster). locked16 is not
+# measured: it is scaled by the same 60:150 ratio as before and so is deliberately conservative.
+.sr_pf_throughput <- c(locked16 = 4 * .sr_pf_mb, laptop = 9 * .sr_pf_mb)
 
 # The nearest existing directory of `path`: the path itself when it is a directory, else the closest
 # existing parent (a file, or a path that does not exist yet).

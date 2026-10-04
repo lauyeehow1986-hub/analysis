@@ -96,7 +96,8 @@ sr_table_name <- function(path, existing = character()) {
   data <- sr_project_paths(project$paths$dir)$data
   ck$table <- table
   ck$ingest_dir <- file.path(data, "ingest", table)
-  ck$store_dir <- sr_store_dir(project, table)
+  ck$store_dir <- file.path(ck$ingest_dir, "store")     # staging: the parts are built here ...
+  ck$final_dir <- sr_store_dir(project, table)          # ... and swapped into data/store/<table> when done
   ck$path <- file.path(ck$ingest_dir, "checkpoint.json")
   ck$source_fingerprint <- fingerprint
   ck$sniff_hash <- sniff_hash
@@ -137,9 +138,56 @@ sr_table_name <- function(path, existing = character()) {
 .sr_rename_retry <- function(from, to, tries = 5L) {
   for (i in seq_len(tries)) {
     if (isTRUE(suppressWarnings(file.rename(from, to)))) return(invisible(TRUE))
-    Sys.sleep(0.2 * i)       # a virus scanner may briefly hold a freshly written file
+    gc()                      # release a DuckDB result that still holds the file open
+    Sys.sleep(0.2 * i)        # a virus scanner may briefly hold a freshly written file
   }
   stop("cannot move ", basename(from), " to ", basename(to), call. = FALSE)
+}
+
+# Swap the verified staged store into data/store/<table>. The staged manifest is written and read
+# back, every part is re-hashed against it, then the old store (if any) is renamed to
+# data/ingest/<table>/replaced, the staging directory renamed into place, and the old store deleted.
+# Until the second rename the previous table is untouched; if it fails the old one is put back.
+.sr_store_install <- function(ck, manifest) {
+  m <- .sr_store_norm_manifest(manifest, ck$table)
+  mpath <- file.path(ck$store_dir, "manifest.json")
+  .sr_write_json_file(mpath, m)
+  back <- .sr_store_norm_manifest(.sr_read_json_file(mpath), ck$table)
+  if (!identical(sr_store_hash(back), sr_store_hash(m)) || !identical(back$rows, m$rows)) {
+    stop("the staged manifest does not read back identically", call. = FALSE)
+  }
+  for (p in back$parts) {
+    f <- file.path(ck$store_dir, p$file)
+    if (!file.exists(f) || !identical(sr_sha256_file(f), p$sha256)) {
+      stop("a staged part failed verification: ", p$file, call. = FALSE)
+    }
+  }
+  old <- file.path(ck$ingest_dir, "replaced")
+  if (dir.exists(old)) unlink(old, recursive = TRUE)
+  parent <- dirname(ck$final_dir)
+  if (!dir.exists(parent) && !isTRUE(dir.create(parent, recursive = TRUE, showWarnings = FALSE))) {
+    stop("cannot create directory: ", parent, call. = FALSE)
+  }
+  had <- dir.exists(ck$final_dir)
+  if (had) .sr_rename_retry(ck$final_dir, old)
+  tryCatch(.sr_rename_retry(ck$store_dir, ck$final_dir), error = function(e) {
+    if (had) file.rename(old, ck$final_dir)
+    stop(e)
+  })
+  if (had) unlink(old, recursive = TRUE)
+  invisible(m)
+}
+
+# A crash between the two renames of .sr_store_install leaves the previous table in
+# data/ingest/<table>/replaced and nothing in data/store/<table>: put it back.
+.sr_store_recover <- function(ck) {
+  old <- file.path(ck$ingest_dir, "replaced")
+  if (!dir.exists(ck$final_dir) && file.exists(file.path(old, "manifest.json"))) {
+    parent <- dirname(ck$final_dir)
+    if (!dir.exists(parent)) dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+    file.rename(old, ck$final_dir)
+  }
+  invisible(ck)
 }
 
 #' Commit a written part: rename `part_file` (from .sr_part_path) to part-NNNNN.parquet, record its
@@ -229,19 +277,31 @@ sr_table_name <- function(path, existing = character()) {
 .sr_ck_refusal <- function(disk, fp, sniff_hash, store_dir, ingest_dir) {
   if (!is.list(disk)) return("the checkpoint is unreadable")
   a <- disk$source_fingerprint
-  if (!is.list(a) || !isTRUE(all.equal(as.numeric(a$size), fp$size)) || !identical(a$mtime, fp$mtime) ||
+  if (!is.list(a) || !identical(as.numeric(a$size), as.numeric(fp$size)) || !identical(a$mtime, fp$mtime) ||
       !identical(a$sample_sha, fp$sample_sha)) {
     return("the source file changed since the checkpoint was written")
   }
   if (!identical(disk$sniff_hash, sniff_hash)) return("the parse settings changed since the checkpoint")
-  for (p in disk$parts) {
+  # defence in depth: the checkpoint is a file on disk, and its types end up in SQL and its names in paths
+  for (cl in disk$columns) {
+    if (!is.list(cl) || !is.character(cl$name) || length(cl$name) != 1L || is.na(cl$name) ||
+        !is.character(cl$type) || length(cl$type) != 1L || !(cl$type %in% .sr_csv_types) ||
+        !(is.null(cl$fmt) || (is.character(cl$fmt) && length(cl$fmt) == 1L))) {
+      return("the checkpoint names a column type that is not allowed")
+    }
+  }
+  for (i in seq_along(disk$parts)) {
+    p <- disk$parts[[i]]
+    if (!is.list(p) || !identical(p$file, sprintf("part-%05d.parquet", i)) || !is.character(p$sha256)) {
+      return("the checkpoint lists a part file name that is not expected")
+    }
     f <- file.path(store_dir, p$file)
-    if (!is.character(p$file) || !file.exists(f)) return(paste0("a committed part is missing: ", p$file))
+    if (!file.exists(f)) return(paste0("a committed part is missing: ", p$file))
     if (!identical(sr_sha256_file(f), p$sha256)) return(paste0("a committed part changed: ", p$file))
   }
   if (!is.null(disk$prepared_bytes)) {
     src <- file.path(ingest_dir, "source.csv")
-    if (!file.exists(src) || !isTRUE(all.equal(as.numeric(file.size(src)), as.numeric(disk$prepared_bytes)))) {
+    if (!file.exists(src) || !isTRUE(as.numeric(file.size(src)) == as.numeric(disk$prepared_bytes))) {
       return("the decompressed copy of the source is missing or incomplete")
     }
   }
@@ -273,9 +333,13 @@ sr_table_name <- function(path, existing = character()) {
 #' Ingest a data file into the project's Parquet store and append `data.imported`.
 #'
 #' Order of events: (1) validate, sniff, find the reader; (2) pre-flight (a refusal stops here, before
-#' anything is created under data/); (3) resume a valid checkpoint or start fresh (a fresh start
-#' replaces the table's earlier store, ingest and source files); (4) copy the source into
-#' data/source (non-external mode); (5) run the reader; (6) manifest, store hash, `data.imported`.
+#' anything is created under data/; a source that is decompressed or re-encoded first also needs room
+#' for that uncompressed copy); (3) resume a valid checkpoint or start fresh; (4) copy the source to
+#' data/ingest/<table> (non-external mode); (5) run the reader, which builds the parts in
+#' data/ingest/<table>/store; (6) write and verify the manifest, swap the staged store into
+#' data/store/<table> (and the source copy into data/source), `data.imported`. An existing table of
+#' that name is replaced only at step 6: a re-ingest that fails or is cancelled leaves it, its source
+#' copy and its state entry as they were.
 #'  - `external = NULL` takes the pre-flight's `external_suggested`.
 #'  - `options`: `drive_info` (replaces the drive probe of the pre-flight) and the reader's own
 #'    (csv: `sample_size`, default 1e6, and `nullstr`, default c("", "NA")).
@@ -313,13 +377,23 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   }
   pf <- sr_preflight(project, path, sniff, drive_info = drive_info, external = external)
   if (!isTRUE(pf$ok)) stop(pf$refuse_reason, call. = FALSE)
+  # a source that is decompressed or re-encoded first is staged as a full uncompressed UTF-8 copy
+  # on the data drive: that space is on top of what the pre-flight counted
+  if (.sr_ingest_stages(sniff) && pf$free_bytes < pf$need_bytes + pf$uncompressed_bytes) {
+    stop(sprintf(paste0("insufficient space: need %s GB (including %s GB to decompress or re-encode the ",
+                        "source), have %s GB"),
+                 .sr_pf_fmt_gb(pf$need_bytes + pf$uncompressed_bytes), .sr_pf_fmt_gb(pf$uncompressed_bytes),
+                 .sr_pf_fmt_gb(pf$free_bytes)), call. = FALSE)
+  }
 
   data <- sr_project_paths(project$paths$dir)$data
   fp <- sr_fingerprint(path)
   sniff_hash <- .sr_ingest_sniff_hash(sniff, options)
   ck <- .sr_ck_new(project, table, fp, sniff_hash, as.numeric(chunk_bytes))
+  .sr_store_recover(ck)
 
-  # resume a valid checkpoint, else start fresh
+  # resume a valid checkpoint, else start fresh. The table's existing store (data/store/<table>) is
+  # not touched until the new one is complete: everything is built under data/ingest/<table>.
   resumed <- FALSE
   if (file.exists(ck$path)) {
     disk <- tryCatch(.sr_read_json_file(ck$path), error = function(e) NULL)
@@ -335,35 +409,28 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
       }
     }
   }
-  src_dir <- file.path(data, "source")
-  for (d in c(ck$ingest_dir, ck$store_dir, if (!external) src_dir)) {
+  if (!resumed) .sr_clear_dir(ck$ingest_dir)
+  for (d in c(ck$ingest_dir, ck$store_dir)) {
     if (!dir.exists(d) && !isTRUE(dir.create(d, recursive = TRUE, showWarnings = FALSE))) {
       stop("cannot create directory: ", d, call. = FALSE)
     }
   }
-  if (resumed) {
-    .sr_ck_tidy(ck)
-  } else {
-    .sr_clear_dir(ck$store_dir)
-    .sr_clear_dir(ck$ingest_dir)
-  }
+  if (resumed) .sr_ck_tidy(ck)
 
-  # the source: a copy under data/source, or the file in place
+  # the source: a copy (built next to the staged store, moved to data/source when the table is
+  # installed) or the file in place
   work <- path
   rel <- NA_character_
+  copy <- file.path(ck$ingest_dir, paste0("copy.", .sr_source_ext(path)))
   if (!external) {
-    dest <- file.path(src_dir, paste0(table, ".", .sr_source_ext(path)))
-    rel <- paste0("data/source/", basename(dest))
-    stale <- list.files(src_dir, pattern = paste0("^", table, "[.]"), full.names = TRUE)
-    if (resumed && file.exists(dest) && is.character(ck$source_sha256) && !is.na(ck$source_sha256) &&
-        isTRUE(all.equal(as.numeric(file.size(dest)), fp$size))) {
-      stale <- setdiff(stale, dest)
-    } else {
-      ck$source_sha256 <- NA_character_
+    rel <- paste0("data/source/", table, ".", .sr_source_ext(path))
+    if (!(resumed && file.exists(copy) && is.character(ck$source_sha256) && !is.na(ck$source_sha256) &&
+          isTRUE(as.numeric(file.size(copy)) == fp$size))) {
+      ck$source_sha256 <- .sr_copy_hashed(path, copy)
     }
-    if (length(stale)) unlink(stale)
-    if (is.na(ck$source_sha256)) ck$source_sha256 <- .sr_copy_hashed(path, dest)
-    work <- normalizePath(dest, winslash = "/", mustWork = TRUE)
+    work <- normalizePath(copy, winslash = "/", mustWork = TRUE)
+  } else {
+    unlink(list.files(ck$ingest_dir, pattern = "^copy[.]", full.names = TRUE))
   }
   .sr_ck_write(ck)
 
@@ -372,12 +439,12 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   rsniff$size_bytes <- as.numeric(file.size(work))
   res <- reader(project, rsniff, table, ck, options, progress, cancel)
 
-  # manifest, store hash, checkpoint done, event
+  # verified manifest, swap into data/store, the source copy into data/source, checkpoint done, event
   parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
   rows <- sum(vapply(parts, function(p) p$rows, numeric(1)))
-  manifest <- list(table = table, parts = parts, schema = res$schema, rows = rows)
-  sr_store_write_manifest(project, table, manifest)
+  manifest <- .sr_store_install(ck, list(table = table, parts = parts, schema = res$schema, rows = rows))
   store_hash <- sr_store_hash(manifest)
+  if (!external) .sr_source_install(data, table, copy, rel)
   ck$done <- TRUE
   .sr_ck_write(ck)
   unlink(file.path(ck$ingest_dir, c("source.csv", "chunk.csv")))
@@ -392,8 +459,31 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
                  schema = res$schema, parts = parts),
     store_hash = store_hash, resumable = isTRUE(res$resumable),
     type_widened = as.list(as.character(res$type_widened)),
-    sniff = list(delim = sniff$delim, encoding = sniff$encoding, decimal = sniff$decimal, date_order = do))
+    sniff = list(delim = sniff$delim, encoding = sniff$encoding, decimal = sniff$decimal, date_order = do,
+                 nullstr = as.list(as.character(res$nullstr))))
   sr_project_append(project, "data.imported", payload)
+}
+
+# Does the reader first expand the source to a plain UTF-8 file under data/ingest? (bz2 / xz / zip, or
+# an encoding other than UTF-8; a gzip is read in place by DuckDB.) Only the delimited-text formats.
+.sr_ingest_stages <- function(sniff) {
+  if (!(sniff$format %in% c("csv", "tsv", "txt"))) return(FALSE)
+  comp <- sniff$compression
+  enc <- sniff$encoding
+  (is.character(comp) && length(comp) == 1L && comp %in% c("bz2", "xz", "zip")) ||
+    (is.character(enc) && length(enc) == 1L && !is.na(enc) && !(enc %in% c("UTF-8", "utf-8")))
+}
+
+# Move the staged source copy to data/source/<table>.<ext>, replacing the previous copy (and any
+# other data/source/<table>.* left by an earlier ingest with a different extension).
+.sr_source_install <- function(data, table, copy, rel) {
+  src_dir <- file.path(data, "source")
+  if (!dir.exists(src_dir) && !isTRUE(dir.create(src_dir, recursive = TRUE, showWarnings = FALSE))) {
+    stop("cannot create directory: ", src_dir, call. = FALSE)
+  }
+  unlink(list.files(src_dir, pattern = paste0("^", table, "[.]"), full.names = TRUE))
+  .sr_rename_retry(copy, file.path(src_dir, basename(rel)))
+  invisible(rel)
 }
 
 # `data.imported` sets the table's entry. Keys the payload does not carry survive (a later task adds

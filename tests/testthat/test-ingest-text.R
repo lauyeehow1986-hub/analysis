@@ -126,7 +126,9 @@ test_that("chunking gives several parts and the same rows and content as a singl
   expect_identical(.ing_hash(p, "many2"), .ing_hash(p, "many"))
 })
 
-test_that("a cancelled ingest leaves a checkpoint and resumes without duplicating a part", {
+.ing_stage <- function(p, table) file.path(.ing_data(p), "ingest", table, "store")
+
+test_that("a cancelled ingest really resumes: it continues after the checkpoint and leaves the earlier parts untouched", {
   p <- .ing_project()
   fx <- .ing_cardiac_csv(p)
   clean <- .ing(p, fx$csv, table = "clean", chunk_bytes = 20000)
@@ -136,14 +138,32 @@ test_that("a cancelled ingest leaves a checkpoint and resumes without duplicatin
   ck <- .ing_ck(p, "r")
   expect_false(ck$done)
   expect_length(ck$parts, 2L)
+  expect_gt(ck$next_offset, 0)
   expect_null(p$state$tables$r)                                  # nothing was announced
-  done <- .ing(p, fx$csv, table = "r", chunk_bytes = 20000)
+  # the committed parts, byte for byte, before the resume
+  stage <- .ing_stage(p, "r")
+  parts <- file.path(stage, vapply(ck$parts, function(x) x$file, ""))
+  sha_before <- vapply(parts, sr_sha256_file, "")
+  mtime_before <- file.mtime(parts)
+  expect_identical(unname(sha_before), vapply(ck$parts, function(x) x$sha256, ""))
+  Sys.sleep(1.1)                                                 # a rewritten file would get a newer mtime
+  seen <- numeric()
+  expect_no_warning(
+    done <- .ing(p, fx$csv, table = "r", chunk_bytes = 20000, progress = function(d, total) seen <<- c(seen, d))
+  )
+  # a restart would report an offset near 20000 first; a resume reports one beyond the checkpoint
+  expect_gt(seen[1L], ck$next_offset)
+  expect_lte(seen[1L], ck$next_offset + 20000 + 2000)
+  expect_equal(seen[length(seen)], file.size(fx$csv))
   r <- done$state$tables$r
+  final <- sr_store_dir(done, "r")
+  expect_identical(unname(vapply(file.path(final, basename(parts)), sr_sha256_file, "")), unname(sha_before))
+  expect_identical(file.mtime(file.path(final, basename(parts))), mtime_before)
   expect_equal(sum(vapply(r$store$parts, function(x) x$rows, numeric(1))), 2000)
   expect_equal(r$store$rows, 2000)
   files <- vapply(r$store$parts, function(x) x$file, "")
   expect_identical(files, sprintf("part-%05d.parquet", seq_along(files)))
-  expect_identical(sort(list.files(sr_store_dir(done, "r"), pattern = "parquet$")), sort(files))
+  expect_identical(sort(list.files(final, pattern = "parquet$")), sort(files))
   expect_identical(r$store_hash, clean$state$tables$clean$store_hash)
   expect_equal(.ing_all(done, "r"), .ing_all(done, "clean"))
   expect_true(.ing_ck(done, "r")$done)
@@ -156,7 +176,7 @@ test_that("a checkpoint is not resumed when a part or the source changed: warnin
   calls <- 0L
   cancel <- function() { calls <<- calls + 1L; calls >= 2L }
   expect_error(.ing(p, fx$csv, table = "t1", chunk_bytes = 20000, cancel = cancel), class = "sr_ingest_cancelled")
-  part <- file.path(sr_store_dir(p, "t1"), "part-00001.parquet")
+  part <- file.path(.ing_stage(p, "t1"), "part-00001.parquet")
   con <- file(part, "ab")
   writeBin(as.raw(0L), con)
   close(con)
@@ -169,6 +189,73 @@ test_that("a checkpoint is not resumed when a part or the source changed: warnin
   .ing_lines(c(ln, ln[length(ln)]), fx$csv)
   expect_warning(.ing(p, fx$csv, table = "t2", chunk_bytes = 20000), "not resuming")
 })
+
+test_that("a tampered checkpoint (unknown column type, odd part name) is not resumed", {
+  p <- .ing_project()
+  fx <- .ing_cardiac_csv(p)
+  clean <- .ing(p, fx$csv, table = "clean", chunk_bytes = 20000)
+  tamper <- function(table, edit) {
+    calls <- 0L
+    cancel <- function() { calls <<- calls + 1L; calls >= 2L }
+    expect_error(.ing(p, fx$csv, table = table, chunk_bytes = 20000, cancel = cancel), class = "sr_ingest_cancelled")
+    path <- file.path(.ing_data(p), "ingest", table, "checkpoint.json")
+    ck <- .sr_read_json_file(path)
+    .sr_write_json_file(path, edit(ck))
+  }
+  tamper("ty", function(ck) { ck$columns[[2L]]$type <- "BIGINT) FROM x; --"; ck })
+  expect_warning(r1 <- .ing(p, fx$csv, table = "ty", chunk_bytes = 20000), "not resuming")
+  expect_identical(r1$state$tables$ty$store_hash, clean$state$tables$clean$store_hash)
+  tamper("pn", function(ck) { ck$parts[[1L]]$file <- "../part-00001.parquet"; ck })
+  expect_warning(r2 <- .ing(p, fx$csv, table = "pn", chunk_bytes = 20000), "not resuming")
+  expect_identical(r2$state$tables$pn$store_hash, clean$state$tables$clean$store_hash)
+  tamper("po", function(ck) { ck$parts[[1L]]$file <- "part-00007.parquet"; ck })
+  expect_warning(.ing(p, fx$csv, table = "po", chunk_bytes = 20000), "not resuming")
+})
+
+test_that("a failed re-ingest keeps the previous table: parts, manifest, source copy and state entry", {
+  p <- .ing_project()
+  good <- file.path(dirname(p$paths$dir), "good.csv")
+  .ing_lines(c("id,x", paste(1:50, paste0("v", 1:50), sep = ",")), good)
+  p <- .ing(p, good, table = "tt")
+  h <- .ing_hash(p, "tt")
+  before <- .ing_all(p, "tt")
+  src <- file.path(.ing_data(p), "source", "tt.csv")
+  src_sha <- sr_sha256_file(src)
+  m_before <- sr_store_manifest(p, "tt")
+  intact <- function(info) {
+    expect_identical(.ing_hash(p, "tt"), h, info = info)
+    expect_identical(sr_store_hash(sr_store_manifest(p, "tt")), h, info = info)
+    expect_identical(sr_store_manifest(p, "tt"), m_before, info = info)
+    expect_equal(.ing_all(p, "tt"), before, info = info)
+    expect_identical(sr_sha256_file(src), src_sha, info = info)
+    expect_false(dir.exists(file.path(.ing_data(p), "ingest", "tt", "replaced")), info = info)
+  }
+  # a ragged row part-way through
+  bad <- file.path(dirname(p$paths$dir), "bad.csv")
+  rows <- paste(1:3000, paste0("w", 1:3000), sep = ",")
+  rows[2800L] <- "2800,a,b,c"
+  .ing_lines(c("id,x", rows), bad)
+  expect_error(.ing(p, bad, table = "tt", chunk_bytes = 5000))
+  intact("ragged")
+  # cancelled after the first part
+  other <- file.path(dirname(p$paths$dir), "other.csv")
+  .ing_lines(c("id,x", paste(1:3000, paste0("w", 1:3000), sep = ",")), other)
+  expect_error(suppressWarnings(.ing(p, other, table = "tt", chunk_bytes = 5000, cancel = function() TRUE)),
+               class = "sr_ingest_cancelled")
+  intact("cancelled")
+  # a source the SQL guard refuses (a URL-like column name)
+  url <- file.path(dirname(p$paths$dir), "url.csv")
+  .ing_lines(c("id,http://x", paste(1:30, 1:30, sep = ",")), url)
+  expect_error(suppressWarnings(.ing(p, url, table = "tt")))
+  intact("refused")
+  # and a good re-ingest replaces everything, leaving no backup behind
+  p <- suppressWarnings(.ing(p, other, table = "tt", chunk_bytes = 5000))
+  expect_equal(p$state$tables$tt$store$rows, 3000)
+  expect_equal(nrow(.ing_all(p, "tt")), 3000L)
+  expect_false(file.exists(file.path(.ing_data(p), "ingest", "tt", "replaced", "manifest.json")))
+  expect_identical(sr_sha256_file(file.path(.ing_data(p), "source", "tt.csv")), sr_sha256_file(other))
+})
+
 
 # ---- types -----------------------------------------------------------------------------------------
 
@@ -504,4 +591,93 @@ test_that("bad arguments are refused before any work", {
   expect_error(.ing(p, file.path(dirname(fx$csv), "missing.csv"), table = "ok"), "not found")
   expect_error(.ing(p, fx$csv, table = "ok", options = list(sample_size = 0)), "sample_size")
   expect_false(dir.exists(file.path(.ing_data(p), "store", "ok")) && length(list.files(sr_store_dir(p, "ok"))) > 0L)
+})
+
+# ---- fix round 1: exact widening, staging space, quoted nulls --------------------------------------
+
+test_that("widening an integer column never rounds: ids above 2^53 go to VARCHAR, small ones to DOUBLE", {
+  p <- .ing_project()
+  n <- 5000L
+  big <- paste0("900719925474", sprintf("%04d", 993L + seq_len(n) - 1L))   # 9007199254740993, ...
+  expect_identical(big[1L], "9007199254740993")
+  late <- c(big[-n], "1.5")
+  csv <- .ing_lines(c("id,k", paste(seq_len(n), late, sep = ",")), file.path(dirname(p$paths$dir), "big.csv"))
+  p <- .ing(p, csv, table = "big", chunk_bytes = 20000, options = list(sample_size = 100))
+  expect_gte(.ing_ck(p, "big")$restarts, 1L)
+  expect_identical(.ing_schema(p, "big")[["k"]], "VARCHAR")
+  expect_true("k" %in% unlist(p$state$tables$big$type_widened))
+  d <- .ing_all(p, "big")
+  expect_identical(sort(d$k), sort(late))
+  expect_true("9007199254740993" %in% d$k)
+  # integers that a double holds exactly still widen to DOUBLE
+  small <- paste0("123456789012", sprintf("%03d", seq_len(n) %% 1000L))   # 15 digits
+  late2 <- c(small[-n], "1.5")
+  csv2 <- .ing_lines(c("id,k", paste(seq_len(n), late2, sep = ",")), file.path(dirname(p$paths$dir), "small.csv"))
+  p <- .ing(p, csv2, table = "small", chunk_bytes = 20000, options = list(sample_size = 100))
+  expect_identical(.ing_schema(p, "small")[["k"]], "DOUBLE")
+  d2 <- .ing_all(p, "small")
+  expect_equal(sort(d2$k), sort(as.numeric(late2)))
+  # a DOUBLE column that meets a long integer late is not rounded either
+  mix <- c(rep("1.5", n - 1L), "9007199254740993")
+  csv3 <- .ing_lines(c("id,k", paste(seq_len(n), mix, sep = ",")), file.path(dirname(p$paths$dir), "mix.csv"))
+  p <- .ing(p, csv3, table = "mix", chunk_bytes = 20000, options = list(sample_size = 100))
+  expect_identical(.ing_schema(p, "mix")[["k"]], "VARCHAR")
+  expect_true("9007199254740993" %in% .ing_all(p, "mix")$k)
+})
+
+test_that("staging the decompressed or re-encoded copy counts in the pre-flight space check", {
+  p <- .ing_project()
+  fx <- .ing_cardiac_csv(p, n = 2000L)
+  data <- .ing_data(p)
+  snap <- function() sort(list.files(data, recursive = TRUE, include.dirs = TRUE, all.files = TRUE))
+  before <- snap()
+  mu <- intToUtf8(181L)
+  lat <- file.path(dirname(p$paths$dir), "lat.csv")
+  writeBin(iconv(paste0("id,v", mu, NL, paste(1:500, 1:500, sep = ",", collapse = NL), NL), "UTF-8", "latin1",
+                 toRaw = TRUE)[[1L]], lat)
+  for (f in c(.ing_compress(fx$csv, "bz2"), .ing_compress(fx$csv, "xz"), .ing_compress(fx$csv, "zip"), lat)) {
+    sn <- sr_sniff(f)
+    pf <- sr_preflight(p, f, sn, drive_info = .ing_drive(), external = FALSE)
+    expect_gt(pf$uncompressed_bytes, 100, label = basename(f))
+    tight <- .ing_drive(free = pf$need_bytes + pf$uncompressed_bytes / 2)
+    expect_error(sr_ingest(p, f, table = "stg", sniff = sn, external = FALSE, options = list(drive_info = tight)),
+                 "insufficient space", info = basename(f))
+    expect_identical(snap(), before, info = basename(f))
+    enough <- .ing_drive(free = pf$need_bytes + pf$uncompressed_bytes)
+    q <- sr_ingest(p, f, table = "stg", sniff = sn, external = FALSE, options = list(drive_info = enough))
+    expect_gt(q$state$tables$stg$store$rows, 0, label = basename(f))
+    unlink(file.path(data, c("store", "ingest", "source")), recursive = TRUE)
+    before <- snap()
+  }
+  # a plain UTF-8 CSV and a gzip (read in place by DuckDB) are not staged: the old need is enough
+  for (f in c(fx$csv, .ing_compress(fx$csv, "gz"))) {
+    sn <- sr_sniff(f)
+    pf <- sr_preflight(p, f, sn, drive_info = .ing_drive(), external = FALSE)
+    q <- sr_ingest(p, f, table = "nostage", sniff = sn, external = FALSE,
+                   options = list(drive_info = .ing_drive(free = pf$need_bytes)))
+    expect_equal(q$state$tables$nostage$store$rows, 2000, info = basename(f))
+    unlink(file.path(data, c("store", "ingest", "source")), recursive = TRUE)
+  }
+})
+
+test_that("quoted NA and empty strings survive as text; unquoted NA and empty stay NULL; nullstr is recorded", {
+  p <- .ing_project()
+  csv <- .ing_lines(c("id,code,note",
+                      '1,NA,"NA"',
+                      '2,,""',
+                      '3,"",x',
+                      '4,"NA",y',
+                      '5,AA,z',
+                      '6,BB,w'),
+                    file.path(dirname(p$paths$dir), "nulls.csv"))
+  p <- .ing(p, csv, table = "nulls")
+  d <- .ing_all(p, "nulls")
+  d <- d[order(d$id), ]
+  expect_identical(d$code, c(NA, NA, "", "NA", "AA", "BB"))
+  expect_identical(d$note, c("NA", "", "x", "y", "z", "w"))
+  expect_identical(as.character(unlist(p$state$tables$nulls$sniff$nullstr)), c("", "NA"))
+  p <- .ing(p, csv, table = "nulls2", options = list(nullstr = c("", "NULL")))
+  expect_identical(as.character(unlist(p$state$tables$nulls2$sniff$nullstr)), c("", "NULL"))
+  d2 <- .ing_all(p, "nulls2")
+  expect_true("NA" %in% d2$code)                                  # unquoted NA is a value under this nullstr
 })

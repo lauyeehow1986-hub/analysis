@@ -85,12 +85,12 @@ test_that("need_bytes = parquet + spill + headroom (external) and adds the sourc
   expect_equal(r$need_bytes, 0.30 * 1e11 + 14 * GB + 0.05 * 1e11)
 })
 
-test_that("est_seconds uses 60 MB/s on locked16 and 150 MB/s on laptop", {
+test_that("est_seconds uses the measured 4 MB/s on locked16 and 9 MB/s on laptop", {
   s <- .pf_sniff(size = 600 * MB)
   r1 <- sr_preflight(.pf_project("locked16"), "x.csv", sniff = s, drive_info = .pf_drive())
   r2 <- sr_preflight(.pf_project("laptop"), "x.csv", sniff = s, drive_info = .pf_drive())
-  expect_equal(r1$est_seconds, 10)
-  expect_equal(r2$est_seconds, 4)
+  expect_equal(r1$est_seconds, 600 / 4)
+  expect_equal(r2$est_seconds, 600 / 9)
 })
 
 test_that(".sr_drive_info on a real directory reports positive free bytes and is not remote", {

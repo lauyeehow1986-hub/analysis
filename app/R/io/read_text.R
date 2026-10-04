@@ -8,13 +8,16 @@
 #    done in SQL with strict casts, because DuckDB's own typed reader rounds "7.5" into a BIGINT column.
 #    A numeric cast is guarded by a regular expression (no leading zeros, no stray characters); the
 #    cast of anything else (dates, timestamps, booleans) fails loudly when the text is not valid.
+#    Only the strings in `nullstr` (default "" and "NA") are NULL, and only when UNQUOTED: a quoted
+#    "NA" or "" is a text value (allow_quoted_nulls = false).
 #  * The column types are fixed ONCE, from DuckDB's DESCRIBE over `sample_size` rows, and stored in the
 #    checkpoint. dmy / mdy columns are DATE parsed with strptime and the separator seen in the data;
 #    ambiguous date columns stay VARCHAR. A column whose sample is mostly numbers but not entirely is
 #    VARCHAR (listed in type_widened); integers with leading zeros are VARCHAR too (zip codes, ids).
 #  * A value that does not fit the fixed type (a late "pending" in a numeric column) fails the COPY;
 #    the failing chunk is re-read to find the offending columns, they are widened (integer -> double ->
-#    VARCHAR; anything else -> VARCHAR), the parts written so far are deleted and the ingest restarts.
+#    VARCHAR; anything else -> VARCHAR; a whole number above 2^53 never goes to double, a double
+#    would round it, so such a column goes to VARCHAR), the parts written so far are deleted and the ingest restarts.
 #  * Parts are made by chunking on record boundaries (a chunk ends after the first LF outside quotes
 #    once chunk_bytes have been read), so a job is resumable. A file that is gzip (single pass), has
 #    one chunk or fewer, or is read through one COPY is not resumable (`resumable = FALSE`).
@@ -23,6 +26,14 @@
 
 .sr_csv_int_re <- "[+-]?(0|[1-9][0-9]*)"
 .sr_csv_dbl_re <- "[+-]?((0|[1-9][0-9]*)([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?"
+# The column types a checkpoint may name (anything else is a corrupt or tampered checkpoint).
+.sr_csv_types <- c("BIGINT", "INTEGER", "DOUBLE", "DATE", "TIMESTAMP", "TIME", "BOOLEAN", "VARCHAR")
+# A whole number a double cannot hold exactly: more than 2^53 (9007199254740992) in absolute value.
+.sr_csv_unsafe_int_sql <- function(t) {
+  d <- sprintf("regexp_replace(%s, '^[+-]', '')", t)
+  sprintf("(regexp_full_match(%s, '[+-]?(0|[1-9][0-9]*)') AND (length(%s) > 16 OR (length(%s) = 16 AND %s > '9007199254740992')))",
+          t, d, d, d)
+}
 
 # ---- settings -------------------------------------------------------------------------------------
 
@@ -43,7 +54,7 @@
 .sr_csv_from <- function(con, file, st, header, comp, cols = NULL) {
   lit <- function(x) DBI::dbQuoteString(con, x)
   opts <- c(sprintf("delim = %s", lit(st$delim)), sprintf("quote = %s", lit(st$quote)),
-            sprintf("header = %s", if (header) "true" else "false"), "parallel = false",
+            sprintf("header = %s", if (header) "true" else "false"), "parallel = false", "allow_quoted_nulls = false",
             sprintf("compression = %s", lit(comp)))
   if (length(st$nullstr)) opts <- c(opts, sprintf("nullstr = [%s]", paste(lit(st$nullstr), collapse = ", ")))
   if (is.null(cols)) {
@@ -62,7 +73,7 @@
 # DuckDB type name -> the type this reader stores.
 .sr_csv_map_type <- function(t) {
   t <- toupper(t)
-  if (t %in% c("BIGINT", "INTEGER", "DOUBLE", "DATE", "TIMESTAMP", "TIME", "BOOLEAN", "VARCHAR")) return(t)
+  if (t %in% .sr_csv_types) return(t)
   if (grepl("^U?(BIG|SMALL|TINY|HUGE)?INT(EGER)?$", t)) return("BIGINT")
   if (grepl("^DECIMAL|^FLOAT|^REAL", t)) return("DOUBLE")
   if (t == "TIMESTAMP_S" || t == "TIMESTAMP_MS" || t == "TIMESTAMP_NS") return("TIMESTAMP")
@@ -84,8 +95,11 @@
     VARCHAR = id,
     BIGINT = guarded(t, .sr_csv_int_re, "BIGINT"),
     INTEGER = guarded(t, .sr_csv_int_re, "INTEGER"),
-    DOUBLE = guarded(if (identical(decimal, ",")) paste0("replace(", t, ", ',', '.')") else t,
-                     .sr_csv_dbl_re, "DOUBLE"),
+    DOUBLE = {
+      x <- if (identical(decimal, ",")) paste0("replace(", t, ", ',', '.')") else t
+      sprintf("CASE WHEN %s IS NULL THEN NULL WHEN %s THEN %s WHEN regexp_full_match(%s, %s) THEN CAST(%s AS DOUBLE) ELSE %s END",
+              id, .sr_csv_unsafe_int_sql(x), bad, x, lit(.sr_csv_dbl_re), x, bad)
+    },
     DATE = if (is.na(cl$fmt)) {
       sprintf("CASE WHEN %s IS NULL THEN NULL ELSE CAST(%s AS DATE) END", id, t)
     } else {
@@ -104,7 +118,10 @@
   body <- switch(as,
     BIGINT = num(t, .sr_csv_int_re, "BIGINT"),
     INTEGER = num(t, .sr_csv_int_re, "INTEGER"),
-    DOUBLE = num(if (identical(decimal, ",")) paste0("replace(", t, ", ',', '.')") else t, .sr_csv_dbl_re, "DOUBLE"),
+    DOUBLE = {
+      x <- if (identical(decimal, ",")) paste0("replace(", t, ", ',', '.')") else t
+      sprintf("(%s OR %s)", num(x, .sr_csv_dbl_re, "DOUBLE"), .sr_csv_unsafe_int_sql(x))
+    },
     DATE = if (is.na(cl$fmt)) sprintf("TRY_CAST(%s AS DATE) IS NULL", t) else sprintf("try_strptime(%s, %s) IS NULL", t, lit(cl$fmt)),
     sprintf("TRY_CAST(%s AS %s) IS NULL", t, as))
   sprintf("count(*) FILTER (WHERE %s IS NOT NULL AND %s)", id, body)
@@ -472,5 +489,5 @@
                                 DBI::dbQuoteString(con, normalizePath(first, winslash = "/", mustWork = TRUE)), ")"))
   schema <- lapply(seq_len(nrow(d)), function(i) list(name = as.character(d$column_name[i]),
                                                       type = as.character(d$column_type[i])))
-  list(schema = schema, resumable = chunked, type_widened = ck$type_widened)
+  list(schema = schema, resumable = chunked, type_widened = ck$type_widened, nullstr = st$nullstr)
 }
