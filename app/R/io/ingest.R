@@ -1,0 +1,416 @@
+# io/ingest.R - the ingest dispatcher: pre-flight, source copy, checkpoint and resume, the
+# `data.imported` event.
+#
+# sr_ingest() streams a data file into the project's Parquet store through a format reader
+# (registered with .sr_reader_register(); read_text.R registers csv, tsv and txt). Everything that is
+# not format-specific lives here:
+#   * the pre-flight (nothing is created under data/ if it refuses);
+#   * the source copy into data/source/<table>.<ext> (SHA-256 computed on the way) or, in external
+#     mode, a reference to the file in place;
+#   * the checkpoint, data/ingest/<table>/checkpoint.json, rewritten atomically after every committed
+#     part, and the resume rules (the source fingerprint and the parse settings must match and the
+#     committed parts must still hash to what the checkpoint recorded);
+#   * the manifest, the store hash and the `data.imported` event.
+#
+# Reader contract:
+#   function(project, sniff, table, ck, options, progress, cancel) -> list(schema, resumable, type_widened)
+# `sniff$path` is the file to read (the copy in non-external mode). `ck` is the checkpoint object (an
+# environment). A reader writes each part to .sr_part_path(ck) and registers it with
+# .sr_part_commit(ck, part_file, rows), which renames it into place, records its rows and SHA-256,
+# rewrites the checkpoint and returns the next part index. A reader that is cancelled calls
+# stop(.sr_ingest_cancelled()); the checkpoint stays on disk (done = FALSE) so a later call resumes.
+
+.sr_io_block <- 8388608     # 8 MiB per read or write when streaming
+
+# ---- readers --------------------------------------------------------------------------------------
+
+.sr_readers <- new.env(parent = emptyenv())
+
+#' Register (or replace) the reader for a sniffed format.
+.sr_reader_register <- function(format, fn) {
+  if (!is.character(format) || length(format) != 1L || is.na(format) || !nzchar(format)) {
+    stop("format must be a single non-empty string", call. = FALSE)
+  }
+  if (!is.function(fn)) stop("fn must be a reader function", call. = FALSE)
+  assign(format, fn, envir = .sr_readers)
+  invisible(format)
+}
+
+.sr_reader_get <- function(format) {
+  fmt <- if (is.character(format) && length(format) == 1L) format else NA_character_
+  if (is.na(fmt) || !exists(fmt, envir = .sr_readers, inherits = FALSE)) {
+    stop("no reader registered for format ", if (is.na(fmt)) "NA" else fmt, call. = FALSE)
+  }
+  get(fmt, envir = .sr_readers, inherits = FALSE)
+}
+
+# ---- table names ----------------------------------------------------------------------------------
+
+#' A table name derived from a file name: lower case, every character outside a-z0-9 becomes "_",
+#' "t_" in front when it would not start with a letter, and "_2", "_3", ... when it is already in
+#' `existing`. The result always matches ^[a-z][a-z0-9_]{0,62}$.
+sr_table_name <- function(path, existing = character()) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)) {
+    stop("path must be a single non-empty string", call. = FALSE)
+  }
+  b <- basename(gsub(intToUtf8(92L), "/", path, fixed = TRUE))
+  if (.sr_ext(b) %in% .sr_sniff_compressions) b <- tools::file_path_sans_ext(b)
+  base <- tools::file_path_sans_ext(b)
+  x <- gsub("[^a-z0-9]", "_", tolower(base))
+  if (!nzchar(x) || !grepl("^[a-z]", x)) x <- paste0("t_", x)
+  x <- substr(x, 1L, 55L)
+  cand <- x
+  i <- 2L
+  while (cand %in% existing) {
+    cand <- paste0(x, "_", i)
+    i <- i + 1L
+  }
+  cand
+}
+
+# ---- the checkpoint -------------------------------------------------------------------------------
+
+.sr_ingest_cancelled <- function() {
+  structure(class = c("sr_ingest_cancelled", "error", "condition"),
+            list(message = "ingest cancelled; call sr_ingest again with the same arguments to resume",
+                 call = NULL))
+}
+
+# The persisted fields of a checkpoint object (what checkpoint.json holds).
+.sr_ck_list <- function(ck) {
+  list(source_fingerprint = ck$source_fingerprint, sniff_hash = ck$sniff_hash,
+       chunk_bytes = ck$chunk_bytes, columns = ck$columns, next_offset = ck$next_offset,
+       parts = unname(ck$parts), done = isTRUE(ck$done),
+       type_widened = as.list(as.character(ck$type_widened)), widen_log = unname(ck$widen_log),
+       restarts = ck$restarts, prepared_bytes = ck$prepared_bytes, source_sha256 = ck$source_sha256)
+}
+
+# Rewrite checkpoint.json atomically.
+.sr_ck_write <- function(ck) {
+  .sr_write_json_file(ck$path, .sr_ck_list(ck))
+  invisible(ck)
+}
+
+.sr_ck_new <- function(project, table, fingerprint, sniff_hash, chunk_bytes) {
+  ck <- new.env(parent = emptyenv())
+  data <- sr_project_paths(project$paths$dir)$data
+  ck$table <- table
+  ck$ingest_dir <- file.path(data, "ingest", table)
+  ck$store_dir <- sr_store_dir(project, table)
+  ck$path <- file.path(ck$ingest_dir, "checkpoint.json")
+  ck$source_fingerprint <- fingerprint
+  ck$sniff_hash <- sniff_hash
+  ck$chunk_bytes <- chunk_bytes
+  ck$columns <- NULL
+  ck$next_offset <- 0
+  ck$parts <- list()
+  ck$done <- FALSE
+  ck$type_widened <- character()
+  ck$widen_log <- list()
+  ck$restarts <- 0L
+  ck$prepared_bytes <- NULL
+  ck$source_sha256 <- NA_character_
+  ck
+}
+
+# Fill a checkpoint object from the parsed checkpoint.json `disk`.
+.sr_ck_load <- function(ck, disk) {
+  ck$chunk_bytes <- as.numeric(disk$chunk_bytes)
+  ck$columns <- if (is.null(disk$columns)) NULL else lapply(disk$columns, function(cl) {
+    list(name = cl$name, type = cl$type, fmt = if (is.null(cl$fmt)) NA_character_ else cl$fmt)
+  })
+  ck$next_offset <- as.numeric(disk$next_offset)
+  ck$parts <- lapply(disk$parts, function(p) list(file = p$file, rows = as.numeric(p$rows), sha256 = p$sha256))
+  ck$type_widened <- as.character(unlist(disk$type_widened))
+  ck$widen_log <- disk$widen_log %||% list()
+  ck$restarts <- as.integer(disk$restarts %||% 0L)
+  ck$prepared_bytes <- if (is.null(disk$prepared_bytes)) NULL else as.numeric(disk$prepared_bytes)
+  ck$source_sha256 <- if (is.null(disk$source_sha256)) NA_character_ else disk$source_sha256
+  ck
+}
+
+# The path the next part is written to (renamed into place by .sr_part_commit).
+.sr_part_path <- function(ck) {
+  file.path(ck$store_dir, sprintf("part-%05d.parquet.tmp", length(ck$parts) + 1L))
+}
+
+.sr_rename_retry <- function(from, to, tries = 5L) {
+  for (i in seq_len(tries)) {
+    if (isTRUE(suppressWarnings(file.rename(from, to)))) return(invisible(TRUE))
+    Sys.sleep(0.2 * i)       # a virus scanner may briefly hold a freshly written file
+  }
+  stop("cannot move ", basename(from), " to ", basename(to), call. = FALSE)
+}
+
+#' Commit a written part: rename `part_file` (from .sr_part_path) to part-NNNNN.parquet, record its
+#' rows and SHA-256 and rewrite checkpoint.json atomically. Returns the next part index. A reader
+#' sets ck$next_offset to the offset AFTER the part before committing, so the checkpoint on disk is
+#' always consistent with the parts it lists.
+.sr_part_commit <- function(ck, part_file, rows) {
+  idx <- length(ck$parts) + 1L
+  final <- file.path(ck$store_dir, sprintf("part-%05d.parquet", idx))
+  if (!file.exists(part_file)) stop("part file was not written: ", basename(part_file), call. = FALSE)
+  if (file.exists(final)) unlink(final)
+  .sr_rename_retry(part_file, final)
+  ck$parts[[idx]] <- list(file = basename(final), rows = as.numeric(rows), sha256 = sr_sha256_file(final))
+  .sr_ck_write(ck)
+  idx + 1L
+}
+
+# Delete the committed parts (a type-conflict restart starts the table again from the top).
+.sr_ck_drop_parts <- function(ck) {
+  old <- list.files(ck$store_dir, pattern = "^part-.*[.]parquet([.]tmp)?$", full.names = TRUE)
+  if (length(old)) unlink(old)
+  ck$parts <- list()
+  ck$next_offset <- 0
+  invisible(ck)
+}
+
+# ---- source handling ------------------------------------------------------------------------------
+
+# Extension a copied source keeps: "csv", "csv.gz", "zip", ...
+.sr_source_ext <- function(path) {
+  ext <- .sr_ext(path)
+  if (ext %in% .sr_sniff_compressions) {
+    inner <- .sr_ext(tools::file_path_sans_ext(path))
+    return(if (nzchar(inner)) paste0(inner, ".", ext) else ext)
+  }
+  if (nzchar(ext)) ext else "dat"
+}
+
+# Copy `from` to `to` (through to.tmp and a rename) in 8 MiB blocks, hashing as it goes. Returns the
+# SHA-256 of the copy.
+.sr_copy_hashed <- function(from, to) {
+  tmp <- paste0(to, ".tmp")
+  inc <- .sr_md_incremental()
+  fed <- !is.null(inc)
+  ok <- FALSE
+  cin <- file(from, "rb")
+  cout <- file(tmp, "wb")
+  tryCatch({
+    repeat {
+      blk <- readBin(cin, "raw", n = .sr_io_block)
+      if (!length(blk)) break
+      writeBin(blk, cout)
+      if (fed) fed <- isTRUE(tryCatch({ inc$feed(blk); TRUE }, error = function(e) FALSE))
+    }
+    flush(cout)
+    ok <- TRUE
+  }, finally = {
+    close(cin)
+    close(cout)
+    if (!ok) unlink(tmp)
+  })
+  sha <- if (fed) tryCatch(inc$final(), error = function(e) NULL) else NULL
+  if (file.exists(to)) unlink(to)
+  .sr_rename_retry(tmp, to)
+  if (is.null(sha)) sha <- sr_sha256_file(to)
+  sha
+}
+
+# Hash of the sniff fields (and the parse options) that decide how the text is read. A checkpoint can
+# be resumed only when this is unchanged. Deliberately not sr_content_hash(): that mixes in the
+# library snapshot and the hardware, and a job must resume on another machine.
+.sr_ingest_sniff_hash <- function(sniff, options) {
+  get <- function(k) {
+    v <- sniff[[k]]
+    if (is.null(v) || length(v) != 1L) NA else v
+  }
+  fields <- c("format", "compression", "member", "encoding", "delim", "quote", "decimal", "header",
+              "quoted_newlines")
+  f <- stats::setNames(lapply(fields, get), fields)
+  f$date_order <- as.list(sniff$date_order %||% character())
+  f$parse_options <- list(sample_size = as.numeric(options$sample_size %||% 1e6),
+                          nullstr = as.character(options$nullstr %||% c("", "NA")))
+  .sr_sha256(sr_canonical_json(f))
+}
+
+# Is the checkpoint `disk` safe to resume? Returns NULL when yes, else the reason (a string).
+.sr_ck_refusal <- function(disk, fp, sniff_hash, store_dir, ingest_dir) {
+  if (!is.list(disk)) return("the checkpoint is unreadable")
+  a <- disk$source_fingerprint
+  if (!is.list(a) || !isTRUE(all.equal(as.numeric(a$size), fp$size)) || !identical(a$mtime, fp$mtime) ||
+      !identical(a$sample_sha, fp$sample_sha)) {
+    return("the source file changed since the checkpoint was written")
+  }
+  if (!identical(disk$sniff_hash, sniff_hash)) return("the parse settings changed since the checkpoint")
+  for (p in disk$parts) {
+    f <- file.path(store_dir, p$file)
+    if (!is.character(p$file) || !file.exists(f)) return(paste0("a committed part is missing: ", p$file))
+    if (!identical(sr_sha256_file(f), p$sha256)) return(paste0("a committed part changed: ", p$file))
+  }
+  if (!is.null(disk$prepared_bytes)) {
+    src <- file.path(ingest_dir, "source.csv")
+    if (!file.exists(src) || !isTRUE(all.equal(as.numeric(file.size(src)), as.numeric(disk$prepared_bytes)))) {
+      return("the decompressed copy of the source is missing or incomplete")
+    }
+  }
+  NULL
+}
+
+# Remove what a crash can leave behind next to a valid checkpoint: temp files, a half-written chunk
+# and parts that were renamed into place but never recorded.
+.sr_ck_tidy <- function(ck) {
+  tmp <- list.files(c(ck$store_dir, ck$ingest_dir), pattern = "[.]tmp$", full.names = TRUE)
+  chunk <- file.path(ck$ingest_dir, "chunk.csv")
+  unlink(c(tmp, chunk[file.exists(chunk)]))
+  parts <- list.files(ck$store_dir, pattern = "^part-.*[.]parquet$")
+  keep <- vapply(ck$parts, function(p) p$file, character(1))
+  orphan <- setdiff(parts, keep)
+  if (length(orphan)) unlink(file.path(ck$store_dir, orphan))
+  invisible(ck)
+}
+
+# Remove everything inside a directory (the directory stays).
+.sr_clear_dir <- function(dir) {
+  inside <- list.files(dir, all.files = TRUE, no.. = TRUE, full.names = TRUE)
+  if (length(inside)) unlink(inside, recursive = TRUE)
+  invisible(dir)
+}
+
+# ---- sr_ingest ------------------------------------------------------------------------------------
+
+#' Ingest a data file into the project's Parquet store and append `data.imported`.
+#'
+#' Order of events: (1) validate, sniff, find the reader; (2) pre-flight (a refusal stops here, before
+#' anything is created under data/); (3) resume a valid checkpoint or start fresh (a fresh start
+#' replaces the table's earlier store, ingest and source files); (4) copy the source into
+#' data/source (non-external mode); (5) run the reader; (6) manifest, store hash, `data.imported`.
+#'  - `external = NULL` takes the pre-flight's `external_suggested`.
+#'  - `options`: `drive_info` (replaces the drive probe of the pre-flight) and the reader's own
+#'    (csv: `sample_size`, default 1e6, and `nullstr`, default c("", "NA")).
+#'  - `progress(done_bytes, total_bytes)` and `cancel()` are called between chunks. When `cancel()`
+#'    returns TRUE the ingest stops with an error of class `sr_ingest_cancelled`; its checkpoint
+#'    stays, and calling sr_ingest again with the same arguments resumes.
+#' Returns the project with the event applied.
+sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sniff(path, member = member),
+                      external = NULL, member = NULL, sheet = NULL, options = list(),
+                      chunk_bytes = 256 * 1024^2, progress = NULL, cancel = function() FALSE) {
+  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  .sr_store_check_table(table)
+  chk <- .sr_sniff_check_path(path)
+  path <- chk$path
+  if (!is.list(options)) stop("options must be a list", call. = FALSE)
+  if (!is.numeric(chunk_bytes) || length(chunk_bytes) != 1L || !is.finite(chunk_bytes) || chunk_bytes < 1) {
+    stop("chunk_bytes must be a positive number", call. = FALSE)
+  }
+  if (!is.null(progress) && !is.function(progress)) stop("progress must be a function or NULL", call. = FALSE)
+  if (!is.function(cancel)) stop("cancel must be a function", call. = FALSE)
+  if (!is.null(external) && (!is.logical(external) || length(external) != 1L || is.na(external))) {
+    stop("external must be TRUE, FALSE or NULL", call. = FALSE)
+  }
+  if (is.na(sniff$format %||% NA_character_)) {
+    stop("cannot ingest: the file's format could not be determined",
+         if (length(sniff$warnings)) paste0(" (", sniff$warnings[1L], ")") else "", call. = FALSE)
+  }
+  reader <- .sr_reader_get(sniff$format)
+
+  # pre-flight: nothing has been created yet
+  drive_info <- options$drive_info %||% .sr_drive_info
+  if (is.null(external)) {
+    external <- isTRUE(sr_preflight(project, path, sniff, drive_info = drive_info,
+                                    external = FALSE)$external_suggested)
+  }
+  pf <- sr_preflight(project, path, sniff, drive_info = drive_info, external = external)
+  if (!isTRUE(pf$ok)) stop(pf$refuse_reason, call. = FALSE)
+
+  data <- sr_project_paths(project$paths$dir)$data
+  fp <- sr_fingerprint(path)
+  sniff_hash <- .sr_ingest_sniff_hash(sniff, options)
+  ck <- .sr_ck_new(project, table, fp, sniff_hash, as.numeric(chunk_bytes))
+
+  # resume a valid checkpoint, else start fresh
+  resumed <- FALSE
+  if (file.exists(ck$path)) {
+    disk <- tryCatch(.sr_read_json_file(ck$path), error = function(e) NULL)
+    if (is.list(disk) && isTRUE(disk$done)) {
+      disk <- NULL                                  # finished earlier: ingesting again replaces it
+    } else {
+      why <- .sr_ck_refusal(disk, fp, sniff_hash, ck$store_dir, ck$ingest_dir)
+      if (is.null(why)) {
+        .sr_ck_load(ck, disk)
+        resumed <- TRUE
+      } else {
+        warning("not resuming the earlier ingest of '", table, "': ", why, "; starting again", call. = FALSE)
+      }
+    }
+  }
+  src_dir <- file.path(data, "source")
+  for (d in c(ck$ingest_dir, ck$store_dir, if (!external) src_dir)) {
+    if (!dir.exists(d) && !isTRUE(dir.create(d, recursive = TRUE, showWarnings = FALSE))) {
+      stop("cannot create directory: ", d, call. = FALSE)
+    }
+  }
+  if (resumed) {
+    .sr_ck_tidy(ck)
+  } else {
+    .sr_clear_dir(ck$store_dir)
+    .sr_clear_dir(ck$ingest_dir)
+  }
+
+  # the source: a copy under data/source, or the file in place
+  work <- path
+  rel <- NA_character_
+  if (!external) {
+    dest <- file.path(src_dir, paste0(table, ".", .sr_source_ext(path)))
+    rel <- paste0("data/source/", basename(dest))
+    stale <- list.files(src_dir, pattern = paste0("^", table, "[.]"), full.names = TRUE)
+    if (resumed && file.exists(dest) && is.character(ck$source_sha256) && !is.na(ck$source_sha256) &&
+        isTRUE(all.equal(as.numeric(file.size(dest)), fp$size))) {
+      stale <- setdiff(stale, dest)
+    } else {
+      ck$source_sha256 <- NA_character_
+    }
+    if (length(stale)) unlink(stale)
+    if (is.na(ck$source_sha256)) ck$source_sha256 <- .sr_copy_hashed(path, dest)
+    work <- normalizePath(dest, winslash = "/", mustWork = TRUE)
+  }
+  .sr_ck_write(ck)
+
+  rsniff <- sniff
+  rsniff$path <- work
+  rsniff$size_bytes <- as.numeric(file.size(work))
+  res <- reader(project, rsniff, table, ck, options, progress, cancel)
+
+  # manifest, store hash, checkpoint done, event
+  parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
+  rows <- sum(vapply(parts, function(p) p$rows, numeric(1)))
+  manifest <- list(table = table, parts = parts, schema = res$schema, rows = rows)
+  sr_store_write_manifest(project, table, manifest)
+  store_hash <- sr_store_hash(manifest)
+  ck$done <- TRUE
+  .sr_ck_write(ck)
+  unlink(file.path(ck$ingest_dir, c("source.csv", "chunk.csv")))
+
+  do <- as.list(sniff$date_order %||% character())
+  if (!length(do)) do <- structure(list(), names = character())
+  payload <- list(
+    table = table, format = sniff$format,
+    source = list(path = if (external) path else rel, external = external, fingerprint = fp,
+                  sha256 = if (external) NA_character_ else ck$source_sha256),
+    store = list(dir = paste0("data/store/", table), rows = rows, ncol = length(res$schema),
+                 schema = res$schema, parts = parts),
+    store_hash = store_hash, resumable = isTRUE(res$resumable),
+    type_widened = as.list(as.character(res$type_widened)),
+    sniff = list(delim = sniff$delim, encoding = sniff$encoding, decimal = sniff$decimal, date_order = do))
+  sr_project_append(project, "data.imported", payload)
+}
+
+# `data.imported` sets the table's entry. Keys the payload does not carry survive (a later task adds
+# `active` to an entry), and a key it does carry is replaced whole (the parts are an array: a
+# recursive merge would keep the old ones).
+sr_reducer_register("data.imported", function(state, event) {
+  p <- event$payload
+  tabs <- state$tables %||% list()
+  old <- tabs[[p$table]] %||% list()
+  for (k in names(p)) old[k] <- list(p[[k]])
+  tabs[[p$table]] <- old
+  state$tables <- tabs
+  state
+})
+
+# The delimited-text reader (read_text.R, loaded before this file) serves csv, and tsv / txt should
+# the sniffer ever report them.
+.sr_reader_register("csv", .sr_read_csv)
+.sr_reader_register("tsv", .sr_read_csv)
+.sr_reader_register("txt", .sr_read_csv)
