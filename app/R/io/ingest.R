@@ -268,6 +268,9 @@ sr_table_name <- function(path, existing = character()) {
               "quoted_newlines")
   f <- stats::setNames(lapply(fields, get), fields)
   f$date_order <- as.list(sniff$date_order %||% character())
+  # which table / object of a multi-table source is read (only when chosen, so a text-format hash is unchanged)
+  if (!is.null(options$table)) f$table <- as.character(options$table)
+  if (!is.null(options$object)) f$object <- as.character(options$object)
   f$parse_options <- list(sample_size = as.numeric(options$sample_size %||% 1e6),
                           nullstr = as.character(options$nullstr %||% c("", "NA")))
   .sr_sha256(sr_canonical_json(f))
@@ -467,6 +470,7 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
 # Does the reader first expand the source to a plain UTF-8 file under data/ingest? (bz2 / xz / zip, or
 # an encoding other than UTF-8; a gzip is read in place by DuckDB.) Only the delimited-text formats.
 .sr_ingest_stages <- function(sniff) {
+  if (sniff$format %in% c("ndjson", "json")) return(.sr_json_needs_prep(sniff))
   if (!(sniff$format %in% c("csv", "tsv", "txt"))) return(FALSE)
   comp <- sniff$compression
   enc <- sniff$encoding
@@ -504,3 +508,14 @@ sr_reducer_register("data.imported", function(state, event) {
 .sr_reader_register("csv", .sr_read_csv)
 .sr_reader_register("tsv", .sr_read_csv)
 .sr_reader_register("txt", .sr_read_csv)
+
+# The columnar, JSON and database readers (read_columnar.R, loaded before this file).
+.sr_reader_register("parquet", .sr_read_parquet)
+.sr_reader_register("feather", .sr_read_feather)
+.sr_reader_register("rds", .sr_read_rds)
+.sr_reader_register("rdata", .sr_read_rdata)
+.sr_reader_register("fst", .sr_read_fst)
+.sr_reader_register("ndjson", .sr_read_ndjson)
+.sr_reader_register("json", .sr_read_json)
+.sr_reader_register("sqlite", .sr_read_sqlite)
+.sr_reader_register("duckdb", .sr_read_duckdb)

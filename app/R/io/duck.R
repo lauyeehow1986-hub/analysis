@@ -309,3 +309,31 @@ sr_duck_query <- function(con, sql) {
   .sr_duck_guard(sql)
   DBI::dbGetQuery(con, sql)
 }
+
+# ---- attaching a user's DuckDB file (read-only source) ----------------------------------------------
+
+#' The ONLY ATTACH in the application. A DuckDB file that is a data source is attached READ_ONLY under
+#' a random alias so it can be read with COPY; the caller always DETACHes (on.exit). It talks to DBI
+#' directly, as the connection's setup does: ATTACH and DETACH stay off the allowlist of
+#' sr_duck_exec() / sr_duck_query(), so user SQL can never reach them. The path and the alias are
+#' quoted, never pasted. Returns the alias.
+.sr_duck_attach <- function(con, path, alias = paste0("sr_src_", paste(as.character(openssl::rand_bytes(6L)), collapse = ""))) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)) {
+    stop("path must be a single non-empty string", call. = FALSE)
+  }
+  if (grepl(.sr_sniff_url_re, path)) stop("refusing to attach a URL: only local files can be read", call. = FALSE)
+  if (!file.exists(path) || dir.exists(path)) stop("file not found", call. = FALSE)
+  if (!is.character(alias) || length(alias) != 1L || !grepl("^sr_src_[0-9a-f]{12}$", alias)) {
+    stop("invalid alias", call. = FALSE)
+  }
+  f <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  DBI::dbExecute(con, sprintf("ATTACH %s AS %s (READ_ONLY)", DBI::dbQuoteString(con, f),
+                              DBI::dbQuoteIdentifier(con, alias)))
+  alias
+}
+
+#' Detach an alias made by .sr_duck_attach (never an error: it runs in on.exit).
+.sr_duck_detach <- function(con, alias) {
+  try(DBI::dbExecute(con, paste("DETACH", DBI::dbQuoteIdentifier(con, alias))), silent = TRUE)
+  invisible(alias)
+}
