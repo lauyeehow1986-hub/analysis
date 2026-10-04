@@ -100,27 +100,37 @@ sr_duck_close <- function(project) {
 
 # ---- the SQL guard --------------------------------------------------------------------------------
 
-# Scan SQL once, string- and comment-aware: single and double quotes with doubling, E'...' strings
-# (backslash escapes, as DuckDB reads them), $tag$ dollar quotes, -- line comments and nested block
-# comments. Returns list(ok, stripped, code, statements, code_statements):
+# The ONE quote/comment parser of the guard. Scans SQL once, string- and comment-aware, the way
+# DuckDB's lexer reads it: single and double quotes with doubling, $tag$ dollar quotes (tags may hold
+# non-ASCII letters), -- line comments (ended by LF or CR), nested block comments. Returns
+# list(ok, why, stripped, code, statements, code_statements):
 #  - `stripped`: the SQL with every comment replaced by one space;
 #  - `code`: the same with the inside of every string or quoted identifier blanked to x, so a keyword
-#    can only be found where DuckDB would read it as code;
+#    or parenthesis can only be found where DuckDB would read it as code;
 #  - `statements` / `code_statements`: the top-level pieces of both, split at `;`.
-# ok = FALSE when a quote, comment or dollar quote is left open (what DuckDB would reject anyway; not
-# guessable, so the guard refuses it).
+# ok = FALSE (with `why`) when the text cannot be read with certainty, and the guard then refuses:
+#  - an open quote, comment or dollar quote;
+#  - an E'...' string whose body contains a backslash. DuckDB reads backslash escapes there, so the
+#    end of the string is not the first unpaired quote. Without a backslash the E and plain parses are
+#    identical, so no identifier-character model is needed (fail closed);
+#  - a $tag$ / $$ right after an identifier character (letter, digit, _, $, non-ASCII): DuckDB reads
+#    that $ as part of the identifier, not as the start of a dollar quote.
 .sr_sql_scan <- function(sql) {
-  fail <- list(ok = FALSE, stripped = "", code = "", statements = character(), code_statements = character())
+  bad <- function(why) {
+    list(ok = FALSE, why = why, stripped = "", code = "", statements = character(),
+         code_statements = character())
+  }
   cp <- utf8ToInt(enc2utf8(sql))
-  if (anyNA(cp)) return(fail)
+  if (anyNA(cp)) return(bad("it is not valid text"))
   n <- length(cp)
   res <- integer(n + 1L)       # stripped text
   cod <- integer(n + 1L)       # code-only text (same indexing)
   k <- 0L
   semis <- integer()
   i <- 1L
-  is_id_start <- function(x) (x >= 65L & x <= 90L) | (x >= 97L & x <= 122L) | x == 95L
-  is_id <- function(x) is_id_start(x) | (x >= 48L & x <= 57L)
+  # DuckDB (like PostgreSQL) counts every non-ASCII character as a letter in identifiers and tags
+  is_letter <- function(x) (x >= 65L & x <= 90L) | (x >= 97L & x <= 122L) | x == 95L | x >= 128L
+  is_id <- function(x) is_letter(x) | (x >= 48L & x <= 57L) | x == 36L
   put_literal <- function(from, to) {          # copy a quoted piece; blank it in `cod`
     len <- to - from + 1L
     res[k + seq_len(len)] <<- cp[from:to]
@@ -132,11 +142,9 @@ sr_duck_close <- function(project) {
   while (i <= n) {
     ch <- cp[i]
     if (ch == 39L || ch == 34L) {                               # '...' or "..." with doubling
-      esc <- ch == 39L && i > 1L && cp[i - 1L] %in% c(69L, 101L) && (i < 3L || !is_id(cp[i - 2L]))
       j <- i + 1L
       closed <- FALSE
       while (j <= n) {
-        if (esc && cp[j] == 92L) { j <- j + 2L; next }          # E'..\'..' : backslash escapes
         if (cp[j] == ch) {
           if (j < n && cp[j + 1L] == ch) { j <- j + 2L; next }
           closed <- TRUE
@@ -144,12 +152,15 @@ sr_duck_close <- function(project) {
         }
         j <- j + 1L
       }
-      if (!closed) return(fail)
+      if (!closed) return(bad("a quote is left open"))
+      if (ch == 39L && i > 1L && cp[i - 1L] %in% c(69L, 101L) && j > i + 1L && any(cp[(i + 1L):(j - 1L)] == 92L)) {
+        return(bad("an E'...' string contains a backslash escape"))
+      }
       put_literal(i, j)
       i <- j + 1L
-    } else if (ch == 45L && i < n && cp[i + 1L] == 45L) {      # -- line comment
+    } else if (ch == 45L && i < n && cp[i + 1L] == 45L) {      # -- line comment (ends at LF or CR)
       j <- i + 2L
-      while (j <= n && cp[j] != 10L) j <- j + 1L
+      while (j <= n && cp[j] != 10L && cp[j] != 13L) j <- j + 1L
       k <- k + 1L
       res[k] <- 32L
       cod[k] <- 32L
@@ -162,17 +173,20 @@ sr_duck_close <- function(project) {
         else if (j < n && cp[j] == 42L && cp[j + 1L] == 47L) { depth <- depth - 1L; j <- j + 2L }
         else j <- j + 1L
       }
-      if (depth > 0L) return(fail)
+      if (depth > 0L) return(bad("a block comment is left open"))
       k <- k + 1L
       res[k] <- 32L
       cod[k] <- 32L
       i <- j
     } else if (ch == 36L) {                                     # $$...$$ or $tag$...$tag$
       j <- i + 1L
-      if (j <= n && is_id_start(cp[j])) {
-        while (j <= n && is_id(cp[j])) j <- j + 1L
+      if (j <= n && is_letter(cp[j])) {
+        while (j <= n && is_id(cp[j]) && cp[j] != 36L) j <- j + 1L
       }
       if (j <= n && cp[j] == 36L) {
+        if (i > 1L && is_id(cp[i - 1L])) {
+          return(bad("a dollar sign follows an identifier character"))
+        }
         tag <- cp[i:j]
         tl <- length(tag)
         m <- j + 1L
@@ -181,7 +195,7 @@ sr_duck_close <- function(project) {
           if (all(cp[m:(m + tl - 1L)] == tag)) { found <- m; break }
           m <- m + 1L
         }
-        if (found == 0L) return(fail)
+        if (found == 0L) return(bad("a dollar-quoted string is left open"))
         put_literal(i, found + tl - 1L)
         i <- found + tl
       } else {
@@ -203,64 +217,48 @@ sr_duck_close <- function(project) {
   starts <- c(1L, semis + 1L)
   ends <- c(semis - 1L, k)
   last <- pmax(ends, starts - 1L)
-  list(ok = TRUE, stripped = stripped, code = code,
+  list(ok = TRUE, why = "", stripped = stripped, code = code,
        statements = substring(stripped, starts, last), code_statements = substring(code, starts, last))
 }
 
-# Index of the `)` that closes the `(` at position i of the code points cp (quotes honoured), or 0.
-.sr_close_paren <- function(cp, i) {
-  depth <- 0L
-  n <- length(cp)
-  while (i <= n) {
-    ch <- cp[i]
-    if (ch == 39L || ch == 34L) {
-      j <- i + 1L
-      while (j <= n && cp[j] != ch) j <- j + 1L
-      if (j > n) return(0L)
-      i <- j
-    } else if (ch == 40L) {
-      depth <- depth + 1L
-    } else if (ch == 41L) {
-      depth <- depth - 1L
-      if (depth == 0L) return(i)
-    }
-    i <- i + 1L
-  }
-  0L
-}
-
-# What a statement really runs: peel EXPLAIN / ANALYZE / ANALYSE words and any (...) option list
-# that follows them, repeatedly (DuckDB executes the wrapped statement, so EXPLAIN ANALYZE INSTALL is
-# an INSTALL). `stmt` is one comment-free statement; returns the remaining text, or NA when an option
-# list is unbalanced (not guessable: the caller refuses).
-.sr_duck_peel <- function(stmt) {
-  s <- sub("^[[:space:]]+", "", stmt)
+# What a statement really runs, read on the scanner's string-blanked code (every literal is already
+# gone, so plain parenthesis counting is exact): peel EXPLAIN / ANALYZE / ANALYSE words and any
+# (...) option list that follows them, repeatedly (DuckDB executes the wrapped statement, so
+# EXPLAIN ANALYZE INSTALL is an INSTALL). Returns the remaining text, or NA when an option list is
+# unbalanced (not guessable: the caller refuses).
+.sr_duck_peel <- function(code_stmt) {
+  s <- sub("^[[:space:]]+", "", code_stmt)
   repeat {
     m <- regexpr("^(EXPLAIN|ANALYZE|ANALYSE)(?![A-Za-z0-9_])", s, ignore.case = TRUE, perl = TRUE)
     if (m < 0L) return(s)
     s <- sub("^[[:space:]]+", "", substring(s, attr(m, "match.length") + 1L))
     while (startsWith(s, "(")) {
       cp <- utf8ToInt(s)
-      close_at <- .sr_close_paren(cp, 1L)
-      if (close_at == 0L) return(NA_character_)
+      depth <- cumsum((cp == 40L) - (cp == 41L))
+      close_at <- which(depth == 0L)[1L]
+      if (is.na(close_at)) return(NA_character_)
       s <- sub("^[[:space:]]+", "", intToUtf8(cp[-seq_len(close_at)]))
     }
   }
 }
 
-# A statement that may not run through the application SQL helpers.
-.sr_duck_refused_re <- paste0(
-  "^(?:FORCE[[:space:]]+INSTALL|INSTALL|LOAD|SET|RESET|PRAGMA|ATTACH)(?![A-Za-z0-9_])")
+# The only statements the application may run through sr_duck_exec / sr_duck_query: the first keyword
+# of each statement (after peeling EXPLAIN / ANALYZE) must be one of these.
+.sr_duck_allowed <- c("SELECT", "WITH", "FROM", "VALUES", "TABLE", "CREATE", "INSERT", "UPDATE", "DELETE",
+                      "DROP", "ALTER", "COPY", "DESCRIBE", "SHOW", "SUMMARIZE", "PIVOT", "UNPIVOT",
+                      "BEGIN", "COMMIT", "ROLLBACK", "CHECKPOINT")
 
-#' Refuse INSTALL / FORCE INSTALL / LOAD / SET / RESET / PRAGMA / ATTACH statements and any
-#' 'scheme://' string literal (single-quoted or dollar-quoted), on the SQL with comments stripped.
-#' Errors with "refused: ..."; returns TRUE invisibly otherwise.
-#'  - Statements come from the string- and comment-aware scan above (split at top-level `;`), so
-#'    free text such as 'Discharged; set for review' is data, and a keyword is found after any
-#'    number of comments.
-#'  - EXPLAIN / ANALYZE / (options) prefixes are peeled before the keyword test.
-#'  - Independently, an INSTALL with a FROM clause anywhere in the code (outside strings and quoted
-#'    identifiers) is refused: INSTALL ... FROM <repo> overrides the repository lockdown.
+#' Allow a statement only if its first keyword is on the allowlist above (EXPLAIN / ANALYZE /
+#' ANALYSE and their option lists are peeled and the remainder re-checked). Everything else is
+#' refused: INSTALL, LOAD, FORCE, ATTACH, DETACH, SET, RESET, PRAGMA, CALL, EXPORT, IMPORT, USE, an
+#' unknown word, anything not starting with a word. Errors with "refused: ..."; returns TRUE
+#' invisibly otherwise.
+#'  - Statements come from the single string- and comment-aware scan above, split at top-level `;`
+#'    (stray empty pieces from `;;` or a trailing `;` are no-ops; SQL with no statement at all is
+#'    refused), so free text such as 'Discharged; set for review' is data.
+#'  - Extra layers: an INSTALL with a FROM clause anywhere in the code (outside strings and quoted
+#'    identifiers) is refused, because INSTALL ... FROM <repo> overrides the repository lockdown; and
+#'    any 'scheme://' literal (single-quoted or dollar-quoted) is refused.
 #' Deliberately NOT caught: a URL assembled at run time ('http' || '://x'). That is left to the
 #' extension lockdown (project-owned empty extension dir and repository, autoload/autoinstall off,
 #' lock_configuration), because httpfs cannot be loaded and so nothing can open such a URL.
@@ -269,21 +267,21 @@ sr_duck_close <- function(project) {
     stop("sql must be a single string", call. = FALSE)
   }
   sc <- .sr_sql_scan(sql)
-  if (!sc$ok) {
-    stop("refused: SQL has an unterminated quote, comment or dollar-quoted string", call. = FALSE)
-  }
-  for (stmt in sc$statements) {
-    body <- .sr_duck_peel(stmt)
-    if (is.na(body)) {
-      stop("refused: unbalanced option list after EXPLAIN", call. = FALSE)
+  if (!sc$ok) stop("refused: SQL cannot be read with certainty (", sc$why, ")", call. = FALSE)
+  seen <- 0L
+  for (cs in sc$code_statements) {
+    if (!nzchar(trimws(cs))) next
+    seen <- seen + 1L
+    body <- .sr_duck_peel(cs)
+    if (is.na(body)) stop("refused: unbalanced option list after EXPLAIN", call. = FALSE)
+    word <- regmatches(body, regexpr("^[A-Za-z]+(?![A-Za-z0-9_$])", body, perl = TRUE))
+    if (!length(word) || !(toupper(word) %in% .sr_duck_allowed)) {
+      stop("refused: ", if (length(word)) toupper(word) else "this kind of",
+           " statement is not allowed in application SQL (allowlist: ",
+           paste(.sr_duck_allowed, collapse = " "), ")", call. = FALSE)
     }
-    hit <- regmatches(body, regexpr(.sr_duck_refused_re, body, ignore.case = TRUE, perl = TRUE))
-    if (length(hit)) {
-      kw <- gsub("[[:space:]]+", " ", toupper(hit))
-      kw <- regmatches(kw, regexpr("(FORCE INSTALL|INSTALL|LOAD|SET|RESET|PRAGMA|ATTACH)$", kw))
-      stop("refused: ", kw, " statements are not allowed in application SQL", call. = FALSE)
-    }
   }
+  if (seen == 0L) stop("refused: no SQL statement", call. = FALSE)
   inst <- "(?<![A-Za-z0-9_])INSTALL(?![A-Za-z0-9_])"
   from <- "(?<![A-Za-z0-9_])FROM(?![A-Za-z0-9_])"
   for (cs in sc$code_statements) {

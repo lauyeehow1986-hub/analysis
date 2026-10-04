@@ -297,10 +297,12 @@ sr_lint_pgate <- function(file) {
 
 # DuckDB extensions cannot be fetched on an air-gapped box, and DuckDB read_json needs the (absent)
 # json extension and fetches URL-looking names. Flagged: a SQL string that starts with INSTALL or
-# LOAD (or FORCE INSTALL), also behind EXPLAIN / ANALYZE / (options) since DuckDB runs the wrapped
-# statement, followed by a blank, quote or semicolon (so "install.packages" is fine),
+# LOAD (or FORCE INSTALL), also behind EXPLAIN / ANALYZE / (options) and SQL comments, since DuckDB runs
+# the wrapped statement, followed by a blank, quote, semicolon or comment (so "install.packages" is fine),
 # and one that calls read_json / read_json_auto / read_ndjson ...
-.sr_lint_sql_ext_re <- "^[[:space:]]*(?:(?:EXPLAIN|ANALYZE|ANALYSE)(?![A-Za-z0-9_])[[:space:]]*(?:[(][^)]*[)][[:space:]]*)*)*(FORCE[[:space:]]+)?(INSTALL|LOAD)(?=[[:space:];'\"]|$)"
+# W = whitespace and SQL comments (block comments, line comments), possessive so it cannot backtrack
+.sr_lint_sql_w <- paste0("(?:[[:space:]]|/[*][^*]*[*]+(?:[^/*][^*]*[*]+)*/|--[^", intToUtf8(10L), "]*)*+")
+.sr_lint_sql_ext_re <- paste0("^", .sr_lint_sql_w, "(?:(?:EXPLAIN|ANALYZE|ANALYSE)(?![A-Za-z0-9_])", .sr_lint_sql_w, "(?:[(][^)]*[)]", .sr_lint_sql_w, ")*+)*+", "(?:FORCE(?![A-Za-z0-9_])", .sr_lint_sql_w, ")?(?:INSTALL|LOAD)(?=[[:space:];'\"]|/[*]|--|$)")
 .sr_lint_sql_json_re <- "(?<![A-Za-z0-9_])read_(nd)?json[A-Za-z0-9_]*[[:space:]]*[(]"
 
 #' The value of a STR_CONST token's text (escapes resolved, raw strings handled), or NA.

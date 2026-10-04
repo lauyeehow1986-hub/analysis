@@ -497,3 +497,21 @@ test_that("air-gap flags EXPLAIN-wrapped INSTALL / LOAD SQL strings too", {
               'c <- "explain the install step"', 'd <- "EXPLAIN (ANALYZE) SELECT 1"'))
   expect_identical(nrow(ok), 0L)
 })
+
+test_that("air-gap flags EXPLAIN (options) and comment-separated INSTALL / LOAD strings", {
+  bs <- intToUtf8(92L)
+  r <- .ag(c(
+    'a <- "EXPLAIN (FORMAT JSON, ANALYZE) INSTALL x"',
+    'b <- "EXPLAIN/**/INSTALL x"',
+    'c <- "EXPLAIN /* a */ ANALYZE /* b */ (VERBOSE) /* c */ LOAD x"',
+    'd <- "/* c */ INSTALL x"',
+    'e <- "EXPLAIN (ANALYZE)INSTALL x"',
+    paste0('f <- "-- c', bs, 'nLOAD x"'),
+    'g <- "EXPLAIN/**/FORCE/**/INSTALL x"',
+    'h <- "EXPLAIN (ANALYZE) (FORMAT JSON) LOAD x"'
+  ))
+  expect_identical(r$line, 1:8)
+  ok <- .ag(c('a <- "EXPLAIN /* INSTALL */ SELECT 1"', 'b <- "/* LOAD */ SELECT 1"',
+              'c <- "EXPLAIN (FORMAT JSON) SELECT install FROM t"', 'd <- "-- install"'))
+  expect_identical(nrow(ok), 0L)
+})

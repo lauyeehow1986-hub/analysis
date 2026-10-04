@@ -221,21 +221,94 @@ test_that("the tokenizing scanner alone is enough: no match-limit failures, no f
   expect_false(.refused("SELECT \"a; set b\" FROM t"))
 })
 
-test_that("E'...' strings (backslash escapes) cannot hide a statement from the scanner", {
+test_that("E'...' strings fail closed: refused when the body has a backslash, else plain", {
   bs <- intToUtf8(92L)
-  # DuckDB reads E'<bs>'' as one string holding a quote, so the LOAD after it is a real statement
-  s <- paste0("SELECT E'", bs, "''; LOAD zz_sr_fake_ext; --'")
-  expect_true(.refused(s))
+  # DuckDB reads E'<bs>'' as one string holding a quote, so a LOAD after it is a real statement
+  expect_true(.refused(paste0("SELECT E'", bs, "''; LOAD zz_sr_fake_ext; --'")))
   expect_true(.refused(paste0("SELECT e'", bs, "''; SET threads=1; --'")))
+  expect_true(.refused(paste0("SELECT E'a", bs, "b' AS w")))                 # any backslash in an E body
+  expect_true(.refused(paste0("SELECT 1 AS x WHERE y = e'", bs, "n'")))
+  # no backslash: the E and plain parses are identical, so it is allowed
+  expect_false(.refused("SELECT e'abc' AS w"))
+  expect_false(.refused("SELECT E'it''s' AS w"))
+  # a plain string may contain backslashes (Windows paths) when no e/E sits before the quote
+  expect_false(.refused(paste0("SELECT 'C:", bs, "data", bs, "a.csv' AS w")))
+  expect_false(.refused(paste0("SELECT x FROM read_csv('C:", bs, "d", bs, "a.csv')")))
   p <- .duck_project()
   con <- sr_duck(p)
-  expect_identical(sr_duck_query(con, paste0("SELECT E'", bs, "'' AS w"))$w, "'")
-  expect_identical(sr_duck_query(con, paste0("SELECT E'a", bs, "'; set x' AS w"))$w, "a'; set x")
-  # an identifier that merely ends in e is not an E-string prefix
+  expect_identical(sr_duck_query(con, "SELECT e'abc' AS w")$w, "abc")
+  expect_identical(sr_duck_query(con, paste0("SELECT 'a", bs, "b' AS w"))$w, paste0("a", bs, "b"))
   expect_identical(as.character(sr_duck_query(con, "SELECT DATE'2020-01-01' AS d")$d), "2020-01-01")
-  expect_false(.refused("SELECT DATE'2020-01-01' AS d"))
 })
 
+test_that("identifier-character desyncs cannot hide a statement (non-ASCII and $ before E or a dollar quote)", {
+  bs <- intToUtf8(92L)
+  e <- intToUtf8(233L)
+  expect_true(.refused(paste0("CREATE TYPE ", e, "E AS VARCHAR; SELECT ", e, "E'", bs, "'; SET threads=1; --'")))
+  expect_true(.refused(paste0("SELECT a$E'", bs, "'; SET threads=1; --'")))
+  expect_true(.refused(paste0("SELECT ", e, "e'", bs, "''; LOAD zz_sr_fake_ext; --'")))
+  # a $tag$ right after an identifier character is part of the identifier in DuckDB, not a quote
+  expect_true(.refused("SELECT a$x$; SET threads=1; $x$"))
+  expect_true(.refused("SELECT a$$; SET threads=1; $$"))
+  # a dollar-quote tag may hold non-ASCII letters
+  tg <- paste0("$", e, "$")
+  expect_true(.refused(paste0("SELECT ", tg, " ' ", tg, "; SET threads=1; SELECT ", tg, " ' ", tg)))
+  expect_false(.refused(paste0("SELECT ", tg, " ' ", tg, " AS w")))
+  # a carriage return ends a -- comment in DuckDB, so a statement can follow it
+  expect_true(.refused(paste0("SELECT 1 --x", intToUtf8(13L), "; SET threads=1")))
+  expect_true(.refused(paste0("SELECT 1 --x", intToUtf8(13L), "; LOAD zz_sr_fake_ext")))
+})
+
+test_that("the guard is an allowlist on the statement's first keyword", {
+  for (s in c("CALL zz_sr_fake()", "USE zz", "DETACH zz", "EXPORT DATABASE 'C:/zz_sr_nonexistent'",
+              "IMPORT DATABASE 'C:/zz_sr_nonexistent'", "FORCE CHECKPOINT", "VACUUM", "ANALYZE zz",
+              "EXPLAIN", "EXPLAIN ANALYZE", "(SELECT 1)", "FOO bar", "1", "TRUNCATE zz",
+              "", "   ", ";", " ; ; ", "-- just a comment", "/* c */",
+              "SELECT 1; CALL zz_sr_fake()", "SELECT 1; USE zz", "EXPLAIN CALL zz_sr_fake()")) {
+    expect_true(.refused(s), info = s)
+  }
+  # still allowed: ordinary statements, with or without trailing semicolons
+  expect_false(.refused("SELECT 'it''s' AS w"))
+  expect_false(.refused("SELECT 1;"))
+  expect_false(.refused("SELECT 1; SELECT 2"))
+  expect_false(.refused("WITH a AS (SELECT 1 AS x) SELECT * FROM a"))
+  expect_false(.refused("CREATE TABLE t2 AS SELECT 1 AS x"))
+  expect_false(.refused("DESCRIBE t"))
+  expect_false(.refused("  \n describe select 1"))
+  for (s in c("FROM t", "VALUES (1)", "TABLE t", "INSERT INTO t VALUES (1)", "UPDATE t SET a = 1",
+              "DELETE FROM t", "DROP TABLE t", "ALTER TABLE t ADD COLUMN b INT", "SHOW TABLES",
+              "SUMMARIZE t", "PIVOT t ON a USING sum(b)", "UNPIVOT t ON a, b", "BEGIN", "COMMIT",
+              "ROLLBACK", "CHECKPOINT", "EXPLAIN SELECT 1", "EXPLAIN ANALYZE SELECT 1",
+              "EXPLAIN (ANALYZE) WITH a AS (SELECT 1) SELECT * FROM a")) {
+    expect_false(.refused(s), info = s)
+  }
+  p <- .duck_project()
+  con <- sr_duck(p)
+  out <- file.path(withr::local_tempdir(), "zz.parquet")
+  out <- normalizePath(out, winslash = "/", mustWork = FALSE)
+  sr_duck_exec(con, sprintf("COPY (SELECT 1 AS x) TO %s (FORMAT parquet)", DBI::dbQuoteString(con, out)))
+  expect_true(file.exists(out))
+  expect_false(.refused(sprintf("COPY (SELECT 1) TO %s (FORMAT parquet)", DBI::dbQuoteString(con, out))))
+  sr_duck_exec(con, "CREATE TABLE t (a INTEGER, b INTEGER)")
+  expect_gte(nrow(sr_duck_query(con, "DESCRIBE t")), 2L)
+  expect_identical(sr_duck_query(con, "WITH a AS (SELECT 7 AS x) SELECT x FROM a")$x, 7L)
+  expect_error(sr_duck_exec(con, "CALL zz_sr_fake()"), "refused")
+  expect_error(sr_duck_exec(con, "USE zz_sr_fake"), "refused")
+})
+
+test_that("option lists after EXPLAIN are matched on the scanner's string-blanked code", {
+  bs <- intToUtf8(92L)
+  for (kw in c("SET threads=1", "LOAD zz_sr_fake_ext", "PRAGMA database_list",
+               "ATTACH 'C:/zz_sr_nonexistent.duckdb' AS zz", "INSTALL zz_sr_fake_ext")) {
+    expect_true(.refused(paste0("EXPLAIN (ANALYZE $$)$$) ", kw)), info = kw)
+    expect_true(.refused(paste0("EXPLAIN (ANALYZE E'", bs, "')') ", kw)), info = kw)
+    expect_true(.refused(paste0("EXPLAIN (ANALYZE $t$)$t$) ", kw)), info = kw)
+    expect_true(.refused(paste0("EXPLAIN (FORMAT 'a)b') ", kw)), info = kw)
+    expect_true(.refused(paste0("EXPLAIN (FORMAT \"a)b\") ANALYZE ", kw)), info = kw)
+  }
+  expect_false(.refused("EXPLAIN (FORMAT 'a)b') SELECT 1"))
+  expect_false(.refused("EXPLAIN (ANALYZE $$)$$) SELECT 1"))
+})
 test_that("the guard validates its input", {
   expect_error(.sr_duck_guard(NA_character_), "single string")
   expect_error(.sr_duck_guard(c("SELECT 1", "SELECT 2")), "single string")

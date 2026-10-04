@@ -229,3 +229,12 @@ test_that("sr_sha256_file falls back to a one-shot hash when the incremental pat
   expect_identical(seen[[1L]], rep(as.numeric(file.size(f)), 2L))
   expect_identical(sr_sha256_file(f), ref)
 })
+
+test_that("an error raised by the caller's progress callback propagates and does not trigger a re-hash", {
+  f <- .big_file(9 * 1024 * 1024 + 7)
+  calls <- 0L
+  expect_error(
+    sr_sha256_file(f, progress = function(done, total) { calls <<- calls + 1L; stop("cancelled by caller") }),
+    "cancelled by caller")
+  expect_identical(calls, 1L)                                # not retried by the fallback
+})

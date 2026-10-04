@@ -31,30 +31,26 @@ sr_fingerprint <- function(path) {
 # One-shot SHA-256 of an open binary connection (lowercase hex).
 .sr_sha256_con <- function(con) paste(as.character(unclass(openssl::sha256(con))), collapse = "")
 
-# Incremental SHA-256 over 8 MiB blocks, calling progress(done, total) after each. NOTE: this relies on
-# the UNEXPORTED openssl functions md_init / md_feed / md_final (openssl has no exported incremental
-# API), so the caller wraps it in tryCatch and falls back. Returns the hex digest.
-.sr_sha256_blocks <- function(con, total, progress) {
-  ns <- asNamespace("openssl")
-  md <- get("md_init", envir = ns)("sha256")
-  feed <- get("md_feed", envir = ns)
-  done <- 0
-  repeat {
-    data <- readBin(con, "raw", n = SR_HASH_BLOCK)
-    if (!length(data)) break
-    feed(md, data)
-    done <- done + length(data)
-    progress(done, total)
-  }
-  if (done == 0) progress(0, total)
-  paste(as.character(unclass(get("md_final", envir = ns)(md))), collapse = "")
+# An incremental SHA-256: list(feed = function(raw), final = function() hex), or NULL when it cannot
+# be set up. NOTE: this relies on the UNEXPORTED openssl functions md_init / md_feed / md_final
+# (openssl has no exported incremental API), so every call into them is wrapped by the caller and a
+# failure falls back to the one-shot hash.
+.sr_md_incremental <- function() {
+  tryCatch({
+    ns <- asNamespace("openssl")
+    md <- get("md_init", envir = ns)("sha256")
+    feed <- get("md_feed", envir = ns)
+    final <- get("md_final", envir = ns)
+    list(feed = function(data) feed(md, data),
+         final = function() paste(as.character(unclass(final(md))), collapse = ""))
+  }, error = function(e) NULL)
 }
 
 # SHA-256 (lowercase hex) of a whole file, streamed. With progress (function(done_bytes, total))
 # the file is read in 8 MiB blocks into an incremental hash and progress() is called after each.
-# If the incremental path is unavailable or errors for any reason (or option
+# Only the md_* hashing calls are guarded: if they are unavailable or error (or option
 # sr.sha256_force_fallback is TRUE, used by tests), the file is re-read with openssl::sha256 and
-# progress() is called once, at the end.
+# progress() is called once, at the end. An error raised by the caller's progress() is NOT caught.
 sr_sha256_file <- function(path, progress = NULL) {
   .sr_file_must_exist(path)
   if (!is.null(progress) && !is.function(progress)) stop("progress must be a function or NULL", call. = FALSE)
@@ -62,9 +58,22 @@ sr_sha256_file <- function(path, progress = NULL) {
   on.exit(close(con), add = TRUE)
   total <- as.numeric(file.size(path))
   if (is.null(progress)) return(.sr_sha256_con(con))
+  inc <- if (isTRUE(getOption("sr.sha256_force_fallback"))) NULL else .sr_md_incremental()
   out <- NULL
-  if (!isTRUE(getOption("sr.sha256_force_fallback"))) {
-    out <- tryCatch(.sr_sha256_blocks(con, total, progress), error = function(e) NULL)
+  if (!is.null(inc)) {
+    done <- 0
+    failed <- FALSE
+    repeat {
+      data <- readBin(con, "raw", n = SR_HASH_BLOCK)
+      if (!length(data)) break
+      if (!isTRUE(tryCatch({ inc$feed(data); TRUE }, error = function(e) FALSE))) { failed <- TRUE; break }
+      done <- done + length(data)
+      progress(done, total)                    # outside any tryCatch: the caller's errors propagate
+    }
+    if (!failed) {
+      if (done == 0) progress(0, total)
+      out <- tryCatch(inc$final(), error = function(e) NULL)
+    }
   }
   if (is.null(out)) {
     seek(con, where = 0, origin = "start", rw = "read")
