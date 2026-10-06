@@ -53,9 +53,33 @@
   invisible(TRUE)
 }
 
+# The first VARCHAR column of `from` (a table expression) that holds text which is not valid UTF-8, else
+# NULL. One pass over all the text columns; only on a failure is each column tried on its own.
+.sr_col_bad_utf8 <- function(con, from) {
+  d <- sr_duck_query(con, paste("DESCRIBE SELECT * FROM", from))
+  nm <- as.character(d$column_name)[as.character(d$column_type) == "VARCHAR"]
+  if (!length(nm)) return(NULL)
+  probe <- function(cols) {
+    q <- DBI::dbQuoteIdentifier(con, cols)
+    tryCatch({
+      sr_duck_query(con, sprintf("SELECT %s FROM %s", paste0("max(length(", q, "))", collapse = ", "), from))
+      TRUE
+    }, error = function(e) FALSE)
+  }
+  if (probe(nm)) return(NULL)
+  for (k in nm) if (!probe(k)) return(k)
+  NULL
+}
+
+.sr_col_utf8_stop <- function(col, what = "the data") {
+  stop("invalid UTF-8 text in column '", col, "' of ", what, ": the file is damaged or not UTF-8 ",
+       "(re-export it as UTF-8)", call. = FALSE)
+}
+
 # COPY the rows of `from` (a table expression) to the part file `to` as zstd Parquet; returns the row
-# count read back from the footer. On an error the temp file is removed and the error rethrown.
-.sr_col_copy <- function(con, from, to, select = "*", order = NULL) {
+# count read back from the footer. On an error the temp file is removed and the error rethrown. With
+# `check_utf8`, text that is not valid UTF-8 (in the source or the part) is refused, naming the column.
+.sr_col_copy <- function(con, from, to, select = "*", order = NULL, check_utf8 = FALSE, what = "the data") {
   dest <- DBI::dbQuoteString(con, normalizePath(to, winslash = "/", mustWork = FALSE))
   sql <- sprintf("COPY (SELECT %s FROM %s%s) TO %s (FORMAT parquet, COMPRESSION zstd)", select, from,
                  if (is.null(order)) "" else paste(" ORDER BY", order), dest)
@@ -64,8 +88,17 @@
     n <- sr_duck_query(con, sprintf("SELECT count(*) AS n FROM read_parquet(%s)", dest))
     as.numeric(n$n[1L])
   }, error = function(e) e)
+  if (!inherits(res, "error") && check_utf8) {
+    bad <- .sr_col_bad_utf8(con, sprintf("read_parquet(%s)", dest))
+    if (!is.null(bad)) res <- tryCatch(.sr_col_utf8_stop(bad, what), error = function(e) e)
+  }
   if (inherits(res, "error")) {
     unlink(to)
+    if (check_utf8 && grepl("UTF-?8|string encoding", conditionMessage(res), ignore.case = TRUE) &&
+        !grepl("invalid UTF-8 text in column", conditionMessage(res), fixed = TRUE)) {
+      bad <- tryCatch(.sr_col_bad_utf8(con, from), error = function(e) NULL)
+      if (!is.null(bad)) .sr_col_utf8_stop(bad, what)
+    }
     stop(res)
   }
   res
@@ -84,16 +117,19 @@
 # commit it; return the reader result. For the readers that produce a single part.
 .sr_col_single <- function(project, sniff, ck, progress, cancel, writer) {
   con <- sr_duck(project)
+  tz <- NULL
   if (!length(ck$parts)) {
     if (cancel()) stop(.sr_ingest_cancelled())
     to <- .sr_part_path(ck)
     rows <- writer(con, to)
+    tz <- attr(rows, "source_tz")
+    rows <- as.numeric(rows)
     size <- as.numeric(sniff$size_bytes)
     ck$next_offset <- size
     .sr_part_commit(ck, to, rows)
     if (!is.null(progress)) progress(size, size)
   }
-  list(schema = .sr_col_schema(con, ck), resumable = FALSE, type_widened = character())
+  list(schema = .sr_col_schema(con, ck), resumable = FALSE, type_widened = character(), source_tz = tz)
 }
 
 # Register `obj` under a throwaway name, run `fn(quoted_name)`, always unregister.
@@ -108,53 +144,70 @@
 # One cell of a list column as JSON text (NULL stays NA).
 .sr_col_cell <- function(x) if (is.null(x)) NA_character_ else .sr_json(x)
 
-# A data frame ready for DuckDB: plain data.frame, UTF-8 text, factors as text, list columns as JSON
-# text, difftime / hms as text; plus a row-order column.
+# A data frame ready for DuckDB: plain data.frame, UTF-8 text (text that is not valid UTF-8 is refused,
+# naming the column), factors as text, list columns as JSON text, difftime / hms as text, date-times as
+# the UTC instant (the source tzone goes to attr "sr_tz"), 64-bit integers as text to CAST (attr
+# "sr_cast"); plus a row-order column.
 .sr_col_frame <- function(df, what = "the data") {
   if (!is.data.frame(df)) stop(what, " is not a data frame", call. = FALSE)
   df <- as.data.frame(df, stringsAsFactors = FALSE)
   .sr_col_check_names(names(df), what)
-  i64 <- character()
+  cast <- character()
+  tz <- list()
   for (i in seq_along(df)) {
     x <- df[[i]]
+    nm <- names(df)[i]
     if (inherits(x, "integer64")) {
       # duckdb_register() would read the 64-bit pattern as a double: pass the digits as text and CAST
       if (!requireNamespace("bit64", quietly = TRUE)) stop("bit64 package required for 64-bit integers", call. = FALSE)
       x <- as.character(x)
-      i64 <- c(i64, names(df)[i])
+      cast[nm] <- "BIGINT"
     } else if (is.factor(x)) {
       x <- as.character(x)
     } else if (inherits(x, "difftime")) {
       x <- ifelse(is.na(x), NA_character_, format(x))
-    } else if (is.list(x) && !inherits(x, "POSIXlt")) {
+    } else if (inherits(x, "POSIXt")) {
+      if (inherits(x, "POSIXlt")) x <- as.POSIXct(x)
+      z <- attr(x, "tzone")
+      tz[[nm]] <- if (is.null(z) || is.na(z[1L]) || !nzchar(z[1L])) "(unset)" else as.character(z[1L])
+      x <- structure(as.numeric(x), class = c("POSIXct", "POSIXt"), tzone = "UTC")
+    } else if (is.list(x)) {
       x <- vapply(x, .sr_col_cell, character(1))
     }
     if (is.character(x)) {
       x <- enc2utf8(unclass(x))
       attributes(x) <- NULL
+      if (!all(validUTF8(x))) .sr_col_utf8_stop(nm, what)
     }
     df[[i]] <- x
   }
   df[[.sr_col_roword]] <- seq_len(nrow(df))
-  attr(df, "sr_int64") <- i64
+  attr(df, "sr_cast") <- cast
+  attr(df, "sr_tz") <- tz
   df
 }
 
-# Write a data frame as one part.
-.sr_col_frame_part <- function(con, df, to, what = "the data") {
+# Write a data frame as one part. `casts` (name -> DuckDB type) are CAST on the way out, on top of the
+# ones .sr_col_frame() asks for. The row count returned carries attr "source_tz" when a date-time column
+# had a timezone.
+.sr_col_frame_part <- function(con, df, to, what = "the data", casts = character()) {
   df <- .sr_col_frame(df, what)
-  .sr_col_with_reg(con, df, function(from) {
+  cast <- c(attr(df, "sr_cast"), casts)
+  tz <- attr(df, "sr_tz")
+  rows <- .sr_col_with_reg(con, df, function(from) {
     ro <- DBI::dbQuoteIdentifier(con, .sr_col_roword)
-    i64 <- attr(df, "sr_int64")
-    sel <- if (length(i64)) {
+    sel <- if (length(cast)) {
       nm <- setdiff(names(df), .sr_col_roword)
       q <- DBI::dbQuoteIdentifier(con, nm)
-      paste(ifelse(nm %in% i64, paste0("CAST(", q, " AS BIGINT) AS ", q), q), collapse = ", ")
+      ty <- cast[nm]
+      paste(ifelse(is.na(ty), q, paste0("CAST(", q, " AS ", ty, ") AS ", q)), collapse = ", ")
     } else {
       paste("* EXCLUDE (", ro, ")")
     }
     .sr_col_copy(con, from, to, select = sel, order = ro)
   })
+  if (length(tz)) attr(rows, "source_tz") <- tz
+  rows
 }
 
 # ---- parquet --------------------------------------------------------------------------------------
@@ -167,7 +220,7 @@
     .sr_col_check_names(as.character(d$column_name), "the Parquet file")
     .sr_col_copy(con, sprintf("read_parquet(%s, file_row_number = true)", f), to,
                  select = paste("* EXCLUDE (", DBI::dbQuoteIdentifier(con, "file_row_number"), ")"),
-                 order = DBI::dbQuoteIdentifier(con, "file_row_number"))
+                 order = DBI::dbQuoteIdentifier(con, "file_row_number"), check_utf8 = TRUE, what = "the Parquet file")
   })
 }
 
@@ -182,7 +235,8 @@
     tab[[.sr_col_roword]] <- seq_len(tab$num_rows)
     .sr_col_with_reg(con, tab, function(from) {
       ro <- DBI::dbQuoteIdentifier(con, .sr_col_roword)
-      .sr_col_copy(con, from, to, select = paste("* EXCLUDE (", ro, ")"), order = ro)
+      .sr_col_copy(con, from, to, select = paste("* EXCLUDE (", ro, ")"), order = ro, check_utf8 = TRUE,
+                   what = "the Feather file")
     }, arrow = TRUE)
   })
 }
@@ -255,7 +309,7 @@
   vals <- list()
   walk <- function(x, prefix) {
     nm <- names(x)
-    if (anyNA(nm) || any(!nzchar(nm))) stop("a JSON object has an empty key", call. = FALSE)
+    .sr_json_check_keys(nm)
     for (i in seq_along(x)) {
       v <- x[[i]]
       k <- paste0(prefix, nm[i])
@@ -273,39 +327,79 @@
   vals
 }
 
-# Parse JSON text that holds an array of records into flattened records. `at` names where the text
-# starts, for the error message.
-.sr_json_records <- function(txt, at) {
-  recs <- tryCatch(jsonlite::parse_json(txt, simplifyVector = FALSE, bigint_as_char = TRUE),
-                   error = function(e) stop("invalid JSON ", at, ": ", conditionMessage(e), call. = FALSE))
-  lapply(recs, function(r) {
-    if (!is.list(r) || is.null(names(r))) stop("every JSON record must be an object ", at, call. = FALSE)
-    .sr_json_flat(r)
+.sr_json_check_keys <- function(nm) {
+  if (anyNA(nm) || any(!nzchar(nm))) stop("a JSON object has an empty key", call. = FALSE)
+  if (anyDuplicated(nm)) stop("a JSON record has the key '", nm[anyDuplicated(nm)], "' twice", call. = FALSE)
+  invisible(nm)
+}
+
+# Flatten all the records. A record with no nested value (the usual case) is kept as it is: its keys are
+# checked once per distinct key vector, not once per record.
+.sr_json_flatten <- function(recs) {
+  nested <- vapply(recs, function(r) any(vapply(r, is.list, NA)), NA)
+  last <- NULL
+  lapply(seq_along(recs), function(i) {
+    r <- recs[[i]]
+    if (nested[i]) return(.sr_json_flat(r))
+    nm <- names(r)
+    if (is.null(last) || !identical(nm, last)) {
+      .sr_json_check_keys(nm)
+      last <<- nm
+    }
+    r
   })
 }
 
-# What a column holds: which value classes, and whether a number is not a whole number a BIGINT keeps.
+# Original text for the numbers a column cannot hold: an integer with 19 or more digits (beyond what
+# jsonlite keeps exactly) and a number that is not finite (1e400). They are quoted, so they parse as
+# strings and the column becomes VARCHAR holding the original text. Text inside JSON strings is left
+# alone (the (*SKIP)(*FAIL) branch consumes whole strings).
+.sr_json_guard <- function(txt) {
+  if (!grepl("[0-9]{19}|[eE][+-]?[0-9]{3}", txt, perl = TRUE, useBytes = TRUE)) return(txt)
+  bs <- intToUtf8(92L)
+  qt <- intToUtf8(34L)
+  skip <- paste0(qt, "(?:[^", qt, bs, bs, "]++|", bs, bs, ".)*+", qt, "(*SKIP)(*FAIL)")
+  tok <- "(?<![0-9A-Za-z_.])-?(?:[0-9]{19,}|[0-9]+(?:[.][0-9]+)?[eE][+-]?[0-9]{3,})(?![0-9A-Za-z_.])"
+  m <- gregexpr(paste0(skip, "|", tok), txt, perl = TRUE, useBytes = TRUE)
+  toks <- regmatches(txt, m)[[1L]]
+  if (!length(toks)) return(txt)
+  wrap <- !grepl("[eE]", toks) | !is.finite(suppressWarnings(as.numeric(toks)))
+  if (!any(wrap)) return(txt)
+  toks[wrap] <- paste0(qt, toks[wrap], qt)
+  regmatches(txt, m) <- list(toks)
+  Encoding(txt) <- "UTF-8"
+  txt
+}
+
+# Parse JSON text that holds an array of records into flattened records. `at` names where the text
+# starts, for the error message.
+.sr_json_records <- function(txt, at) {
+  txt <- .sr_json_guard(txt)
+  recs <- tryCatch(jsonlite::parse_json(txt, simplifyVector = FALSE, bigint_as_char = TRUE),
+                   error = function(e) stop("invalid JSON ", at, ": ", conditionMessage(e), call. = FALSE))
+  rm(txt)
+  ok <- vapply(recs, function(r) is.list(r) && !is.null(names(r)), NA)
+  if (!all(ok)) stop("every JSON record must be an object ", at, call. = FALSE)
+  .sr_json_flatten(recs)
+}
+
+# What a column holds, in one pass: the value types (`tp`, one per value), which classes, and whether a
+# number is not a whole number a BIGINT keeps.
 .sr_json_scan <- function(vals) {
-  cls <- character()
+  tp <- vapply(vals, typeof, "")
+  isn <- tp == "integer" | tp == "double"
+  cls <- c(if (any(tp == "logical")) "l", if (any(isn)) "n", if (any(tp == "character")) "c")
   frac <- FALSE
-  for (v in vals) {
-    if (is.null(v)) next
-    if (is.logical(v)) {
-      cls <- union(cls, "l")
-    } else if (is.numeric(v)) {
-      cls <- union(cls, "n")
-      if (!(is.finite(v) && v == trunc(v) && abs(v) <= 2^53)) frac <- TRUE
-    } else {
-      cls <- union(cls, "c")
-    }
+  if (any(isn)) {
+    v <- unlist(vals[isn], use.names = FALSE)
+    frac <- !all(is.finite(v) & v == trunc(v) & abs(v) <= 2^53)
   }
-  list(cls = cls, frac = frac)
+  list(tp = tp, cls = cls, frac = frac)
 }
 
 # The type a column gets from its first values: BOOLEAN, BIGINT (whole numbers), DOUBLE, else VARCHAR.
 # A column with no value yet is BIGINT; a later value that does not fit widens it.
-.sr_json_kind <- function(vals) {
-  s <- .sr_json_scan(vals)
+.sr_json_kind <- function(s) {
   if (!length(s$cls)) return("BIGINT")
   if (identical(s$cls, "l")) return("BOOLEAN")
   if (identical(s$cls, "n")) return(if (s$frac) "DOUBLE" else "BIGINT")
@@ -313,8 +407,7 @@
 }
 
 # NULL when the values fit `type`, else the type the column widens to.
-.sr_json_fits <- function(vals, type) {
-  s <- .sr_json_scan(vals)
+.sr_json_fits <- function(s, type) {
   if (!length(s$cls) || type == "VARCHAR") return(NULL)
   num <- identical(s$cls, "n")
   switch(type,
@@ -324,21 +417,59 @@
     "VARCHAR")
 }
 
-.sr_json_text <- function(v) {
-  if (is.null(v)) return(NA_character_)
-  if (is.character(v)) return(v)
-  if (is.logical(v)) return(if (isTRUE(v)) "true" else "false")
-  if (is.integer(v)) return(as.character(v))
-  if (is.finite(v) && v == trunc(v) && abs(v) < 1e15) return(sprintf("%.0f", v))
-  as.character(v)
+# Numbers as text that parses back to the same double: whole numbers below 1e15 as digits, else the
+# shortest of %.15g / %.16g / %.17g that round-trips.
+.sr_json_numtext <- function(x) {
+  out <- character(length(x))
+  fin <- is.finite(x)
+  whole <- fin & x == trunc(x) & abs(x) < 1e15
+  out[whole] <- sprintf("%.0f", x[whole])
+  rest <- which(!whole)
+  if (length(rest)) {
+    y <- x[rest]
+    s <- as.character(y)
+    f <- is.finite(y)
+    s[f] <- sprintf("%.15g", y[f])
+    for (d in 16:17) {
+      bad <- f & as.numeric(s) != y
+      bad[is.na(bad)] <- FALSE
+      if (!any(bad)) break
+      s[bad] <- sprintf(paste0("%.", d, "g"), y[bad])
+    }
+    out[rest] <- s
+  }
+  out
 }
 
-# The values as an R vector for the column type (they were checked to fit).
-.sr_json_conv <- function(vals, type) {
+# The values as an R vector for the column type (they were checked to fit). `s` is the column scan.
+.sr_json_conv <- function(vals, type, s) {
+  n <- length(vals)
+  tp <- s$tp
   switch(type,
-    BIGINT = , DOUBLE = vapply(vals, function(v) if (is.null(v)) NA_real_ else as.numeric(v), numeric(1)),
-    BOOLEAN = vapply(vals, function(v) if (is.null(v)) NA else isTRUE(v), logical(1)),
-    vapply(vals, .sr_json_text, character(1)))
+    BIGINT = , DOUBLE = {
+      out <- rep(NA_real_, n)
+      isn <- tp == "integer" | tp == "double"
+      if (any(isn)) out[isn] <- as.numeric(unlist(vals[isn], use.names = FALSE))
+      out
+    },
+    BOOLEAN = {
+      out <- rep(NA, n)
+      isl <- tp == "logical"
+      if (any(isl)) out[isl] <- unlist(vals[isl], use.names = FALSE)
+      out
+    },
+    {
+      out <- rep(NA_character_, n)
+      ic <- tp == "character"
+      if (any(ic)) out[ic] <- unlist(vals[ic], use.names = FALSE)
+      il <- tp == "logical"
+      if (any(il)) out[il] <- ifelse(unlist(vals[il], use.names = FALSE), "true", "false")
+      ii <- tp == "integer"
+      if (any(ii)) out[ii] <- as.character(unlist(vals[ii], use.names = FALSE))
+      id <- tp == "double"
+      if (any(id)) out[id] <- .sr_json_numtext(unlist(vals[id], use.names = FALSE))
+      out
+    })
 }
 
 .sr_json_conflict <- function(widen, added) {
@@ -366,35 +497,55 @@
   invisible(ck)
 }
 
+# The values of each key as a list (one element per record, NULL where a record lacks the key). When
+# every record has the same keys in the same order the values are cut out of one flat list.
+.sr_json_columns <- function(flat, keys) {
+  n <- length(flat)
+  k <- length(keys)
+  uniform <- n > 0L && all(vapply(flat, function(r) identical(names(r), keys), NA))
+  if (uniform) {
+    all_el <- unlist(flat, recursive = FALSE, use.names = FALSE)
+    if (length(all_el) == n * k) {
+      return(stats::setNames(lapply(seq_len(k), function(j) all_el[seq.int(j, by = k, length.out = n)]), keys))
+    }
+  }
+  stats::setNames(lapply(keys, function(key) lapply(flat, function(r) r[[key]])), keys)
+}
+
 # Write the flattened records as one part with the checkpoint's column types. With no columns yet
 # (the first records) they are inferred from `flat`. Throws a type conflict when a value does not fit
 # or a new key appears after parts were committed. Returns the rows written, or NULL when there is
 # nothing to write yet (no records and no columns).
 .sr_json_part <- function(con, flat, ck, to) {
-  keys <- unique(unlist(lapply(flat, names), use.names = FALSE))
+  n0 <- length(flat)
+  first <- if (n0) names(flat[[1L]]) else NULL
+  keys <- if (n0 && all(vapply(flat, function(r) identical(names(r), first), NA))) first else
+    unique(unlist(lapply(flat, names), use.names = FALSE))
   have <- vapply(ck$columns, function(cl) cl$name, "")
   if (length(keys)) .sr_col_check_names(keys, "the JSON records")
-  get_vals <- function(k) lapply(flat, function(r) r[[k]])
   if (is.null(ck$columns)) {
     if (!length(flat)) return(NULL)
     if (!length(keys)) stop("the JSON records have no keys", call. = FALSE)
-    vl <- stats::setNames(lapply(keys, get_vals), keys)
-    ck$columns <- lapply(keys, function(k) list(name = k, type = .sr_json_kind(vl[[k]]), fmt = NA_character_))
+    vl <- .sr_json_columns(flat, keys)
+    sc <- lapply(vl, .sr_json_scan)
+    ck$columns <- lapply(keys, function(k) list(name = k, type = .sr_json_kind(sc[[k]]), fmt = NA_character_))
     ck$type_widened <- character()
     .sr_ck_write(ck)
   } else {
     all_keys <- unique(c(have, keys))
-    vl <- stats::setNames(lapply(all_keys, get_vals), all_keys)
+    vl <- .sr_json_columns(flat, all_keys)
+    sc <- lapply(vl, .sr_json_scan)
     widen <- list()
     for (cl in ck$columns) {
-      to_type <- .sr_json_fits(vl[[cl$name]], cl$type)
+      to_type <- .sr_json_fits(sc[[cl$name]], cl$type)
       if (!is.null(to_type)) widen[[length(widen) + 1L]] <- list(name = cl$name, from = cl$type, to = to_type)
     }
-    added <- lapply(setdiff(keys, have), function(k) list(name = k, type = .sr_json_kind(vl[[k]])))
+    added <- lapply(setdiff(keys, have), function(k) list(name = k, type = .sr_json_kind(sc[[k]])))
     if (length(widen) || length(added)) stop(.sr_json_conflict(widen, added))
   }
   cols <- ck$columns
-  lst <- lapply(cols, function(cl) .sr_json_conv(vl[[cl$name]], cl$type))
+  lst <- lapply(cols, function(cl) .sr_json_conv(vl[[cl$name]], cl$type, sc[[cl$name]]))
+  rm(vl)
   names(lst) <- vapply(cols, function(cl) cl$name, "")
   n <- length(flat)
   lst[[.sr_col_roword]] <- seq_len(n)
@@ -482,6 +633,7 @@
     rm(raw)
     Encoding(txt) <- "UTF-8"
     if (!validUTF8(txt)) stop("the file is not valid UTF-8", call. = FALSE)
+    txt <- .sr_json_guard(txt)
     top <- tryCatch(jsonlite::parse_json(txt, simplifyVector = FALSE, bigint_as_char = TRUE),
                     error = function(e) stop("invalid JSON: ", conditionMessage(e), call. = FALSE))
     rm(txt)
@@ -490,7 +642,7 @@
       stop("the JSON file must be an array of objects (for one object per line use NDJSON)", call. = FALSE)
     }
     if (!length(top)) stop("the JSON file holds no records", call. = FALSE)
-    flat <- lapply(top, .sr_json_flat)
+    flat <- .sr_json_flatten(top)
     rm(top)
     to <- .sr_part_path(ck)
     rows <- .sr_json_part(con, flat, ck, to)
@@ -503,16 +655,58 @@
 
 # ---- SQLite ---------------------------------------------------------------------------------------
 
-# The SELECT expression for one column, chosen from the storage classes SQLite holds in it, so that
-# RSQLite never has to coerce (it would turn a value it cannot coerce into NA, with a warning).
-.sr_sqlite_expr <- function(db, name, declared, types) {
+# SQL that is TRUE for an ISO date ("2020-01-02") or an ISO date-time ("2020-01-02 03:04:05[.fff]", a T
+# is fine too) held in the column quoted as `q`. The text must survive date() / datetime() unchanged,
+# so 2020-02-30 is not a date.
+.sr_sqlite_iso_sql <- function(q, ts) {
+  if (!ts) {
+    return(paste0("(", q, " GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(", q, ") = ", q, ")"))
+  }
+  head <- paste0("replace(substr(", q, ", 1, 19), 'T', ' ')")
+  paste0("(", q, " GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]*'",
+         " AND datetime(", head, ") = ", head, " AND (length(", q, ") = 19 OR (substr(", q, ", 20, 1) = '.'",
+         " AND length(", q, ") > 20 AND substr(", q, ", 21) NOT GLOB '*[^0-9]*')))")
+}
+
+# The DuckDB type of every column, fixed once from the storage classes SQLite holds over the whole table
+# (`scan`: one vector of typeof() values per column), so that no chunk is typed on its own:
+#   integers only -> BIGINT; integers and reals -> DOUBLE; anything else -> VARCHAR (a blob as hex);
+#   no value at all -> the declared affinity; a DATE / DATETIME / TIMESTAMP-declared column holding
+#   nothing but ISO text -> DATE / TIMESTAMP (any other value, numeric or text, keeps it as stored).
+.sr_sqlite_types <- function(db, qt, info, scan) {
+  q <- DBI::dbQuoteIdentifier(db, info$name)
+  decl <- toupper(ifelse(is.na(info$type), "", info$type))
+  ty <- vapply(seq_along(q), function(i) {
+    t <- setdiff(scan[[i]], "null")
+    if (!length(t)) {
+      if (grepl("INT", decl[i], fixed = TRUE)) "BIGINT" else if (grepl("REAL|FLOA|DOUB", decl[i])) "DOUBLE" else "VARCHAR"
+    } else if (identical(t, "integer")) "BIGINT"
+    else if (all(t %in% c("integer", "real"))) "DOUBLE"
+    else "VARCHAR"
+  }, character(1))
+  cand <- which(vapply(scan, function(t) identical(setdiff(t, "null"), "text"), NA) & grepl("DATE|TIME", decl))
+  if (length(cand)) {
+    ts <- grepl("TIME", decl[cand], fixed = TRUE)
+    sums <- paste0("coalesce(sum(CASE WHEN ", q[cand], " IS NOT NULL AND NOT ",
+                   vapply(seq_along(cand), function(j) .sr_sqlite_iso_sql(q[cand[j]], ts[j]), ""),
+                   " THEN 1 ELSE 0 END), 0)")
+    bad <- unlist(DBI::dbGetQuery(db, sprintf("SELECT %s FROM %s", paste(sums, collapse = ", "), qt)), use.names = FALSE)
+    iso <- cand[bad == 0]
+    ty[iso] <- ifelse(ts[match(iso, cand)], "TIMESTAMP", "DATE")
+  }
+  ty
+}
+
+# The SELECT expression that reads a column as its target type. BIGINT / DATE / TIMESTAMP travel as text
+# (the CAST happens in DuckDB), so RSQLite never has to coerce (it would turn a value it cannot coerce
+# into NA, with a warning) and never applies its own declared-type conversion.
+.sr_sqlite_expr <- function(db, name, type, scan) {
   q <- DBI::dbQuoteIdentifier(db, name)
-  t <- setdiff(types, "null")
-  datelike <- grepl("DATE|TIME", toupper(declared))
-  if (length(t) <= 1L && !(identical(t, "text") && datelike) && !identical(t, "blob")) return(q)
-  if (identical(t, "blob")) return(paste0("hex(", q, ")"))
-  if (setequal(t, c("integer", "real"))) return(paste0("CAST(", q, " AS REAL)"))
-  paste0("CASE typeof(", q, ") WHEN 'blob' THEN hex(", q, ") ELSE CAST(", q, " AS TEXT) END")
+  if (type == "DOUBLE") return(paste0("CAST(", q, " AS REAL)"))
+  if (type == "VARCHAR" && "blob" %in% scan) {
+    return(paste0("CASE typeof(", q, ") WHEN 'blob' THEN hex(", q, ") ELSE CAST(", q, " AS TEXT) END"))
+  }
+  paste0("CAST(", q, " AS TEXT)")
 }
 
 .sr_read_sqlite <- function(project, sniff, table, ck, options, progress, cancel) {
@@ -537,14 +731,16 @@
   has_rowid <- !inherits(try(DBI::dbGetQuery(db, paste("SELECT rowid FROM", qt, "LIMIT 0")), silent = TRUE), "try-error")
   pk <- info$name[info$pk > 0][order(info$pk[info$pk > 0])]
   ord <- if (has_rowid) " ORDER BY rowid" else if (length(pk)) paste(" ORDER BY", paste(DBI::dbQuoteIdentifier(db, pk), collapse = ", ")) else ""
-  # storage classes per column, in one pass
+  # the column types, fixed once for every chunk: storage classes over the whole table, in one pass
   q <- DBI::dbQuoteIdentifier(db, info$name)
-  scan <- DBI::dbGetQuery(db, sprintf("SELECT %s FROM %s", paste0("group_concat(DISTINCT typeof(", q, "))", collapse = ", "), qt))
-  exprs <- vapply(seq_along(q), function(i) {
-    types <- strsplit(as.character(scan[[i]]), ",", fixed = TRUE)[[1L]]
-    types <- types[!is.na(types)]
-    paste0(.sr_sqlite_expr(db, info$name[i], info$type[i], types), " AS ", q[i])
-  }, character(1))
+  sc <- DBI::dbGetQuery(db, sprintf("SELECT %s FROM %s", paste0("group_concat(DISTINCT typeof(", q, "))", collapse = ", "), qt))
+  scan <- lapply(seq_along(q), function(i) {
+    t <- strsplit(as.character(sc[[i]]), ",", fixed = TRUE)[[1L]]
+    t[!is.na(t)]
+  })
+  types <- .sr_sqlite_types(db, qt, info, scan)
+  exprs <- vapply(seq_along(q), function(i) paste0(.sr_sqlite_expr(db, info$name[i], types[i], scan[[i]]), " AS ", q[i]), "")
+  casts <- stats::setNames(types, info$name)[types %in% c("BIGINT", "DATE", "TIMESTAMP")]
   total <- as.numeric(DBI::dbGetQuery(db, paste("SELECT count(*) AS n FROM", qt))$n[1L])
   off <- ck$next_offset
   repeat {
@@ -553,8 +749,9 @@
       DBI::dbGetQuery(db, sprintf("SELECT %s FROM %s%s LIMIT %.0f OFFSET %.0f", paste(exprs, collapse = ", "), qt,
                                   ord, chunk_rows, off)),
       warning = function(w) stop("reading the SQLite table would lose data: ", conditionMessage(w), call. = FALSE))
+    for (i in seq_along(df)) df[[i]] <- if (types[i] == "DOUBLE") as.numeric(df[[i]]) else as.character(df[[i]])
     to <- .sr_part_path(ck)
-    rows <- .sr_col_frame_part(con, df, to, "the SQLite table")
+    rows <- as.numeric(.sr_col_frame_part(con, df, to, "the SQLite table", casts = casts))
     off <- off + nrow(df)
     ck$next_offset <- off
     .sr_part_commit(ck, to, rows)
@@ -581,6 +778,6 @@
     i <- match(pick, shown)
     from <- paste(DBI::dbQuoteIdentifier(con, alias), DBI::dbQuoteIdentifier(con, t$schema_name[i]),
                   DBI::dbQuoteIdentifier(con, t$table_name[i]), sep = ".")
-    .sr_col_copy(con, from, to, order = "rowid")
+    .sr_col_copy(con, from, to, order = "rowid", check_utf8 = TRUE, what = "the DuckDB table")
   })
 }

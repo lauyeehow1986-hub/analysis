@@ -513,3 +513,261 @@ test_that("ATTACH and DETACH stay refused for user SQL; .sr_duck_attach is inter
   expect_error(.sr_duck_attach(con, file.path(.cg_dir(p), "missing.duckdb")), "not found")
   expect_error(.sr_duck_attach(con, db, alias = "x; DROP TABLE y"), "alias")
 })
+
+# ====================================================================================================
+# Fix round 1
+# ====================================================================================================
+
+# ---- C1: SQLite columns are typed once, over the whole table ------------------------------------------
+
+.cg_sqlite_sql <- function(path, stmts) {
+  if (!dir.exists(dirname(path))) dir.create(dirname(path), recursive = TRUE)
+  lite <- DBI::dbConnect(RSQLite::SQLite(), path, extended_types = TRUE)
+  for (s in stmts) DBI::dbExecute(lite, s)
+  DBI::dbDisconnect(lite)
+  invisible(path)
+}
+
+# The stored table through SQL on its parts, columns as text (exact), ordered by id.
+.cg_text <- function(p, table, cols) {
+  con <- sr_duck(p)
+  dir <- sr_store_dir(p, table)
+  files <- vapply(sr_store_manifest(p, table)$parts, function(x) x$file, "")
+  q <- DBI::dbQuoteString(con, file.path(dir, files))
+  from <- sprintf("read_parquet([%s])", paste(q, collapse = ", "))
+  sel <- paste0("CAST(", DBI::dbQuoteIdentifier(con, cols), " AS VARCHAR) AS ", DBI::dbQuoteIdentifier(con, cols),
+                collapse = ", ")
+  DBI::dbGetQuery(con, sprintf("SELECT %s FROM %s ORDER BY id", paste0("id, ", sel), from))
+}
+
+test_that("SQLite: an all-NULL first chunk does not make an untyped column BOOLEAN", {
+  p <- .cg_project()
+  db <- file.path(.cg_dir(p), "nullfirst.sqlite")
+  ins <- c(sprintf("INSERT INTO t VALUES (%d, NULL)", 1:60),
+           sprintf("INSERT INTO t VALUES (%d, %s)", 61:80, rep(c("3.5", "4.5"), 10)))
+  .cg_sqlite_sql(db, c("CREATE TABLE t (id INTEGER, v)", "BEGIN", ins, "COMMIT"))
+  p <- .cg_ing(p, db, table = "nf", options = list(chunk_rows = 30))
+  expect_gt(length(p$state$tables$nf$store$parts), 1L)
+  expect_identical(.cg_schema(p, "nf")[["v"]], "DOUBLE")
+  got <- .cg_text(p, "nf", "v")
+  expect_identical(got$v[c(1, 60, 61, 62)], c(NA, NA, "3.5", "4.5"))
+})
+
+test_that("SQLite: an INTEGER column that crosses 2^31 in a later chunk is BIGINT in every part", {
+  p <- .cg_project()
+  db <- file.path(.cg_dir(p), "cross.sqlite")
+  ins <- sprintf("INSERT INTO t VALUES (%d, %s)", 1:80, c(rep("7", 70), rep("3000000000", 10)))
+  .cg_sqlite_sql(db, c("CREATE TABLE t (id INTEGER, n INTEGER)", "BEGIN", ins, "COMMIT"))
+  p <- .cg_ing(p, db, table = "cr", options = list(chunk_rows = 30))
+  expect_gt(length(p$state$tables$cr$store$parts), 1L)
+  expect_identical(.cg_schema(p, "cr")[["n"]], "BIGINT")
+  got <- .cg_text(p, "cr", "n")
+  expect_identical(got$n[c(1, 70, 71, 80)], c("7", "7", "3000000000", "3000000000"))
+  expect_equal(nrow(.cg_all(p, "cr")), 80L)                     # and the table is readable
+})
+
+test_that("sr_ingest never installs a store whose parts disagree on a column type", {
+  p <- .cg_project()
+  con <- sr_duck(p)
+  dir <- file.path(dirname(p$paths$dir), "parts")
+  dir.create(dir)
+  mk <- function(name, expr) {
+    f <- file.path(dir, name)
+    DBI::dbExecute(con, sprintf("COPY (SELECT %s AS v) TO %s (FORMAT parquet)", expr, DBI::dbQuoteString(con, f)))
+    f
+  }
+  a <- mk("part-00001.parquet", "CAST(1 AS INTEGER)")
+  b <- mk("part-00002.parquet", "CAST(1 AS BIGINT)")
+  ck <- list(store_dir = dir, parts = list(list(file = "part-00001.parquet"), list(file = "part-00002.parquet")))
+  expect_error(.sr_ingest_parts_consistent(p, ck), "part-00002.parquet")
+  ck$parts[[2L]]$file <- "part-00001.parquet"
+  expect_no_error(.sr_ingest_parts_consistent(p, ck))
+  # through sr_ingest: a reader that writes mismatched parts is refused and nothing is installed
+  old <- .sr_reader_get("sqlite")
+  withr::defer(.sr_reader_register("sqlite", old))
+  .sr_reader_register("sqlite", function(project, sniff, table, ck, options, progress, cancel) {
+    cn <- sr_duck(project)
+    for (e in c("CAST(1 AS INTEGER)", "CAST(1 AS BIGINT)")) {
+      to <- .sr_part_path(ck)
+      sr_duck_exec(cn, sprintf("COPY (SELECT %s AS v) TO %s (FORMAT parquet)", e, DBI::dbQuoteString(cn, to)))
+      .sr_part_commit(ck, to, 1)
+    }
+    list(schema = list(list(name = "v", type = "INTEGER")), resumable = FALSE, type_widened = character())
+  })
+  db <- .cg_sqlite(list(t = data.frame(id = 1:2)), file.path(.cg_dir(p), "mm.sqlite"))
+  expect_error(.cg_ing(p, db, table = "mm"), "disagree")
+  expect_false(dir.exists(sr_store_dir(p, "mm")))
+  expect_null(p$state$tables$mm)
+})
+
+# ---- I1: DATE / DATETIME columns are converted only when every value is ISO text ----------------------------
+
+test_that("SQLite: date-declared columns convert only when all values are ISO text", {
+  p <- .cg_project()
+  db <- file.path(.cg_dir(p), "dates.sqlite")
+  .cg_sqlite_sql(db, c(
+    "CREATE TABLE t (id INTEGER, d_iso DATE, ts_iso DATETIME, ts_ms DATETIME, d_num DATE, d_mix DATE, d_us DATE)",
+    "INSERT INTO t VALUES (1, '2020-01-02', '2020-01-02 03:04:05', 1700000000000, 20200101, '2020-01-02', '01/02/2020')",
+    "INSERT INTO t VALUES (2, NULL, '2020-01-02T03:04:06', 1700000000001, 20200102, 20200101, '03/02/2020')",
+    "INSERT INTO t VALUES (3, '2021-12-31', NULL, NULL, NULL, NULL, NULL)"))
+  p <- .cg_ing(p, db, table = "dt")
+  ty <- .cg_schema(p, "dt")
+  expect_identical(ty[["d_iso"]], "DATE")
+  expect_identical(ty[["ts_iso"]], "TIMESTAMP")
+  expect_identical(ty[["ts_ms"]], "BIGINT")
+  expect_identical(ty[["d_num"]], "BIGINT")
+  expect_identical(ty[["d_mix"]], "VARCHAR")
+  expect_identical(ty[["d_us"]], "VARCHAR")
+  got <- .cg_text(p, "dt", c("d_iso", "ts_iso", "ts_ms", "d_num", "d_mix", "d_us"))
+  expect_identical(got$d_iso, c("2020-01-02", NA, "2021-12-31"))
+  expect_identical(got$ts_iso, c("2020-01-02 03:04:05", "2020-01-02 03:04:06", NA))
+  expect_identical(got$ts_ms, c("1700000000000", "1700000000001", NA))
+  expect_identical(got$d_num, c("20200101", "20200102", NA))
+  expect_identical(got$d_mix, c("2020-01-02", "20200101", NA))
+  expect_identical(got$d_us, c("01/02/2020", "03/02/2020", NA))
+})
+
+# ---- I2: POSIXct is stored as the UTC instant; the source tzone is recorded -----------------------------------
+
+test_that("RDS POSIXct is stored as the UTC instant and its tzone is recorded in the event", {
+  p <- .cg_project()
+  dir.create(.cg_dir(p), recursive = TRUE)
+  df <- data.frame(id = 1:3)
+  df$t_sg <- as.POSIXct(c("2020-06-01 08:30:00", "2020-06-01 09:30:00", NA), tz = "Asia/Singapore")
+  df$t_utc <- as.POSIXct(c("2020-01-01 10:00:00", NA, "2020-01-03 11:00:00"), tz = "UTC")
+  df$t_ny <- as.POSIXct(c("2020-07-01 23:30:00", "2020-07-02 00:30:00", NA), tz = "America/New_York")
+  f <- file.path(.cg_dir(p), "tz.rds")
+  saveRDS(df, f)
+  p <- .cg_ing(p, f, table = "tz")
+  con <- sr_duck(p)
+  part <- DBI::dbQuoteString(con, file.path(sr_store_dir(p, "tz"), "part-00001.parquet"))
+  got <- DBI::dbGetQuery(con, sprintf("SELECT id, epoch(t_sg) AS a, epoch(t_utc) AS b, epoch(t_ny) AS c FROM read_parquet(%s) ORDER BY id", part))
+  expect_equal(got$a, as.numeric(df$t_sg))
+  expect_equal(got$b, as.numeric(df$t_utc))
+  expect_equal(got$c, as.numeric(df$t_ny))
+  expect_equal(got$a[1], 1590971400)                              # 2020-06-01 00:30:00 UTC
+  tzs <- p$state$tables$tz$source_tz
+  expect_identical(tzs$t_sg, "Asia/Singapore")
+  expect_identical(tzs$t_utc, "UTC")
+  expect_identical(tzs$t_ny, "America/New_York")
+  expect_null(tzs$id)
+})
+
+# ---- I3: a numeric column widened to text renders round-trip exact ------------------------------------------
+
+test_that("NDJSON: doubles widened to text keep every digit", {
+  p <- .cg_project()
+  vals <- c("0.30000000000000004", "0.3333333333333333", "1.234e-05", "123456789.123456789", "5", "-2.5e300")
+  rows <- c(sprintf(r"({"id":%d,"x":%s})", seq_along(vals), vals), r"({"id":7,"x":"abc"})")
+  f <- .cg_write_lines(rows, file.path(.cg_dir(p), "exact.ndjson"))
+  p <- .cg_ing(p, f, table = "ex", chunk_bytes = 60)
+  expect_identical(.cg_schema(p, "ex")[["x"]], "VARCHAR")
+  got <- .cg_text(p, "ex", "x")
+  for (i in seq_along(vals)) expect_true(as.numeric(got$x[i]) == as.numeric(vals[i]), info = vals[i])
+  expect_identical(got$x[7], "abc")
+  expect_identical(got$x[5], "5")
+})
+
+# ---- I4: integers beyond int64 and non-finite literals stay text ---------------------------------------------
+
+test_that("NDJSON: a number beyond int64 or non-finite keeps its original text in a VARCHAR column", {
+  p <- .cg_project()
+  rows <- c(r"({"id":1,"big":12345678901234567890,"e":1e400,"ok":1.5})",
+            r"({"id":2,"big":5,"e":2,"ok":2.5})",
+            r"({"id":3,"big":-98765432109876543210,"e":-1e999,"ok":null})")
+  f <- .cg_write_lines(rows, file.path(.cg_dir(p), "huge.ndjson"))
+  p <- .cg_ing(p, f, table = "hg")
+  ty <- .cg_schema(p, "hg")
+  expect_identical(ty[["big"]], "VARCHAR")
+  expect_identical(ty[["e"]], "VARCHAR")
+  expect_identical(ty[["ok"]], "DOUBLE")
+  got <- .cg_text(p, "hg", c("big", "e"))
+  expect_identical(got$big, c("12345678901234567890", "5", "-98765432109876543210"))
+  expect_identical(got$e, c("1e400", "2", "-1e999"))
+})
+
+test_that("JSON: a number beyond int64 or non-finite keeps its original text; quoted digits are untouched", {
+  p <- .cg_project()
+  txt <- c("[", r"({"id":1,"big":12345678901234567890,"e":1e400,"s":"x 99999999999999999999 y"},)",
+           r"({"id":2,"big":7,"e":1,"s":"1e400"})", "]")
+  f <- .cg_write_lines(txt, file.path(.cg_dir(p), "huge.json"))
+  p <- .cg_ing(p, f, table = "hj")
+  got <- .cg_text(p, "hj", c("big", "e", "s"))
+  expect_identical(got$big, c("12345678901234567890", "7"))
+  expect_identical(got$e, c("1e400", "1"))
+  expect_identical(got$s, c("x 99999999999999999999 y", "1e400"))
+})
+
+# ---- I5: a wide NDJSON is read correctly -----------------------------------------------------------------------
+
+test_that("a wide NDJSON ingests with every value intact", {
+  p <- .cg_project()
+  n <- 1500L
+  k <- 80L
+  set.seed(1)
+  m <- matrix(round(stats::runif(n * k), 4) + 0.5, nrow = n)
+  m[5, 7] <- NA
+  DQ <- intToUtf8(34L)
+  keys <- paste0(DQ, "c", seq_len(k), DQ, ":")
+  rows <- vapply(seq_len(n), function(i) {
+    paste0("{", DQ, "id", DQ, ":", i, ",", paste0(keys, ifelse(is.na(m[i, ]), "null", format(m[i, ], digits = 15)), collapse = ","), "}")
+  }, "")
+  f <- .cg_write_lines(rows, file.path(.cg_dir(p), "wide.ndjson"))
+  p <- .cg_ing(p, f, table = "wd", chunk_bytes = 100000)
+  expect_equal(p$state$tables$wd$store$rows, n)
+  got <- .cg_all(p, "wd")
+  got <- got[order(got$id), ]
+  expect_equal(unname(as.matrix(got[, paste0("c", seq_len(k))])), m, tolerance = 1e-12)
+})
+
+# ---- M1: invalid UTF-8 is refused at ingest, naming the column ------------------------------------------------
+
+test_that("invalid UTF-8 text is refused at ingest with the column named", {
+  p <- .cg_project()
+  dir.create(.cg_dir(p), recursive = TRUE)
+  bad <- rawToChar(as.raw(c(0x78, 0xb5, 0x79)))
+  df <- data.frame(id = 1:2, ok = c("a", "b"), notes = c("fine", bad))
+  f <- file.path(.cg_dir(p), "bad.rds")
+  saveRDS(df, f)
+  err <- tryCatch(.cg_ing(p, f, table = "bu"), error = function(e) conditionMessage(e))
+  expect_match(err, "UTF-8")
+  expect_match(err, "notes")
+  expect_false(dir.exists(sr_store_dir(p, "bu")))
+  lite <- file.path(.cg_dir(p), "bad.sqlite")
+  .cg_sqlite_sql(lite, c("CREATE TABLE t (id INTEGER, memo TEXT)", "INSERT INTO t VALUES (1, 'ok')",
+                         "INSERT INTO t VALUES (2, CAST(x'78b579' AS TEXT))"))
+  err <- tryCatch(.cg_ing(p, lite, table = "bs"), error = function(e) conditionMessage(e))
+  expect_match(err, "UTF-8")
+  expect_match(err, "memo")
+})
+
+# Make a file text invalid UTF-8 by changing every Q byte (the marker text) to 0xB5.
+.cg_patch_q <- function(path) {
+  raw <- readBin(path, "raw", file.size(path))
+  hit <- which(raw == charToRaw("Q"))
+  expect_gt(length(hit), 0L)
+  raw[hit] <- as.raw(0xb5)
+  writeBin(raw, path)
+}
+
+test_that("invalid UTF-8 inside a Parquet or Feather file is refused with the column named", {
+  p <- .cg_project()
+  dir.create(.cg_dir(p), recursive = TRUE)
+  con <- sr_duck(p)
+  pq <- file.path(.cg_dir(p), "bad.parquet")
+  DBI::dbExecute(con, sprintf("COPY (SELECT * FROM (VALUES (1, 'QQQQQQQQ'), (2, 'other')) t(id, memo)) TO %s (FORMAT parquet, COMPRESSION uncompressed)",
+                              DBI::dbQuoteString(con, pq)))
+  .cg_patch_q(pq)
+  err <- tryCatch(.cg_ing(p, pq, table = "bp"), error = function(e) conditionMessage(e))
+  expect_match(err, "UTF-8")
+  expect_match(err, "memo")
+  expect_false(dir.exists(sr_store_dir(p, "bp")))
+  skip_if_not_installed("arrow")
+  fe <- file.path(.cg_dir(p), "bad.feather")
+  arrow::write_feather(data.frame(id = 1:2, memo = c("QQQQQQQQ", "other")), fe, compression = "uncompressed")
+  .cg_patch_q(fe)
+  err <- tryCatch(.cg_ing(p, fe, table = "bf"), error = function(e) conditionMessage(e))
+  expect_match(err, "UTF-8")
+  expect_match(err, "memo")
+  expect_false(dir.exists(sr_store_dir(p, "bf")))
+})

@@ -442,6 +442,9 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   rsniff$size_bytes <- as.numeric(file.size(work))
   res <- reader(project, rsniff, table, ck, options, progress, cancel)
 
+  # every part must have the same columns and types before anything is installed
+  .sr_ingest_parts_consistent(project, ck)
+
   # verified manifest, swap into data/store, the source copy into data/source, checkpoint done, event
   parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
   rows <- sum(vapply(parts, function(p) p$rows, numeric(1)))
@@ -464,7 +467,35 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
     type_widened = as.list(as.character(res$type_widened)),
     sniff = list(delim = sniff$delim, encoding = sniff$encoding, decimal = sniff$decimal, date_order = do,
                  nullstr = as.list(as.character(res$nullstr))))
+  if (length(res$source_tz)) payload$source_tz <- res$source_tz
   sr_project_append(project, "data.imported", payload)
+}
+
+# The parts of a store must agree on every column name and type with the first part: a reader that typed
+# its chunks independently would otherwise install a table that cannot be read as one. Refused before
+# the store is installed (the error names the part and the column).
+.sr_ingest_parts_consistent <- function(project, ck) {
+  if (length(ck$parts) < 2L) return(invisible(TRUE))
+  con <- sr_duck(project)
+  desc <- function(file) {
+    f <- normalizePath(file.path(ck$store_dir, file), winslash = "/", mustWork = TRUE)
+    d <- sr_duck_query(con, paste("DESCRIBE SELECT * FROM read_parquet(", DBI::dbQuoteString(con, f), ")"))
+    stats::setNames(as.character(d$column_type), as.character(d$column_name))
+  }
+  first <- desc(ck$parts[[1L]]$file)
+  for (k in seq_along(ck$parts)[-1L]) {
+    cur <- desc(ck$parts[[k]]$file)
+    if (!identical(names(cur), names(first))) {
+      stop("the parts of the table disagree on their columns: ", ck$parts[[k]]$file, " does not have the columns of ",
+           ck$parts[[1L]]$file, call. = FALSE)
+    }
+    bad <- names(first)[cur != first]
+    if (length(bad)) {
+      stop("the parts of the table disagree on the type of column '", bad[1L], "': ", ck$parts[[k]]$file, " has ",
+           cur[[bad[1L]]], ", ", ck$parts[[1L]]$file, " has ", first[[bad[1L]]], call. = FALSE)
+    }
+  }
+  invisible(TRUE)
 }
 
 # Does the reader first expand the source to a plain UTF-8 file under data/ingest? (bz2 / xz / zip, or
@@ -498,6 +529,7 @@ sr_reducer_register("data.imported", function(state, event) {
   tabs <- state$tables %||% list()
   old <- tabs[[p$table]] %||% list()
   for (k in names(p)) old[k] <- list(p[[k]])
+  if (is.null(p$source_tz)) old$source_tz <- NULL         # not carried: a re-import must not keep the old one
   tabs[[p$table]] <- old
   state$tables <- tabs
   state
