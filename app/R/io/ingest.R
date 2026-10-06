@@ -271,6 +271,12 @@ sr_table_name <- function(path, existing = character()) {
   # which table / object of a multi-table source is read (only when chosen, so a text-format hash is unchanged)
   if (!is.null(options$table)) f$table <- as.character(options$table)
   if (!is.null(options$object)) f$object <- as.character(options$object)
+  # the Excel and statistical-package readers' own settings (again only when given)
+  if (!is.null(options$sheet)) f$sheet <- as.character(options$sheet)
+  if (!is.null(options$range)) f$range <- as.character(options$range)
+  if (!is.null(options$header_rows)) f$header_rows <- as.numeric(options$header_rows)
+  if (!is.null(options$skip)) f$skip <- as.numeric(options$skip)
+  if (!is.null(options$encoding)) f$read_encoding <- as.character(options$encoding)
   f$parse_options <- list(sample_size = as.numeric(options$sample_size %||% 1e6),
                           nullstr = as.character(options$nullstr %||% c("", "NA")))
   .sr_sha256(sr_canonical_json(f))
@@ -345,7 +351,9 @@ sr_table_name <- function(path, existing = character()) {
 #' copy and its state entry as they were.
 #'  - `external = NULL` takes the pre-flight's `external_suggested`.
 #'  - `options`: `drive_info` (replaces the drive probe of the pre-flight) and the reader's own
-#'    (csv: `sample_size`, default 1e6, and `nullstr`, default c("", "NA")).
+#'    (csv: `sample_size`, default 1e6, and `nullstr`, default c("", "NA"); Excel: `sheet`, `header_rows`,
+#'    `range`, `skip`; sav / dta / sas7bdat / xpt: `chunk_rows`, `encoding`). `sheet =` is shorthand for
+#'    `options$sheet`.
 #'  - `progress(done_bytes, total_bytes)` and `cancel()` are called between chunks. When `cancel()`
 #'    returns TRUE the ingest stops with an error of class `sr_ingest_cancelled`; its checkpoint
 #'    stays, and calling sr_ingest again with the same arguments resumes.
@@ -358,6 +366,7 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   chk <- .sr_sniff_check_path(path)
   path <- chk$path
   if (!is.list(options)) stop("options must be a list", call. = FALSE)
+  if (!is.null(sheet) && is.null(options$sheet)) options$sheet <- sheet     # the Excel sheet (name or number)
   if (!is.numeric(chunk_bytes) || length(chunk_bytes) != 1L || !is.finite(chunk_bytes) || chunk_bytes < 1) {
     stop("chunk_bytes must be a positive number", call. = FALSE)
   }
@@ -468,7 +477,17 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
     sniff = list(delim = sniff$delim, encoding = sniff$encoding, decimal = sniff$decimal, date_order = do,
                  nullstr = as.list(as.character(res$nullstr))))
   if (length(res$source_tz)) payload$source_tz <- res$source_tz
-  sr_project_append(project, "data.imported", payload)
+  # labels the source itself carried (SPSS / Stata / SAS): the dictionary is seeded from them
+  dict_labels <- res$dict_labels
+  from_source <- is.list(dict_labels) && length(dict_labels) > 0L
+  payload$dict_from_source <- from_source
+  project <- sr_project_append(project, "data.imported", payload)
+  # the dictionary module (a later task) owns dict.set; until it is loaded the labels are not stored
+  if (from_source && exists("sr_dict_set")) {
+    dict <- if (exists("sr_dict_from_labels")) sr_dict_from_labels(dict_labels) else dict_labels
+    project <- sr_dict_set(project, table, dict, source = "source")
+  }
+  project
 }
 
 # The parts of a store must agree on every column name and type with the first part: a reader that typed
@@ -551,3 +570,9 @@ sr_reducer_register("data.imported", function(state, event) {
 .sr_reader_register("json", .sr_read_json)
 .sr_reader_register("sqlite", .sr_read_sqlite)
 .sr_reader_register("duckdb", .sr_read_duckdb)
+
+# The Excel and statistical-package readers (read_sheet.R, loaded before this file). xlsm is read like xlsx.
+.sr_reader_register("xlsx", .sr_read_xlsx)
+.sr_reader_register("xlsm", .sr_read_xlsx)
+.sr_reader_register("xls", .sr_read_xlsx)
+local(for (fmt in c("sav", "por", "dta", "sas7bdat", "xpt")) .sr_reader_register(fmt, .sr_read_haven))

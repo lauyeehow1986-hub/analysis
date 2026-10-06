@@ -27,7 +27,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "core/util", "core/audit", "core/events", "core/project", "core/hardware",
   "core/libsnap", "core/hash", "core/lint", "core/exec", "design/spec", "design/compose",
   "writer/numfmt", "io/sniff", "io/preflight", "io/duck", "io/fingerprint", "io/store",
-  "io/read_text", "io/read_columnar", "io/ingest"
+  "io/read_text", "io/read_columnar", "io/read_sheet", "io/ingest"
 )
 
 for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
