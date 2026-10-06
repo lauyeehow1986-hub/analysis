@@ -554,6 +554,173 @@ sr_reducer_register("data.imported", function(state, event) {
   state
 })
 
+# ---- external-data mode lifecycle ------------------------------------------------------------------
+# In external mode a source (up to 100 GB) stays where it is: the project records its path and a
+# fingerprint (io/fingerprint.R) instead of a copy. These functions say whether the file is still the
+# one that was imported, re-point the project at a moved copy, and compute the full SHA-256 that the
+# freeze gate needs. An in-project source (a copy under data/source) is resolved against the current
+# project dir, so a copied or moved project folder keeps working.
+
+# The table's entry in state, or an error naming the table.
+.sr_ext_entry <- function(project, table) {
+  if (!is.character(table) || length(table) != 1L || is.na(table)) stop("table must be a single string", call. = FALSE)
+  e <- project$state$tables[[table]]
+  if (is.null(e) || !is.list(e$source)) stop("unknown table: ", table, call. = FALSE)
+  e
+}
+
+# Where the source file is now: the recorded path for an external source, the project-relative path
+# resolved against this project's dir otherwise.
+.sr_ext_path <- function(project, entry) {
+  src <- entry$source
+  p <- as.character(src$path)
+  if (isTRUE(src$external)) return(p)
+  normalizePath(file.path(project$paths$dir, p), winslash = "/", mustWork = FALSE)
+}
+
+# Do two fingerprints describe the same file? size and sample_sha always; mtime only when `mtime`
+# (an in-project copy has the mtime of its own creation, not of the original, and a copied project
+# folder gets new mtimes again, so its content is guarded by size + sampled blocks).
+.sr_fp_same <- function(rec, cur, mtime = TRUE) {
+  if (!is.list(rec) || !is.list(cur)) return(FALSE)
+  same <- isTRUE(as.numeric(rec$size) == as.numeric(cur$size)) &&
+    identical(as.character(rec$sample_sha), as.character(cur$sample_sha))
+  if (mtime) same <- same && identical(as.character(rec$mtime), as.character(cur$mtime))
+  same
+}
+
+# The current fingerprint of the file, or NULL when it is missing or cannot be read.
+.sr_ext_fp <- function(path) {
+  if (!file.exists(path) || dir.exists(path)) return(NULL)
+  tryCatch(sr_fingerprint(path), error = function(e) NULL)
+}
+
+#' Is the source of `table` still the file that was imported?
+#'
+#' Compares the file's current fingerprint with the one recorded at import. For an external source the
+#' size, mtime and sampled blocks must all match; for an in-project source (resolved against the current
+#' project dir) the size and sampled blocks, because the copy's mtime is not the original's.
+#'
+#' @return list(status = "ok" | "missing" | "changed", path, detail): `path` is where the source was
+#'   looked for and `detail` a short human-readable reason ("" when ok).
+sr_source_status <- function(project, table) {
+  entry <- .sr_ext_entry(project, table)
+  path <- .sr_ext_path(project, entry)
+  external <- isTRUE(entry$source$external)
+  if (!file.exists(path) || dir.exists(path)) {
+    return(list(status = "missing", path = path, detail = paste0("source file not found at ", path)))
+  }
+  cur <- .sr_ext_fp(path)
+  if (is.null(cur)) {
+    return(list(status = "missing", path = path, detail = paste0("source file could not be read at ", path)))
+  }
+  if (.sr_fp_same(entry$source$fingerprint, cur, mtime = external)) {
+    return(list(status = "ok", path = path, detail = ""))
+  }
+  list(status = "changed", path = path,
+       detail = if (external) "size/mtime/sampled blocks differ from import" else "size/sampled blocks differ from import")
+}
+
+#' Point an external source at a copy that was moved or restored elsewhere.
+#'
+#' The copy must have the recorded size and sampled blocks (a plain copy gets a new mtime, so mtime is
+#' not compared); otherwise this errors with "fingerprint mismatch" and records nothing. On success a
+#' `data.source_relocated` event records the old path, the new path and the new fingerprint, the entry
+#' points at the new file, and its full SHA-256 is cleared (NA): the fingerprint is sampled, so a copy
+#' that matches it may still differ in bytes that were not sampled, and the table needs hashing again.
+#' Only external sources can be relocated; an in-project source is stored inside the project and the
+#' table is re-imported instead.
+sr_source_relocate <- function(project, table, new_path) {
+  entry <- .sr_ext_entry(project, table)
+  if (!isTRUE(entry$source$external)) {
+    stop("table '", table, "' is stored inside the project (data/source), so its source cannot be ",
+         "relocated: re-import the table instead", call. = FALSE)
+  }
+  if (!is.character(new_path) || length(new_path) != 1L || is.na(new_path) || !nzchar(new_path)) {
+    stop("new_path must be a single file path", call. = FALSE)
+  }
+  if (grepl("^[A-Za-z][A-Za-z0-9+.-]*://", new_path)) stop("new_path must be a file path, not a URL", call. = FALSE)
+  .sr_file_must_exist(new_path)
+  new_abs <- normalizePath(new_path, winslash = "/", mustWork = TRUE)
+  fp <- sr_fingerprint(new_abs)
+  if (!.sr_fp_same(entry$source$fingerprint, fp, mtime = FALSE)) {
+    stop("fingerprint mismatch: the file at that path is not the source that was imported (size or ",
+         "sampled blocks differ)", call. = FALSE)
+  }
+  sr_project_append(project, "data.source_relocated", list(
+    table = table, old_path = as.character(entry$source$path), new_path = new_abs,
+    old_fingerprint = entry$source$fingerprint, fingerprint = fp))
+}
+
+#' Compute the full SHA-256 of a source file and record it (`data.source_hashed`).
+#'
+#' Meant to run in the background (the UI wraps it in an ExtendedTask); `progress(done_bytes, total)`
+#' is passed to `sr_sha256_file`. The fingerprint is checked before and again after hashing: if it
+#' differs from the one recorded at import either time (the file was edited, replaced or removed, also
+#' while it was being hashed) this errors and records nothing. An in-project source whose SHA-256 is
+#' already known (computed when it was copied in) is not hashed again: the project is returned
+#' unchanged.
+sr_source_hash <- function(project, table, progress = NULL) {
+  entry <- .sr_ext_entry(project, table)
+  external <- isTRUE(entry$source$external)
+  known <- entry$source$sha256
+  if (!external && is.character(known) && length(known) == 1L && !is.na(known) && nzchar(known)) return(project)
+  st <- sr_source_status(project, table)
+  if (st$status == "missing") stop(st$detail, call. = FALSE)
+  if (st$status != "ok") stop("the source of table '", table, "' has changed since import (", st$detail, ")", call. = FALSE)
+  sha <- sr_sha256_file(st$path, progress = progress)
+  after <- sr_source_status(project, table)
+  if (after$status != "ok") {
+    stop("the source of table '", table, "' changed while it was being hashed (", after$detail, ")", call. = FALSE)
+  }
+  sr_project_append(project, "data.source_hashed", list(
+    table = table, path = if (external) st$path else as.character(entry$source$path),
+    sha256 = sha, fingerprint = entry$source$fingerprint))
+}
+
+#' Names of the tables whose source has no full SHA-256 yet (in table order): the freeze gate needs
+#' every source hashed.
+sr_tables_needing_hash <- function(project) {
+  tabs <- project$state$tables
+  if (!length(tabs)) return(character(0))
+  need <- vapply(tabs, function(e) {
+    h <- e$source$sha256
+    !(is.character(h) && length(h) == 1L && !is.na(h) && nzchar(h))
+  }, logical(1))
+  names(tabs)[need]
+}
+
+# `data.source_relocated` re-points an external source at the new path and fingerprint and clears its
+# full hash (the sampled fingerprint cannot prove a copy is byte-identical). `data.source_hashed` sets
+# the hash. Both merge into the entry: every other key survives.
+sr_reducer_register("data.source_relocated", function(state, event) {
+  p <- event$payload
+  tabs <- state$tables %||% list()
+  old <- tabs[[p$table]]
+  if (is.null(old)) return(state)
+  src <- old$source %||% list()
+  src$path <- p$new_path
+  src["fingerprint"] <- list(p$fingerprint)
+  src["sha256"] <- list(NA_character_)
+  old$source <- src
+  tabs[[p$table]] <- old
+  state$tables <- tabs
+  state
+})
+
+sr_reducer_register("data.source_hashed", function(state, event) {
+  p <- event$payload
+  tabs <- state$tables %||% list()
+  old <- tabs[[p$table]]
+  if (is.null(old)) return(state)
+  src <- old$source %||% list()
+  src["sha256"] <- list(p$sha256)
+  old$source <- src
+  tabs[[p$table]] <- old
+  state$tables <- tabs
+  state
+})
+
 # The delimited-text reader (read_text.R, loaded before this file) serves csv, and tsv / txt should
 # the sniffer ever report them.
 .sr_reader_register("csv", .sr_read_csv)
