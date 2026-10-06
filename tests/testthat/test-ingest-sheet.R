@@ -171,7 +171,7 @@ test_that("Excel: identifier-like text is never turned into a number", {
   d <- .sh_all(p, "ids")
   expect_true("007" %in% d$lead)
   expect_true(big %in% d$big)
-  expect_true("NA" %in% d$na)
+  expect_true(is.na(d$na[1]) && d$na[2] == "x")                 # a text "NA" is null (the CSV default), the column stays text
   expect_true(all(c("T", "F") %in% d$tf))
 })
 
@@ -486,4 +486,84 @@ test_that("bad options are refused", {
   haven::write_sav(.sh_frame(), f)
   expect_error(.sh_ing(p, f, table = "b1", options = list(chunk_rows = 0)), "chunk_rows")
   expect_error(.sh_ing(p, f, table = "b2", options = list(encoding = 5)), "encoding")
+})
+
+# ---- fix round 1 ----------------------------------------------------------------------------------
+
+# An xlsx whose table starts at row `start` (blank rows above it), written with openxlsx.
+.sh_xlsx_at <- function(df, path, start) {
+  if (!dir.exists(dirname(path))) dir.create(dirname(path), recursive = TRUE)
+  wb <- openxlsx::createWorkbook()
+  openxlsx::addWorksheet(wb, "S")
+  openxlsx::writeData(wb, "S", df, startRow = start)
+  openxlsx::saveWorkbook(wb, path, overwrite = TRUE)
+  invisible(path)
+}
+
+test_that("Excel: a Date column is still DATE when the sheet has leading blank rows (skip = 0 and skip > 0)", {
+  p <- .sh_project()
+  d0 <- data.frame(id = 1:3, d = as.Date("2020-01-01") + 0:2, s = c("a", "b", NA), stringsAsFactors = FALSE)
+  f3 <- .sh_xlsx_at(d0, file.path(.sh_dir(p), "r3.xlsx"), 3)
+  p <- .sh_ing(p, f3, table = "r3")
+  expect_equal(.sh_schema(p, "r3")[["d"]], "DATE")
+  expect_equal(as.character(.sh_all(p, "r3")$d[1:3]), c("2020-01-01", "2020-01-02", "2020-01-03"))
+  f4 <- .sh_xlsx_at(d0, file.path(.sh_dir(p), "r4.xlsx"), 4)
+  p <- .sh_ing(p, f4, table = "r4", options = list(skip = 1L))
+  expect_equal(.sh_schema(p, "r4")[["d"]], "DATE")
+  p <- .sh_ing(p, f4, table = "r4b", options = list(skip = 2L))
+  expect_equal(.sh_schema(p, "r4b")[["d"]], "DATE")
+  # title rows and a blank row above a two-row header
+  p <- .sh_ing(p, f3, table = "r3h", options = list(header_rows = 1L, skip = 1L))
+  expect_equal(.sh_schema(p, "r3h")[["d"]], "DATE")
+  # an explicit range that starts below blank rows
+  p <- .sh_ing(p, f3, table = "r3g", options = list(range = "A3:C6"))
+  expect_equal(.sh_schema(p, "r3g")[["d"]], "DATE")
+})
+
+test_that("Excel: a text cell among dates keeps the column as text", {
+  p <- .sh_project()
+  f <- .sh_xlsx_at(data.frame(d = c("x", "y")), file.path(.sh_dir(p), "txt.xlsx"), 2)
+  p <- .sh_ing(p, f, table = "txt")
+  expect_equal(.sh_schema(p, "txt")[["d"]], "VARCHAR")
+})
+
+test_that("Excel: a text NA cell is null like the CSV default, and options$nullstr overrides it", {
+  p <- .sh_project()
+  f <- .sh_xlsx(cbind(c("v", "1", "2", "NA", ""), c("w", "a", "NA", "b", "c")), file.path(.sh_dir(p), "na.xlsx"))
+  p <- .sh_ing(p, f, table = "na")
+  s <- .sh_schema(p, "na")
+  expect_true(s[["v"]] %in% c("INTEGER", "BIGINT"))
+  d <- .sh_all(p, "na")
+  expect_equal(sum(is.na(d$v)), 2L)
+  expect_equal(sum(is.na(d$w)), 1L)
+  p <- .sh_ing(p, f, table = "na2", options = list(nullstr = ""))
+  expect_equal(.sh_schema(p, "na2")[["v"]], "VARCHAR")
+  expect_true("NA" %in% .sh_all(p, "na2")$v)
+  expect_error(.sh_ing(p, f, table = "na3", options = list(nullstr = 5)), "nullstr")
+})
+
+test_that("Excel: headers that differ only by case are made distinct", {
+  p <- .sh_project()
+  f <- .sh_xlsx(rbind(c("ID", "id", "Id", "x"), c("1", "2", "3", "4")), file.path(.sh_dir(p), "case.xlsx"))
+  p <- .sh_ing(p, f, table = "cs")
+  nm <- names(.sh_schema(p, "cs"))
+  expect_equal(nm, c("ID", "id_1", "Id_2", "x"))
+  expect_equal(anyDuplicated(tolower(nm)), 0L)
+})
+
+test_that("SAV: a value-label code of 2^31 or more neither warns nor becomes NA", {
+  p <- .sh_project()
+  d <- data.frame(id = 1:3)
+  d$g <- haven::labelled(c(1, 3000000000, 2), c(One = 1, Huge = 3000000000))
+  d$h <- haven::labelled(c(1, 1, 2), c(One = 1, Huge = 3000000000))
+  f <- file.path(.sh_dir(p), "huge.sav")
+  dir.create(dirname(f), showWarnings = FALSE)
+  haven::write_sav(d, f)
+  rec <- .sh_stub_dict()
+  expect_no_warning(p <- .sh_ing(p, f, table = "hg"))
+  r <- .sh_all(p, "hg")
+  r <- r[order(r$id), ]
+  expect_equal(r$g, c("One", "Huge", "2"))
+  expect_equal(r$h, c("One", "One", "2"))
+  expect_equal(rec$dict$g$values$code, c("1", "3000000000"))
 })

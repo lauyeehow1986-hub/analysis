@@ -57,7 +57,9 @@ sr_excel_sheets <- function(path) {
   if (!is.null(range) && !(is.character(range) && length(range) == 1L && !is.na(range) && nzchar(range))) {
     stop("options$range must be a single string such as \"B3:F40\"", call. = FALSE)
   }
-  list(sheet = sheet, range = range,
+  nullstr <- options$nullstr %||% c("", "NA")    # the same default as the CSV reader
+  if (!is.character(nullstr) || anyNA(nullstr)) stop("options$nullstr must be a character vector", call. = FALSE)
+  list(sheet = sheet, range = range, nullstr = nullstr,
        header_rows = .sr_xl_whole(options$header_rows %||% 1L, "header_rows", 1),
        skip = .sr_xl_whole(options$skip %||% 0L, "skip", 0),
        guess_max = .sr_xl_whole(options$guess_max %||% 1000, "guess_max", 1),
@@ -77,7 +79,8 @@ sr_excel_sheets <- function(path) {
 # Flatten the header rows `h` (a character matrix, k x ncol, "" for an empty cell) into column names.
 # An empty cell in a spanning header row (every header row but the last) takes the value to its left,
 # which undoes a merged header; the last row names the column itself, so an empty cell there is left
-# empty. The non-empty parts are pasted with "_", names are made unique with make.unique(sep = "_").
+# empty. The non-empty parts are pasted with "_", names are made unique with make.unique(sep = "_")
+# case-insensitively (DuckDB identifiers are), so "ID" and "id" become "ID" and "id_1".
 .sr_xl_names <- function(h) {
   k <- nrow(h)
   if (k > 1L && ncol(h) > 1L) {
@@ -90,29 +93,55 @@ sr_excel_sheets <- function(path) {
     parts <- parts[nzchar(parts)]
     if (length(parts)) paste(parts, collapse = "_") else paste0("column_", j)
   }, character(1))
-  make.unique(nm, sep = "_")
+  .sr_xl_unique(nm)
 }
 
-# Which columns does readxl guess to be dates or date-times? Reads the first `guess_max` data rows with
-# the default column types, below the header rows. A failure is a warning and no column is converted.
+# make.unique(sep = "_") that ignores case; a generated name never collides with an existing one.
+.sr_xl_unique <- function(nm) {
+  out <- nm
+  seen <- character()
+  for (i in seq_along(nm)) {
+    cand <- nm[i]
+    n <- 0L
+    while (tolower(cand) %in% seen) {
+      n <- n + 1L
+      cand <- paste0(nm[i], "_", n)
+    }
+    seen <- c(seen, tolower(cand))
+    out[i] <- cand
+  }
+  out
+}
+
+# Which columns hold dates or date-times? Reads the same window as the text read (the same `skip`, or
+# the same `range`), because `skip` is only a lower bound: leading blank rows are dropped as well, so a
+# read shifted by header_rows would look at the wrong rows. col_types = "list" keeps every cell's own
+# type (a date cell is POSIXct); the first `header_rows` rows are the header, the next `guess_max` rows
+# are checked. A column is a date when it has a cell and every non-empty cell is a date. A failure is a
+# warning and no column is converted.
 .sr_xl_guess_dates <- function(path, o, ncol) {
   none <- rep(FALSE, ncol)
   tryCatch({
-    args <- list(path = path, sheet = o$sheet, col_names = FALSE, n_max = o$guess_max,
+    args <- list(path = path, sheet = o$sheet, col_names = FALSE, col_types = "list",
                  .name_repair = "minimal", progress = FALSE)
     if (is.null(o$range)) {
-      args$skip <- o$skip + o$header_rows
+      args$skip <- o$skip
+      args$n_max <- o$header_rows + o$guess_max
     } else {
-      cl <- cellranger::as.cell_limits(o$range)
-      if (!is.na(cl$ul[1L])) cl$ul[1L] <- cl$ul[1L] + o$header_rows
-      if (!is.na(cl$lr[1L]) && !is.na(cl$ul[1L]) && cl$lr[1L] < cl$ul[1L]) return(none)
-      args$range <- cl
+      args$range <- o$range                  # n_max is ignored with a range: the rows are cut below
     }
     g <- suppressMessages(do.call(readxl::read_excel, args))
-    if (!nrow(g)) return(none)
-    flags <- vapply(g, function(x) inherits(x, "POSIXct") || inherits(x, "Date"), logical(1))
+    rows <- seq_len(nrow(g))
+    rows <- rows[rows > o$header_rows & rows <= o$header_rows + o$guess_max]
+    if (!length(rows)) return(none)
+    flags <- vapply(g, function(x) {
+      cells <- x[rows]
+      cells <- cells[!vapply(cells, function(v) length(v) == 0L || (length(v) == 1L && is.na(v)), logical(1))]   # blank cells
+      length(cells) > 0L && all(vapply(cells, function(v) inherits(v, "POSIXct") || inherits(v, "Date"), logical(1)))
+    }, logical(1))
     out <- none
-    out[seq_len(min(ncol, length(flags)))] <- flags[seq_len(min(ncol, length(flags)))]
+    m <- min(ncol, length(flags))
+    out[seq_len(m)] <- flags[seq_len(m)]
     out
   }, error = function(e) {
     warning("could not check the Excel sheet for date columns: ", conditionMessage(e),
@@ -141,7 +170,7 @@ sr_excel_sheets <- function(path) {
     return(x)               # a text cell among the serials: keep the column as text
   }
   if (.sr_xl_identifier_like(nn)) return(x)
-  y <- utils::type.convert(x, as.is = TRUE, na.strings = character())
+  y <- utils::type.convert(x, as.is = TRUE, na.strings = character())   # null strings are NA already
   if (is.logical(y) && !all(nn %in% c("TRUE", "FALSE"))) return(x)    # "T" / "F" are text, not Booleans
   y
 }
@@ -170,7 +199,11 @@ sr_excel_sheets <- function(path) {
   h <- vapply(cols, function(x) trimws(replace(x[seq_len(k)], is.na(x[seq_len(k)]), "")), character(k))
   if (k == 1L) h <- matrix(h, nrow = 1L)
   nm <- .sr_xl_names(h)
-  body <- lapply(cols, function(x) x[-seq_len(k)])
+  body <- lapply(cols, function(x) {
+    x <- x[-seq_len(k)]
+    x[x %in% o$nullstr] <- NA_character_      # "" and "NA" are null, as in the CSV reader
+    x
+  })
   guess <- if (n > k) .sr_xl_guess_dates(path, o, length(cols)) else rep(FALSE, length(cols))
   epoch <- .sr_xl_epoch(path)
   out <- lapply(seq_along(body), function(j) {
@@ -288,7 +321,8 @@ sr_excel_sheets <- function(path) {
   lb <- sp$labels
   if (is.character(v)) {
     lb <- stats::setNames(as.character(unname(lb)), names(lb))
-  } else if (all(is.na(v) | (v == floor(v) & abs(v) < 2^31)) && all(unname(lb) == floor(unname(lb)))) {
+  } else if (all(is.na(v) | (v == floor(v) & abs(v) < 2^31)) &&
+             all(unname(lb) == floor(unname(lb)) & abs(unname(lb)) < 2^31)) {
     v <- as.integer(v)
     lb <- stats::setNames(as.integer(unname(lb)), names(lb))
   } else {
