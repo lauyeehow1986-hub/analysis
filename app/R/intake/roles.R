@@ -1,0 +1,257 @@
+# intake/roles.R - variable roles, rule-based role suggestions, and the outcome-blind gate.
+#
+# A role map is a named character vector (column -> role) per store table. It may be partial: a column
+# with no entry has no confirmed role yet. `roles.set` replaces one table's whole map in
+# state$roles[[table]]; other tables are untouched. The user confirms roles; sr_roles_suggest() only
+# proposes (rules, no model) and never proposes `outcome` or `exposure`.
+#
+# Outcome-blind rule: until the SAP is locked (sr_blind()), no pre-lock output may carry a statistic that
+# involves the outcome column and any other column. .sr_assert_blind() is the structural check that the
+# tests of every pre-lock output run.
+
+SR_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "exposure_date", "event_date",
+              "censor_date", "time", "event", "offset", "weight", "covariate", "ignore")
+SR_PROTECTED_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "time", "event")
+
+# ---- helpers ----------------------------------------------------------------------------------------
+
+# The stored schema (data.frame(name, type), schema order) of a store table, or an error naming it.
+.sr_roles_schema <- function(project, table) {
+  .sr_store_check_table(table)
+  m <- tryCatch(sr_store_manifest(project, table), error = function(e) {
+    stop("table '", table, "' is not in the store (", conditionMessage(e), ")", call. = FALSE)
+  })
+  data.frame(name = vapply(m$schema, function(s) s$name, ""), type = vapply(m$schema, function(s) s$type, ""),
+             stringsAsFactors = FALSE)
+}
+
+# The dictionary label of each column ("" when none). A dictionary that cannot be read (changed outside
+# the app, missing file) is not fatal here: warn, naming the table, and use column names only.
+.sr_roles_labels <- function(project, table, cols) {
+  out <- rep("", length(cols))
+  d <- tryCatch(sr_dict_get(project, table), error = function(e) {
+    warning("the dictionary of table '", table, "' could not be read (", conditionMessage(e),
+            "); suggesting roles from column names only", call. = FALSE)
+    NULL
+  })
+  if (is.null(d) || !nrow(d)) return(out)
+  i <- match(cols, d$variable)
+  ok <- !is.na(i)
+  lab <- as.character(d$label[i[ok]])
+  lab[is.na(lab)] <- ""
+  out[ok] <- lab
+  out
+}
+
+# Number of distinct non-NULL values of each of `cols`, in ONE aggregate over the table's view.
+.sr_roles_distinct <- function(project, table, cols) {
+  if (!length(cols)) return(numeric())
+  view <- sr_store_view(project, table)
+  con <- sr_duck(project)
+  agg <- sprintf("count(DISTINCT %s) AS %s", DBI::dbQuoteIdentifier(con, cols),
+                 DBI::dbQuoteIdentifier(con, paste0("c", seq_along(cols))))
+  r <- sr_duck_query(con, sprintf("SELECT %s FROM %s", paste(agg, collapse = ", "),
+                                  DBI::dbQuoteIdentifier(con, view)))
+  vapply(seq_along(cols), function(i) as.numeric(r[[i]][1L]), numeric(1))
+}
+
+# ---- suggestions ------------------------------------------------------------------------------------
+
+#' Suggested roles for every column of a store table, from rules only (no outcome or exposure: the user
+#' sets those). The first matching rule wins; the match is case-insensitive on the column name OR the
+#' dictionary label:
+#'   id        ^(patient_?)?id$ | mrn | nric | record_id | study_id
+#'   cluster   site | hospital | centre | center | surgeon | cluster, with 2 to 200 distinct values
+#'   date      _date$ | ^date_ | _dt$ or a DATE / TIMESTAMP type: event_date when death, event or
+#'             outcome is in the name, otherwise covariate
+#'   offset    follow-up, person-years / -days / -time, exposure_time
+#'   weight    weight$ (a body weight such as weight_kg or wt_kg is not a sampling weight)
+#'   covariate everything else
+#' Returns one row per schema column, in schema order: data.frame(column, role, reason).
+sr_roles_suggest <- function(project, table) {
+  sc <- .sr_roles_schema(project, table)
+  cols <- sc$name
+  n <- length(cols)
+  out <- data.frame(column = cols, role = rep(NA_character_, n), reason = rep(NA_character_, n),
+                    stringsAsFactors = FALSE)
+  if (!n) return(out)
+  nm <- tolower(cols)
+  lb <- tolower(.sr_roles_labels(project, table, cols))
+  hit <- function(re) grepl(re, nm, perl = TRUE) | grepl(re, lb, perl = TRUE)
+  via <- function(re) ifelse(grepl(re, nm, perl = TRUE), "name", "label")
+  assign_rule <- function(idx, role, reason) {
+    idx <- idx[is.na(out$role[idx])]
+    out$role[idx] <<- role
+    out$reason[idx] <<- reason[match(idx, seq_len(n))]
+  }
+  free <- function() is.na(out$role)
+
+  re_id <- "^(patient_?)?id$|mrn|nric|record_id|study_id"
+  i <- which(free() & hit(re_id))
+  assign_rule(i, "id", paste(via(re_id), "matches id pattern"))
+
+  re_cl <- "site|hospital|centre|center|surgeon|cluster"
+  cand <- which(free() & hit(re_cl))
+  if (length(cand)) {
+    k <- .sr_roles_distinct(project, table, cols[cand])
+    ok <- k >= 2 & k <= 200
+    rs <- character(n)
+    rs[cand] <- sprintf("%s matches cluster pattern; %d distinct values (2-200)", via(re_cl)[cand], as.integer(k))
+    assign_rule(cand[ok], "cluster", rs)
+  }
+
+  re_dt <- "_date$|^date_|_dt$"
+  is_dt <- hit(re_dt) | grepl("^(DATE|TIMESTAMP)", toupper(sc$type))
+  re_ev <- "death|event|outcome"
+  i <- which(free() & is_dt)
+  ev <- hit(re_ev)
+  assign_rule(i[ev[i]], "event_date", rep("date column with death, event or outcome in its name", n))
+  assign_rule(i[!ev[i]], "covariate", rep("date column (no event keyword in its name)", n))
+
+  re_off <- "follow_?up|person_?(years|days|time)|exposure_time"
+  i <- which(free() & hit(re_off))
+  assign_rule(i, "offset", paste(via(re_off), "matches follow-up or exposure-time pattern"))
+
+  re_wt <- "weight$"
+  re_body <- "body|birth"
+  i <- which(free() & hit(re_wt) & !hit(re_body))
+  assign_rule(i, "weight", paste(via(re_wt), "matches weight pattern"))
+
+  i <- which(free())
+  assign_rule(i, "covariate", rep("no rule matched; default covariate", n))
+  out
+}
+
+# ---- setting and reading ----------------------------------------------------------------------------
+
+#' Confirm variable roles for a store table. `roles` is a named character vector (column -> role) and
+#' may be partial; it replaces the table's whole map (other tables are untouched). Errors, naming the
+#' offending column or role, when the table is not in the store, a name is empty, NA, duplicated or not
+#' a column of the stored schema, a value is not in SR_ROLES, or more than one column is the outcome
+#' (several outcomes belong to the SAP multiplicity registry, P1d). Appends `roles.set`.
+sr_roles_set <- function(project, table, roles) {
+  sc <- .sr_roles_schema(project, table)
+  if (!is.character(roles) || (length(roles) > 0L && is.null(names(roles)))) {
+    stop("roles must be a named character vector (column -> role)", call. = FALSE)
+  }
+  cols <- names(roles) %||% character(0)
+  vals <- unname(roles)
+  if (anyNA(cols) || any(!nzchar(cols))) stop("roles has an empty or NA column name", call. = FALSE)
+  if (anyDuplicated(cols)) {
+    stop("roles names a column more than once: ", paste(unique(cols[duplicated(cols)]), collapse = ", "), call. = FALSE)
+  }
+  unknown <- setdiff(cols, sc$name)
+  if (length(unknown)) {
+    stop("unknown column(s) for table '", table, "': ", paste(unknown, collapse = ", "), call. = FALSE)
+  }
+  na <- is.na(vals)
+  if (any(na)) stop("no role given for column(s): ", paste(cols[na], collapse = ", "), call. = FALSE)
+  badr <- !(vals %in% SR_ROLES)
+  if (any(badr)) {
+    stop("unknown role(s): ", paste(unique(vals[badr]), collapse = ", "), " (column(s): ",
+         paste(cols[badr], collapse = ", "), "; allowed roles: ", paste(SR_ROLES, collapse = ", "), ")", call. = FALSE)
+  }
+  oc <- cols[vals == "outcome"]
+  if (length(oc) > 1L) {
+    stop("at most one outcome per table, but roles gives ", length(oc), ": ", paste(oc, collapse = ", "), call. = FALSE)
+  }
+  sr_project_append(project, "roles.set", list(table = table, columns = cols, roles = vals))
+}
+
+#' The confirmed roles of a table as a named character vector (column -> role); a zero-length named
+#' vector when nothing is set.
+sr_roles <- function(project, table) {
+  .sr_store_check_table(table)
+  r <- project$state$roles[[table]]
+  if (is.null(r)) stats::setNames(character(0), character(0)) else r
+}
+
+#' The columns of `table` that have role `role` (one of SR_ROLES), in the order they were given.
+sr_role_cols <- function(project, table, role) {
+  if (!is.character(role) || length(role) != 1L || is.na(role) || !(role %in% SR_ROLES)) {
+    stop("role must be one of: ", paste(SR_ROLES, collapse = ", "), " (got: ",
+         paste(format(role), collapse = ", "), ")", call. = FALSE)
+  }
+  r <- sr_roles(project, table)
+  unname(names(r)[r == role])
+}
+
+# `roles.set` replaces the table's whole map and nothing else.
+sr_reducer_register("roles.set", function(state, event) {
+  p <- event$payload
+  if (!is.character(p$table) || length(p$table) != 1L || is.na(p$table)) stop("roles.set needs a table", call. = FALSE)
+  cols <- as.character(unlist(p$columns, use.names = FALSE))
+  vals <- as.character(unlist(p$roles, use.names = FALSE))
+  if (length(cols) != length(vals)) stop("roles.set needs one role per column", call. = FALSE)
+  roles <- state$roles %||% list()
+  roles[[p$table]] <- stats::setNames(vals, cols)
+  state$roles <- roles
+  state
+})
+
+# ---- the outcome-blind gate -------------------------------------------------------------------------
+
+#' TRUE until the SAP is locked: while blind, no function may return a statistic that involves both the
+#' outcome-role column and any other column. A project is locked when `state$sap$locked` is TRUE.
+#' NOTE for P1d: the real `sap.locked` reducer MUST set `state$sap$locked <- TRUE`; this gate reads
+#' nothing else.
+sr_blind <- function(project) !isTRUE(project$state$sap$locked)
+
+# Element names that carry an outcome statistic (whole name, case-insensitive).
+.sr_blind_names <- c("auc", "or", "rr", "hr", "estimate", "effect", "crosstab", "by_outcome",
+                     "smd_by_outcome")
+
+#' Structural check that a pre-lock output carries no outcome-crossing statistic. Walks `x` through
+#' lists (and data.frame columns) and errors, naming the path of the offender (e.g. "a$auc"), when
+#'  - any element is named, as a whole name and case-insensitively, auc / or / rr / hr / estimate /
+#'    effect / crosstab / by_outcome / smd_by_outcome ("order" and "n_or_more" are fine), or
+#'  - a data.frame's column names, or a matrix / table's dimnames (names and values), contain an
+#'    outcome column AND one of `other_cols`.
+#' Cell values are never inspected: a per-column profile whose `column` field lists the outcome is
+#' legal. Returns `x` invisibly when it passes.
+.sr_assert_blind <- function(x, outcome_cols, other_cols = character()) {
+  outcome_cols <- as.character(outcome_cols)
+  other_cols <- as.character(other_cols)
+  cross <- function(labels, where) {
+    labels <- labels[!is.na(labels)]
+    o <- intersect(outcome_cols, labels)
+    r <- setdiff(intersect(other_cols, labels), o)
+    if (length(o) && length(r)) {
+      stop("outcome-blind gate: ", where, " crosses outcome column '", o[1L], "' with '", r[1L],
+           "' before the SAP is locked", call. = FALSE)
+    }
+  }
+  walk <- function(el, path) {
+    where <- if (nzchar(path)) path else "<top level>"
+    if (is.environment(el)) return(invisible())
+    if (is.array(el)) {
+      dn <- dimnames(el)
+      if (!is.null(dn)) cross(c(names(dn), unlist(dn, use.names = FALSE)), where)
+      return(invisible())
+    }
+    nms <- names(el)
+    if (!is.null(nms)) {
+      bad <- which(!is.na(nms) & tolower(nms) %in% .sr_blind_names)
+      if (length(bad)) {
+        at <- if (nzchar(path)) paste0(path, "$", nms[bad[1L]]) else nms[bad[1L]]
+        stop("outcome-blind gate: ", at, " is an outcome statistic ('", nms[bad[1L]],
+             "') and may not be shown before the SAP is locked", call. = FALSE)
+      }
+      if (is.data.frame(el)) cross(nms, where)
+    }
+    if (is.list(el)) {
+      for (i in seq_along(el)) {
+        nm <- if (!is.null(nms) && !is.na(nms[i]) && nzchar(nms[i])) nms[i] else NA_character_
+        child <- if (!is.na(nm)) {
+          if (nzchar(path)) paste0(path, "$", nm) else nm
+        } else {
+          paste0(path, "[[", i, "]]")
+        }
+        walk(el[[i]], child)
+      }
+    }
+    invisible()
+  }
+  walk(x, "")
+  invisible(x)
+}
