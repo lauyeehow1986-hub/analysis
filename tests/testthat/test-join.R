@@ -158,6 +158,7 @@ test_that("many-to-many is refused before anything is written, unless allowed", 
   expect_identical(sr_join_check(p, "ta", "tb", c(k = "k"))$relationship, "many_to_many")
   n0 <- .jn_n_events(p)
   expect_error(sr_join(p, "ta", "tb", c(k = "k"), into = "mm"), "many-to-many")
+  expect_error(sr_join(p, "ta", "tb", c(k = "k"), into = "mm"), "may multiply")
   expect_identical(.jn_n_events(p), n0)
   expect_false(dir.exists(sr_store_dir(p, "mm")))
   expect_false(dir.exists(file.path(sr_project_paths(p$paths$dir)$data, "ingest", "mm")))
@@ -276,4 +277,42 @@ test_that("an inner join with no matching keys gives an empty but valid table", 
   expect_equal(p$state$tables$e$store$rows, 0)
   expect_identical(nrow(.jn_rows(p, "e")), 0L)
   expect_identical(names(.jn_rows(p, "e")), c("k", "x", "y"))
+})
+
+test_that("the same join twice gives the same store hash (the output has a total order)", {
+  p <- .jn_project()
+  # many right rows per key with differing non-key values, enough rows for a parallel join
+  nl <- 5000L
+  nr <- 200000L
+  left <- data.frame(id = sprintf("L%05d", seq_len(nl)), grp = rep(c("a", "b", "c", "d"), length.out = nl),
+                     stringsAsFactors = FALSE)
+  right <- data.frame(id = sprintf("L%05d", (seq_len(nr) %% (nl + 100L)) + 1L), val = (seq_len(nr) * 7919L) %% 10007L,
+                      note = sprintf("n%d", (seq_len(nr) * 31L) %% 977L), stringsAsFactors = FALSE)
+  p <- .jn_ing(p, left, "lt")
+  p <- .jn_ing(p, right, "rt")
+  by <- c(id = "id")
+  p <- sr_join(p, "lt", "rt", by, type = "full", into = "j1")
+  p <- sr_join(p, "lt", "rt", by, type = "full", into = "j2")
+  expect_identical(p$state$tables$j1$store_hash, p$state$tables$j2$store_hash)
+  expect_equal(p$state$tables$j1$store$rows, p$state$tables$j2$store$rows)
+  # the recorded SQL is the exact recipe: it carries the ORDER BY
+  expect_match(p$state$joins$j1$sql, "ORDER BY", fixed = TRUE)
+  # and the table is sorted by the left key first
+  d <- sr_table_page(p, "j1", 0, 1000, order_by = "id")
+  expect_false(is.unsorted(d$id))
+})
+
+test_that("an existing staging directory for the target is refused and left untouched", {
+  p <- .jn_fixture()
+  stage <- file.path(sr_project_paths(p$paths$dir)$data, "ingest", "pending")
+  dir.create(stage, recursive = TRUE)
+  ck <- file.path(stage, "checkpoint.json")
+  writeLines("{\"done\": false}", ck)
+  before <- unname(tools::md5sum(ck))
+  n0 <- .jn_n_events(p)
+  expect_error(sr_join(p, "patients", "labs", c(patient_id = "pid"), into = "pending"), "pending.*ingest")
+  expect_true(file.exists(ck))
+  expect_identical(unname(tools::md5sum(ck)), before)
+  expect_identical(.jn_n_events(p), n0)
+  expect_false(dir.exists(sr_store_dir(p, "pending")))
 })

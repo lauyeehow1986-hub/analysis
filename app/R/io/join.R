@@ -118,11 +118,13 @@ sr_join_check <- function(project, left, right, by) {
 # columns keep their names (the left key names are the key names; in a full join the key is the
 # COALESCE of both sides so right-only rows keep theirs); right key columns are dropped; a right
 # column whose name is already taken (case-insensitively, as DuckDB compares names) becomes
-# <name>_<right table>, then <name>_<right table>_2, ...
+# <name>_<right table>, then <name>_<right table>_2, ... Returns list(cols = output names, sql = the
+# SELECT, ending in a total ORDER BY).
 .sr_join_select <- function(con, spec, type) {
   q <- function(x) .sr_join_q(con, x)
   used <- tolower(names(spec$ls))
   exprs <- character()
+  outs <- character()
   for (nm in names(spec$ls)) {
     i <- match(nm, spec$lk)
     e <- if (!is.na(i) && type == "full") sprintf("COALESCE(sr_l.%s, sr_r.%s)", q(nm), q(spec$rk[i])) else sprintf("sr_l.%s", q(nm))
@@ -140,19 +142,26 @@ sr_join_check <- function(project, left, right, by) {
     }
     used <- c(used, tolower(out))
     exprs <- c(exprs, paste(sprintf("sr_r.%s", q(nm)), "AS", q(out)))
+    outs <- c(outs, out)
   }
   on <- paste(sprintf("sr_l.%s = sr_r.%s", q(spec$lk), q(spec$rk)), collapse = " AND ")
   kw <- switch(type, left = "LEFT JOIN", inner = "INNER JOIN", full = "FULL OUTER JOIN")
-  paste0("SELECT ", paste(exprs, collapse = ", "), " FROM ", q(spec$left), " AS sr_l ", kw, " ",
-         q(spec$right), " AS sr_r ON ", on)
+  # A total order over every output column (left key columns first, then the rest in output order):
+  # rows that tie are identical, so the bytes of the result, and its store hash, do not depend on
+  # thread scheduling. A key-only order would leave right rows that share a key unordered.
+  out <- c(spec$lk, setdiff(names(spec$ls), spec$lk), outs)
+  list(cols = out,
+       sql = paste0("SELECT ", paste(exprs, collapse = ", "), " FROM ", q(spec$left), " AS sr_l ", kw, " ",
+                    q(spec$right), " AS sr_r ON ", on, " ORDER BY ", paste(q(out), collapse = ", ")))
 }
 
 #' Join two ingested tables into a new store table `into` and append `join.created`.
 #'
 #' `into` must be a new, valid table name (checked first, before any work). A many-to-many join is
 #' refused (before anything is written) unless `allow_many_to_many = TRUE`. The result has the left
-#' table's columns, then the right table's non-key columns; see .sr_join_select for the naming. Row
-#' order is not guaranteed.
+#' table's columns, then the right table's non-key columns; see .sr_join_select for the naming. The rows
+#' are in a total order (ORDER BY every output column, left key columns first), which is part of the
+#' recorded SQL, so the same join of the same inputs gives the same store hash.
 #' @return the project with the event applied.
 sr_join <- function(project, left, right, by, type = c("left", "inner", "full"), into,
                     allow_many_to_many = FALSE) {
@@ -167,25 +176,32 @@ sr_join <- function(project, left, right, by, type = c("left", "inner", "full"),
       !is.null(project$state$tables[[into]]) || !is.null(project$state$joins[[into]])) {
     stop("table '", into, "' already exists", call. = FALSE)
   }
+  stage <- sr_project_paths(project$paths$dir)$data
+  stage <- file.path(stage, "ingest", into)
+  if (dir.exists(stage) || file.exists(stage)) {
+    stop("table '", into, "' has a staging directory in data/ingest (an unfinished ingest?); resume or ",
+         "remove it, or choose another name", call. = FALSE)
+  }
   spec <- .sr_join_spec(project, left, right, by)
   report <- .sr_join_report(project, spec)
   if (identical(report$relationship, "many_to_many") && !allow_many_to_many) {
     stop("refusing a many-to-many join of '", spec$left, "' and '", spec$right,
-         "': the key repeats on both sides, so rows multiply (", report$left_rows, " x ", report$right_rows,
+         "': the key repeats on both sides, so rows may multiply (", report$left_rows, " x ", report$right_rows,
          " rows); set allow_many_to_many = TRUE to join anyway", call. = FALSE)
   }
 
   con <- sr_duck(project)
-  sql <- .sr_join_select(con, spec, type)
+  sel <- .sr_join_select(con, spec, type)
+  sql <- sel$sql
   ck <- .sr_ck_new(project, into, NULL, NULL, 0)
-  if (dir.exists(ck$ingest_dir)) unlink(ck$ingest_dir, recursive = TRUE)
   if (!isTRUE(dir.create(ck$store_dir, recursive = TRUE, showWarnings = FALSE))) {
     stop("cannot create directory: ", ck$store_dir, call. = FALSE)
   }
   on.exit(unlink(ck$ingest_dir, recursive = TRUE), add = TRUE)
 
   part <- .sr_part_path(ck)
-  rows <- .sr_col_copy(con, from = paste0("(", sql, ") AS sr_j"), to = part, what = "the join")
+  rows <- .sr_col_copy(con, from = paste0("(", sql, ") AS sr_j"), to = part, what = "the join",
+                       order = paste(.sr_join_q(con, sel$cols), collapse = ", "))
   .sr_part_commit(ck, part, rows)
   schema <- .sr_col_schema(con, ck)
   parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
