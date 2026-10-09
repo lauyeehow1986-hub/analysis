@@ -297,9 +297,24 @@ test_that("the same join twice gives the same store hash (the output has a total
   expect_equal(p$state$tables$j1$store$rows, p$state$tables$j2$store$rows)
   # the recorded SQL is the exact recipe: it carries the ORDER BY
   expect_match(p$state$joins$j1$sql, "ORDER BY", fixed = TRUE)
-  # and the table is sorted by the left key first
-  d <- sr_table_page(p, "j1", 0, 1000, order_by = "id")
-  expect_false(is.unsorted(d$id))
+  # and the STORED order (the part file as written, by file row number) is the recorded SQL's row
+  # order, row by row, in every column
+  con <- sr_duck(p)
+  m <- sr_store_manifest(p, "j1")
+  expect_length(m$parts, 1L)
+  f <- normalizePath(file.path(sr_store_dir(p, "j1"), m$parts[[1L]]$file), winslash = "/")
+  stored <- sr_duck_query(con, sprintf(
+    "SELECT * EXCLUDE (file_row_number) FROM read_parquet(%s, file_row_number = true) ORDER BY file_row_number",
+    DBI::dbQuoteString(con, f)))
+  want <- sr_duck_query(con, p$state$joins$j1$sql)
+  expect_identical(nrow(stored), nrow(want))
+  rownames(stored) <- NULL
+  rownames(want) <- NULL
+  expect_identical(stored, want)
+  # and it is a total order: sorting the stored rows by every column changes nothing
+  sorted <- sr_duck_query(con, sprintf("SELECT * FROM read_parquet(%s) ORDER BY %s", DBI::dbQuoteString(con, f),
+                                       paste(DBI::dbQuoteIdentifier(con, names(stored)), collapse = ", ")))
+  expect_identical(stored, sorted)
 })
 
 test_that("an existing staging directory for the target is refused and left untouched", {
