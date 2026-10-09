@@ -46,18 +46,37 @@ SH_LAB <- paste0("M", intToUtf8(c(228L, 8211L, 960L)), "nner")       # a non-ASC
   invisible(path)
 }
 
-# A stub for the Task 9 dictionary hook; records what sr_ingest passes it. Removed when `env` ends.
+# Put `value` in the global environment under `name` (NULL removes it) until `env` ends, then restore what
+# was there before. The real dictionary functions live in the global environment too, so a stub must
+# never leave them removed for the test files that run after this one.
+.sh_swap <- function(name, value, env = parent.frame()) {
+  had <- exists(name, envir = globalenv(), inherits = FALSE)
+  orig <- if (had) get(name, envir = globalenv(), inherits = FALSE) else NULL
+  if (is.null(value)) {
+    suppressWarnings(rm(list = name, envir = globalenv()))
+  } else {
+    assign(name, value, envir = globalenv())
+  }
+  withr::defer({
+    if (had) assign(name, orig, envir = globalenv()) else suppressWarnings(rm(list = name, envir = globalenv()))
+  }, envir = env)
+  invisible(NULL)
+}
+
+# A stub for the dictionary hook; records what sr_ingest passes it (the raw label list, not the converted
+# dictionary). The previous sr_dict_set and sr_dict_from_labels return when `env` ends.
 .sh_stub_dict <- function(env = parent.frame()) {
   rec <- new.env()
   rec$n <- 0L
-  assign("sr_dict_set", function(project, table, dict, source = NULL) {
+  # the raw label list reaches the stub as before: these tests read its per-column entries
+  .sh_swap("sr_dict_from_labels", function(dict_labels) dict_labels, env = env)
+  .sh_swap("sr_dict_set", function(project, table, dict, source = NULL) {
     rec$n <- rec$n + 1L
     rec$table <- table
     rec$dict <- dict
     rec$source <- source
     project
-  }, envir = globalenv())
-  withr::defer(suppressWarnings(rm("sr_dict_set", envir = globalenv())), envir = env)
+  }, env = env)
   rec
 }
 
@@ -294,6 +313,7 @@ test_that("the dictionary hook is optional: without sr_dict_set the labels are d
   f <- file.path(.sh_dir(p), "fx.sav")
   dir.create(dirname(f))
   haven::write_sav(.sh_frame(), f)
+  .sh_swap("sr_dict_set", NULL)                                  # as before the dictionary module is loaded
   expect_false(exists("sr_dict_set", envir = globalenv(), inherits = FALSE))
   p <- .sh_ing(p, f, table = "fx")
   expect_true(p$state$tables$fx$dict_from_source)
@@ -312,8 +332,7 @@ test_that("the dict.set hook goes through sr_dict_from_labels when Task 9 provid
   dir.create(dirname(f))
   haven::write_sav(.sh_frame(), f)
   rec <- .sh_stub_dict()
-  assign("sr_dict_from_labels", function(dict_labels) list(wrapped = dict_labels), envir = globalenv())
-  withr::defer(rm("sr_dict_from_labels", envir = globalenv()))
+  .sh_swap("sr_dict_from_labels", function(dict_labels) list(wrapped = dict_labels))
   p <- .sh_ing(p, f, table = "fx")
   expect_equal(rec$n, 1L)
   expect_true(is.list(rec$dict$wrapped))

@@ -289,7 +289,7 @@ sr_excel_sheets <- function(path) {
   miss <- if (length(sp$na_values)) .sr_hv_code(sp$na_values) else NULL
   rng <- if (length(sp$na_range) == 2L) .sr_hv_code(sp$na_range) else NULL
   if (is.na(sp$label) && is.null(vals) && is.null(miss) && is.null(rng)) return(NULL)
-  e <- list(label = sp$label, values = vals, missing_codes = miss)
+  e <- list(label = sp$label, values = vals, missing_codes = miss, kind = sp$kind)
   if (!is.null(rng)) e$missing_range <- rng
   e
 }
