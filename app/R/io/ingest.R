@@ -484,8 +484,14 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   project <- sr_project_append(project, "data.imported", payload)
   # the dictionary module (a later task) owns dict.set; until it is loaded the labels are not stored
   if (from_source && exists("sr_dict_set")) {
-    dict <- if (exists("sr_dict_from_labels")) sr_dict_from_labels(dict_labels) else dict_labels
-    project <- sr_dict_set(project, table, dict, source = "source")
+    # the data are already committed: a dictionary that cannot be stored is a warning, not a failed ingest
+    project <- tryCatch({
+      dict <- if (exists("sr_dict_from_labels")) sr_dict_from_labels(dict_labels) else dict_labels
+      sr_dict_set(project, table, dict, source = "source")
+    }, error = function(e) {
+      warning("dictionary for table '", table, "' not stored: ", conditionMessage(e), call. = FALSE)
+      project
+    })
   }
   project
 }

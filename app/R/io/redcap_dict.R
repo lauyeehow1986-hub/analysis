@@ -18,7 +18,8 @@
 .sr_redcap_strip <- function(x) {
   x <- as.character(x)
   x[is.na(x)] <- ""
-  x <- gsub("<[^>]*>", "", x)
+  # only real tags and comments: "Age (<18 or >65)" is text, not markup
+  x <- gsub("<(/?[A-Za-z][^>]*|!--.*?--)>", "", x, perl = TRUE)
   x <- gsub("&nbsp;", " ", x, fixed = TRUE)
   x <- gsub("&lt;", "<", x, fixed = TRUE)
   x <- gsub("&gt;", ">", x, fixed = TRUE)
@@ -252,7 +253,7 @@ sr_dict_read_odm <- function(path) {
   if (dtype == "date" && all(grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", ok)) && !anyNA(as.Date(ok, format = "%Y-%m-%d"))) {
     return(as.Date(x, format = "%Y-%m-%d"))
   }
-  if (dtype == "boolean" && all(tolower(ok) %in% c("0", "1", "true", "false"))) return(tolower(x) %in% c("1", "true") & !is.na(x) | ifelse(is.na(x), NA, FALSE))
+  if (dtype == "boolean" && all(tolower(ok) %in% c("0", "1", "true", "false"))) return(ifelse(is.na(x), NA, tolower(x) %in% c("1", "true")))
   x
 }
 
@@ -261,11 +262,14 @@ sr_dict_read_odm <- function(path) {
 .sr_odm_records <- function(doc) {
   subjects <- xml2::xml_find_all(doc, "//ClinicalData/SubjectData")
   if (!length(subjects)) stop("the ODM file has no clinical data (no SubjectData)", call. = FALSE)
-  keys <- character()
+  # row index per subject/event/instance key: an environment is a hash table, so each lookup is O(1)
+  index <- new.env(hash = TRUE, parent = emptyenv())
+  n_rows <- 0L
   meta <- list()
-  r_idx <- integer()
-  r_item <- character()
-  r_val <- character()
+  p_idx <- list()
+  p_item <- list()
+  p_val <- list()
+  n_piece <- 0L
   rep_attr <- function(node, nm) {
     a <- xml2::xml_attr(node, nm)
     if (is.na(a) || !nzchar(a)) NA_character_ else a
@@ -289,23 +293,29 @@ sr_dict_read_odm <- function(path) {
           nodes <- xml2::xml_find_all(ig, "./ItemData")
           if (!length(nodes)) next
           key <- paste(subj, ev_oid, ev_rep, f_rep, g_rep, sep = "\r")
-          idx <- match(key, keys)
-          if (is.na(idx)) {
-            keys <- c(keys, key)
-            idx <- length(keys)
+          idx <- index[[key]]
+          if (is.null(idx)) {
+            n_rows <- n_rows + 1L
+            idx <- n_rows
+            index[[key]] <- idx
             inst <- if (!is.na(f_rep)) f_rep else g_rep
             meta[[idx]] <- c(subj, ev_oid, ev_rep, inst)
           }
           val <- xml2::xml_attr(nodes, "Value")
           val[!is.na(val) & !nzchar(val)] <- NA_character_
-          r_idx <- c(r_idx, rep(idx, length(nodes)))
-          r_item <- c(r_item, xml2::xml_attr(nodes, "ItemOID"))
-          r_val <- c(r_val, val)
+          n_piece <- n_piece + 1L
+          p_idx[[n_piece]] <- rep.int(idx, length(nodes))
+          p_item[[n_piece]] <- xml2::xml_attr(nodes, "ItemOID")
+          p_val[[n_piece]] <- val
         }
       }
     }
   }
-  if (!length(keys)) stop("the ODM file has no clinical data (no ItemData)", call. = FALSE)
+  if (!n_rows) stop("the ODM file has no clinical data (no ItemData)", call. = FALSE)
+  keys <- seq_len(n_rows)
+  r_idx <- unlist(p_idx, use.names = FALSE)
+  r_item <- unlist(p_item, use.names = FALSE)
+  r_val <- unlist(p_val, use.names = FALSE)
   ok <- !is.na(r_item)
   r_idx <- r_idx[ok]
   r_item <- r_item[ok]
@@ -315,8 +325,14 @@ sr_dict_read_odm <- function(path) {
   mtype <- stats::setNames(xml2::xml_attr(mdef, "DataType"), moid)
   seen <- unique(r_item)
   items <- c(intersect(moid, seen), setdiff(seen, moid))
+  col <- match(r_item, items)
+  dup <- duplicated(r_idx + (col - 1) * n_rows)
+  if (any(dup)) {
+    warning("ODM item(s) ", paste0("'", unique(r_item[dup]), "'", collapse = ", "),
+            " appear more than once for the same subject, event and instance; the last value is kept", call. = FALSE)
+  }
   m <- matrix(NA_character_, nrow = length(keys), ncol = length(items))
-  m[cbind(r_idx, match(r_item, items))] <- r_val
+  m[cbind(r_idx, col)] <- r_val
   mm <- do.call(rbind, meta)
   mnames <- c("subject_key", "event_oid", "event_repeat", "repeat_instance")
   while (any(mnames %in% items)) mnames[mnames %in% items] <- paste0("odm_", mnames[mnames %in% items])

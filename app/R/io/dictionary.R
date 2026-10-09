@@ -208,8 +208,13 @@ sr_dict_from_labels <- function(dict_labels) {
     lv <- .sr_dict_levels0()
     if (has_vals) {
       o <- if ("order" %in% names(vals)) order(vals$order) else seq_len(nrow(vals))
-      lv <- data.frame(code = as.character(vals$code[o]), label = as.character(vals$label[o]),
-                       stringsAsFactors = FALSE)
+      code <- as.character(vals$code[o])
+      lab <- as.character(vals$label[o])
+      lab <- ifelse(is.na(lab), code, lab)
+      # a source file can label a blank or repeat a code: only usable, first-seen codes become levels
+      keep <- !is.na(code) & nzchar(trimws(code)) & !duplicated(code)
+      lv <- data.frame(code = code[keep], label = lab[keep], stringsAsFactors = FALSE)
+      has_vals <- nrow(lv) > 0L
     }
     kind <- as.character(e$kind %||% "")[1L]
     type <- if (has_vals) "categorical" else if (!is.na(kind) && kind %in% names(kind_type)) kind_type[[kind]] else "text"

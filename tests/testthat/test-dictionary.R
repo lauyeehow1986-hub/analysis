@@ -584,3 +584,120 @@ test_that("sr_dict_match shows names that are unmatched in either direction, and
   expect_true(all(m$in_dict[m$variable %in% c("age", "sex")]))
   expect_error(sr_dict_match(p, "no_such_table"), "no_such_table")
 })
+
+# ---- fix round 1 ----------------------------------------------------------------------------------
+
+# Put `value` in the global environment under `name` (NULL removes it) until `env` ends.
+.dc_swap <- function(name, value, env = parent.frame()) {
+  had <- exists(name, envir = globalenv(), inherits = FALSE)
+  orig <- if (had) get(name, envir = globalenv(), inherits = FALSE) else NULL
+  if (is.null(value)) suppressWarnings(rm(list = name, envir = globalenv())) else assign(name, value, envir = globalenv())
+  withr::defer({
+    if (had) assign(name, orig, envir = globalenv()) else suppressWarnings(rm(list = name, envir = globalenv()))
+  }, envir = env)
+  invisible(NULL)
+}
+
+test_that("sr_dict_from_labels drops labels with an empty or missing code and keeps the first of a duplicate code", {
+  dl <- list(
+    s = list(label = "S",
+             values = data.frame(code = c("a", "", "b", "a", NA), label = c("A", "Blank", "B", "A again", "NA code"),
+                                 order = 1:5, stringsAsFactors = FALSE),
+             missing_codes = NULL, kind = "character"),
+    only_blank = list(label = "OB",
+                      values = data.frame(code = "", label = "Blank", order = 1L, stringsAsFactors = FALSE),
+                      missing_codes = NULL, kind = "character"))
+  d <- sr_dict_from_labels(dl)
+  expect_silent(sr_dict_validate(d))
+  expect_identical(d$levels[[1]], .dc_lv(c("a", "b"), c("A", "B")))
+  expect_equal(nrow(d$levels[[2]]), 0L)                              # nothing usable left: no levels
+  expect_equal(d$type[2], "text")
+})
+
+test_that("a dictionary error during ingest is a warning: the table stays imported and sr_ingest returns", {
+  p <- .dc_project()
+  d <- data.frame(id = 1:30)
+  d$sex <- haven::labelled(rep(c(1, 2), 15), c(Male = 1, Female = 2), label = "Sex of patient")
+  f <- file.path(dirname(p$paths$dir), "src", "fx.sav")
+  dir.create(dirname(f))
+  haven::write_sav(d, f)
+  .dc_swap("sr_dict_set", function(project, table, dict, source = NULL) stop("disk is read-only"))
+  expect_warning(p <- .dc_ing(p, f, table = "fx"), "dictionary for table 'fx' not stored: disk is read-only")
+  expect_true("fx" %in% names(p$state$tables))
+  expect_equal(p$state$tables$fx$store$rows, 30)
+  expect_null(p$state$dict$fx)
+  # the data are readable and a later sr_dict_set (real one restored) works
+  expect_equal(nrow(.dc_all(p, "fx")), 30L)
+})
+
+test_that("a dictionary-conversion error (sr_dict_from_labels) during ingest is also only a warning", {
+  p <- .dc_project()
+  d <- data.frame(id = 1:10)
+  d$sex <- haven::labelled(rep(c(1, 2), 5), c(Male = 1, Female = 2))
+  f <- file.path(dirname(p$paths$dir), "src", "fy.sav")
+  dir.create(dirname(f))
+  haven::write_sav(d, f)
+  .dc_swap("sr_dict_from_labels", function(dict_labels) stop("cannot convert"))
+  expect_warning(p <- .dc_ing(p, f, table = "fy"), "dictionary for table 'fy' not stored: cannot convert")
+  expect_equal(p$state$tables$fy$store$rows, 10)
+})
+
+test_that(".sr_redcap_strip removes real tags and comments only", {
+  expect_identical(.sr_redcap_strip("Age (<18 or >65)"), "Age (<18 or >65)")
+  expect_identical(.sr_redcap_strip("<b>Age</b>"), "Age")
+  expect_identical(.sr_redcap_strip("<span style='x'>BP</span> &lt;140"), "BP <140")
+  expect_identical(.sr_redcap_strip("a <!-- hidden --> b"), "a b")
+  expect_identical(.sr_redcap_strip("x<br/>y"), "xy")
+  expect_identical(.sr_redcap_strip("1 < 2 and 3 > 2"), "1 < 2 and 3 > 2")
+  expect_identical(.sr_redcap_strip("Fish &amp; chips&nbsp;&lt;b&gt;"), "Fish & chips <b>")
+})
+
+test_that("a REDCap CSV and the same ODM keep a '<18 or >65' label and still agree", {
+  csv <- .dc_write(c('"Variable / Field Name","Form Name","Section Header","Field Type","Field Label","Choices, Calculations, OR Slider Labels","Field Note","Text Validation Type OR Show Slider Number","Text Validation Min","Text Validation Max","Identifier?"',
+                     '"agegrp","f","","text","Age (<18 or >65) <b>years</b>","","","","","",""'), "lt.csv")
+  odm <- .dc_write(c('<?xml version="1.0"?>',
+                     '<ODM xmlns="http://www.cdisc.org/ns/odm/v1.3" xmlns:redcap="https://projectredcap.org" ODMVersion="1.3.1" FileOID="x" FileType="Snapshot"><Study OID="s"><MetaDataVersion OID="m" Name="m">',
+                     '<ItemDef OID="agegrp" Name="agegrp" DataType="text" redcap:Variable="agegrp" redcap:FieldType="text"><Question><TranslatedText>Age (&lt;18 or &gt;65) &lt;b&gt;years&lt;/b&gt;</TranslatedText></Question></ItemDef>',
+                     '</MetaDataVersion></Study></ODM>'), "lt.xml")
+  a <- sr_dict_read_redcap(csv)
+  b <- sr_dict_read_odm(odm)
+  expect_equal(a$label, "Age (<18 or >65) years")
+  expect_identical(.dc_by_var(a), .dc_by_var(b))
+})
+
+.dc_big_odm <- function(n_subj, dup = FALSE) {
+  head <- c('<?xml version="1.0" encoding="UTF-8"?>',
+            '<ODM ODMVersion="1.3.2" FileOID="big" FileType="Snapshot"><Study OID="s"><MetaDataVersion OID="m" Name="m">',
+            '<ItemDef OID="a" Name="a" DataType="integer"/><ItemDef OID="b" Name="b" DataType="float"/>',
+            '</MetaDataVersion></Study><ClinicalData StudyOID="s" MetaDataVersion="m">')
+  ids <- sprintf("S%05d", seq_len(n_subj))
+  ev <- function(e) sprintf(paste0('<StudyEventData StudyEventOID="%s"><FormData FormOID="F"><ItemGroupData ItemGroupOID="g">',
+                                   '<ItemData ItemOID="a" Value="%d"/><ItemData ItemOID="b" Value="%s"/>',
+                                   if (dup) '<ItemData ItemOID="a" Value="999"/>' else "",
+                                   '</ItemGroupData></FormData></StudyEventData>'), e, seq_len(n_subj) %% 90L, format(seq_len(n_subj) / 8, trim = TRUE))
+  body <- sprintf('<SubjectData SubjectKey="%s">%s%s</SubjectData>', ids, ev("ev1"), ev("ev2"))
+  c(head, body, "</ClinicalData></ODM>")
+}
+
+test_that("the ODM data reader scales: 2000 subjects x 2 events parse to 4000 rows quickly", {
+  f <- .dc_write(.dc_big_odm(2000L), "big.xml")
+  t0 <- Sys.time()
+  r <- .sr_odm_records(.sr_odm_read(f))
+  expect_lt(as.numeric(difftime(Sys.time(), t0, units = "secs")), 20)
+  expect_equal(nrow(r), 4000L)
+  expect_identical(names(r), c("subject_key", "event_oid", "event_repeat", "repeat_instance", "a", "b"))
+  expect_identical(r$subject_key[c(1, 2, 3999, 4000)], c("S00001", "S00001", "S02000", "S02000"))
+  expect_identical(r$event_oid[1:2], c("ev1", "ev2"))
+  expect_identical(r$a[1:3], c(1L, 1L, 2L))
+  expect_equal(r$b[4000], 250)
+})
+
+test_that("an item that appears twice for one subject/event/instance warns, naming the item", {
+  f <- .dc_write(.dc_big_odm(3L, dup = TRUE), "dup.xml")
+  expect_warning(r <- .sr_odm_records(.sr_odm_read(f)), "'a'")
+  expect_equal(nrow(r), 6L)
+  expect_identical(r$a[1], 999L)                                      # the last value is kept
+  # no duplicate, no warning
+  g <- .dc_write(.dc_big_odm(3L), "nodup.xml")
+  expect_silent(.sr_odm_records(.sr_odm_read(g)))
+})
