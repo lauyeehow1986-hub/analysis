@@ -567,10 +567,14 @@ sr_reducer_register("data.imported", function(state, event) {
 # freeze gate needs. An in-project source (a copy under data/source) is resolved against the current
 # project dir, so a copied or moved project folder keeps working.
 
+# A table made by a join (join.R) has no source file: it is derived from two other tables.
+.sr_is_derived <- function(entry) is.list(entry) && identical(entry$format, "join")
+
 # The table's entry in state, or an error naming the table.
 .sr_ext_entry <- function(project, table) {
   if (!is.character(table) || length(table) != 1L || is.na(table)) stop("table must be a single string", call. = FALSE)
   e <- project$state$tables[[table]]
+  if (.sr_is_derived(e)) stop("table '", table, "' is derived by a join and has no source file", call. = FALSE)
   if (is.null(e) || !is.list(e$source)) stop("unknown table: ", table, call. = FALSE)
   e
 }
@@ -610,6 +614,10 @@ sr_reducer_register("data.imported", function(state, event) {
 #' @return list(status = "ok" | "missing" | "changed", path, detail): `path` is where the source was
 #'   looked for and `detail` a short human-readable reason ("" when ok).
 sr_source_status <- function(project, table) {
+  if (is.character(table) && length(table) == 1L && !is.na(table) && .sr_is_derived(project$state$tables[[table]])) {
+    return(list(status = "derived", path = NA_character_,
+                detail = "derived by a join of other tables; it has no source file"))
+  }
   entry <- .sr_ext_entry(project, table)
   path <- .sr_ext_path(project, entry)
   external <- isTRUE(entry$source$external)
@@ -667,6 +675,9 @@ sr_source_relocate <- function(project, table, new_path) {
 #' already known (computed when it was copied in) is not hashed again: the project is returned
 #' unchanged.
 sr_source_hash <- function(project, table, progress = NULL) {
+  if (is.character(table) && length(table) == 1L && !is.na(table) && .sr_is_derived(project$state$tables[[table]])) {
+    return(project)                      # derived by a join: no source to hash
+  }
   entry <- .sr_ext_entry(project, table)
   external <- isTRUE(entry$source$external)
   known <- entry$source$sha256
@@ -690,6 +701,7 @@ sr_tables_needing_hash <- function(project) {
   tabs <- project$state$tables
   if (!length(tabs)) return(character(0))
   need <- vapply(tabs, function(e) {
+    if (.sr_is_derived(e)) return(FALSE)
     h <- e$source$sha256
     !(is.character(h) && length(h) == 1L && !is.na(h) && nzchar(h))
   }, logical(1))
