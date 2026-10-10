@@ -1,11 +1,11 @@
 options(shiny.autoload.r = FALSE)  # app/global.R is the only loader; never auto-source app/R/*.R
 
-# StatRouter shell. In P1a only the Project panel works; the rest are placeholders for P1b-P1d.
+# StatRouter shell. The Project and Data panels work (Data once a project is open); the rest are placeholders for P1b-P1d.
 # With autoloading off, Shiny runs this file with the app directory as the working directory and does
 # not source global.R for an app.R app, so load it here unless a caller already did.
 if (!exists("sr_root", inherits = TRUE)) source("global.R", local = FALSE, encoding = "UTF-8")
 
-.sr_panel_names <- c("Data", "Profile", "Design", "SAP", "Analyses", "Write", "Archive", "Reviewer",
+.sr_panel_names <- c("Profile", "Design", "SAP", "Analyses", "Write", "Archive", "Reviewer",
                      "Settings")
 
 .sr_placeholder_panel <- function(title) {
@@ -30,7 +30,8 @@ ui <- do.call(bslib::page_navbar, c(
     title = "StatRouter",
     id = "main_nav",
     theme = bslib::bs_theme(version = 5),
-    bslib::nav_panel("Project", mod_project_ui("project"))
+    bslib::nav_panel("Project", mod_project_ui("project")),
+    bslib::nav_panel("Data", mod_data_ui("data"), value = "Data")
   ),
   lapply(.sr_panel_names, .sr_placeholder_panel),
   list(bslib::nav_spacer(), .sr_badges())
@@ -38,6 +39,11 @@ ui <- do.call(bslib::page_navbar, c(
 
 server <- function(input, output, session) {
   project <- mod_project_server("project")
+  mod_data_server("data", project)
+  # The Data panel is hidden until a project is open.
+  shiny::observe({
+    if (is.null(project())) bslib::nav_hide("main_nav", "Data") else bslib::nav_show("main_nav", "Data")
+  })
 }
 
 shiny::shinyApp(ui, server)
