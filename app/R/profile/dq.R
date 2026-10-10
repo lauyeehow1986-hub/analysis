@@ -82,18 +82,20 @@ sr_findings_empty <- function() {
 
 # The id of a finding: the first 12 hex characters of sha256(check | column | where JSON). `salt` is
 # mixed into the id only when it is given (check_error, so two failing checks do not collide).
+# `where` here is the id key: .sr_dq_finding passes its `id_where` (default: the finding's own `where`).
 .sr_dq_id <- function(check, column, where, salt = NULL) {
   wj <- as.character(jsonlite::toJSON(where, auto_unbox = TRUE, digits = NA, null = "null"))
   substr(.sr_sha256(paste(c(check, column, wj, salt), collapse = "|")), 1L, 12L)
 }
 
 # One finding as a one-row frame (see sr_findings_empty). `examples` is coerced to character and cut to
-# five; `where` is a recipe filter or NULL; `detail` is a named list of data.frames.
+# five; `where` is a recipe filter or NULL; `detail` is a named list of data.frames. `id_where` replaces
+# `where` in the id hash for a filter that embeds something that changes between runs (a run date).
 .sr_dq_finding <- function(check, domain, column, severity, n_affected, p_affected, message, where = NULL,
-                           examples = character(), detail = list(), salt = NULL) {
+                           examples = character(), detail = list(), salt = NULL, id_where = where) {
   ex <- as.character(examples)
   ex <- utils::head(ex[!is.na(ex)], SR_DQ_EXAMPLES_N)
-  out <- data.frame(id = .sr_dq_id(check, column, where, salt), check = check, domain = domain, column = column,
+  out <- data.frame(id = .sr_dq_id(check, column, id_where, salt), check = check, domain = domain, column = column,
                     severity = severity, n_affected = as.integer(n_affected), p_affected = as.numeric(p_affected),
                     message = message, stringsAsFactors = FALSE)
   out$where <- list(where)

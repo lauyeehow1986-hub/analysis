@@ -413,7 +413,8 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
 # ---- future_date and old_date -----------------------------------------------------------------------
 
 # One finding per date column that has values where `pred_of(expr)` holds.
-.sr_pl_date_findings <- function(ctx, check, severity, pred_of, where_of, msg_of, detail_of) {
+.sr_pl_date_findings <- function(ctx, check, severity, pred_of, where_of, msg_of, detail_of,
+                                 id_where_of = where_of) {
   dc <- .sr_pl_date_cols(ctx)
   if (!nrow(dc)) return(sr_findings_empty())
   n <- ctx$profile$rows
@@ -427,7 +428,8 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
     ev <- .sr_dq_values(ctx, dc$q[i], preds[i], limit = SR_DQ_EXAMPLES_N)
     out[[length(out) + 1L]] <- .sr_dq_finding(
       check, "plausibility", col, severity, k, k / n, msg_of(col, k, ev$value), where = where_of(col),
-      examples = ev$value, detail = detail_of(col))
+      examples = ev$value, detail = detail_of(col),
+      id_where = id_where_of(col))
   }
   .sr_dq_bind(out)
 }
@@ -435,10 +437,14 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
 .sr_dq_check_future_date <- function(ctx) {
   as_of <- .sr_pl_today()
   cutoff <- format(as_of + 1L)
+  # a date column holds a date and a timestamp column a time of day: ">= as_of + 2" selects exactly the rows
+  # the count selects (CAST(x AS DATE) > as_of + 1), for both
+  from <- format(as_of + 2L)
   .sr_pl_date_findings(
     ctx, "future_date", "block",
     pred_of = function(expr) sprintf("%s > CAST('%s' AS DATE)", expr, cutoff),
-    where_of = function(col) .sr_where_leaf(col, ">", cutoff),
+    where_of = function(col) .sr_where_leaf(col, ">=", from),
+    id_where_of = function(col) .sr_where_leaf(col, ">=", "run_date+2"),   # the id must not change with the day
     msg_of = function(col, k, ex) {
       sprintf("%s has %s date(s) after %s, the day after the run date (e.g. %s)", col, .sr_dq_big(k), cutoff,
               paste(ex, collapse = ", "))

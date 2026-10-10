@@ -82,9 +82,25 @@ test_that("the plausibility template lists the eight analytes with affine altern
   expect_identical(nrow(by$bmi$alt), 0L)
 })
 
+test_that("analyte names are token-anchored: abbreviations never match inside other words", {
+  an <- function(nm) vapply(nm, function(n) { a <- .sr_pl_analyte(n); if (is.null(a)) NA_character_ else a$analyte }, "")
+  pos <- c(weight_kg = "weight", Weight = "weight", wt = "weight", wt_kg = "weight", birth_weight = "weight",
+           height_cm = "height", ht = "height", ht_cm = "height", age = "age", age_years = "age",
+           creatinine_umol = "creatinine", creat = "creatinine", creat_peak = "creatinine",
+           glucose_mmol = "glucose", gluc_fasting = "glucose", sbp = "sbp", sbp_right_arm = "sbp",
+           systolic_bp = "sbp", systolic = "sbp", hba1c = "hba1c", a1c = "hba1c", bmi = "bmi")
+  expect_identical(unname(an(names(pos))), unname(pos))
+  neg <- c("right_atrial_pressure", "right_ventricle_size", "light_score", "night_shift", "fwt", "bwt_g",
+           "creatine_kinase", "glucagon", "pulmonary_systolic_pressure", "agent_code", "page_count", "wtf",
+           "weighted_score")
+  expect_true(all(is.na(an(neg))))
+})
+
 test_that("the eight checks are registered after the nine Task 13 checks, in a fixed order", {
   reg <- sr_dq_checks()
-  expect_identical(utils::tail(reg, length(.pl_checks)), .pl_checks)
+  # ordered containment: later tasks register more checks after these
+  expect_identical(reg[reg %in% .pl_checks], .pl_checks)
+  expect_gt(min(match(.pl_checks, reg)), match("missing_dependence", reg))
   expect_identical(utils::head(reg, 9L)[c(1L, 9L)], c("coercion", "missing_dependence"))
 })
 
@@ -273,6 +289,7 @@ test_that("outlier needs both a robust z above 6 and a value outside the plausib
 # ---- dates -----------------------------------------------------------------------------------------
 
 test_that("future_date blocks the two surgery dates in 2099", {
+  withr::local_options(sr.dq_as_of = "2026-10-04")
   p <- .pl_cardiac()
   f <- .pl_run(p, "cardiac", "future_date")
   expect_identical(f$column, "surgery_date")
@@ -281,8 +298,20 @@ test_that("future_date blocks the two surgery dates in 2099", {
   expect_true(all(grepl("^2099-", f$examples[[1L]])))
   as_of <- f$detail[[1L]]$as_of
   expect_identical(as_of$column, "surgery_date")
-  expect_identical(as_of$as_of, format(Sys.Date()))
-  expect_identical(f$where[[1L]], list(col = "surgery_date", op = ">", value = format(Sys.Date() + 1L)))
+  expect_identical(as_of$as_of, "2026-10-04")
+  # ">= run date + 2" selects the same rows as the counted "date > run date + 1", for dates and timestamps
+  expect_identical(f$where[[1L]], list(col = "surgery_date", op = ">=", value = "2026-10-06"))
+})
+
+test_that("a future_date id does not depend on the run date", {
+  p <- .pl_cardiac()
+  withr::local_options(sr.dq_as_of = "2026-10-04")
+  a <- .pl_run(p, "cardiac", "future_date")
+  withr::local_options(sr.dq_as_of = "2027-03-01")
+  b <- .pl_run(p, "cardiac", "future_date")
+  expect_identical(a$id, b$id)
+  expect_false(identical(a$where, b$where))                       # the literal cutoff still differs
+  expect_identical(b$detail[[1L]]$as_of$as_of, "2027-03-01")
 })
 
 test_that("future_date compares against the run date plus one day; old_date against 1900-01-01", {
@@ -297,7 +326,8 @@ test_that("future_date compares against the run date plus one day; old_date agai
   expect_identical(fd$n_affected, c(2L, 1L))                      # 06-17 and 2021 / the 06-17 timestamp
   expect_true(all(fd$severity == "block"))
   expect_identical(fd$detail[[1L]]$as_of$as_of, "2020-06-15")
-  expect_identical(fd$where[[1L]]$value, "2020-06-16")
+  expect_identical(fd$where[[1L]], list(col = "d", op = ">=", value = "2020-06-17"))
+  expect_identical(fd$where[[2L]], list(col = "t", op = ">=", value = "2020-06-17"))   # the 06-16 10:00 row is not counted
   od <- .pl_find(f, "old_date")
   expect_identical(od$column, "d")
   expect_identical(od$n_affected, 1L)                             # 1899-12-31 only; 1900-01-01 is the limit
