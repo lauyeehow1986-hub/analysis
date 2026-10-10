@@ -210,6 +210,7 @@ test_that("roles survive a reopen", {
 
 test_that("sr_blind is TRUE on a new project and FALSE once a sap.locked event is replayed", {
   p <- .fx_project()
+  withr::defer(sr_duck_close(p))
   expect_true(sr_blind(p))
   expect_true(sr_blind(list(state = list())))
   expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))   # P1d owns the real one
@@ -280,4 +281,52 @@ test_that(".sr_assert_blind accepts degenerate inputs", {
   expect_silent(.sr_assert_blind(list(), "mortality_30d"))
   expect_silent(.sr_assert_blind(1:3, "mortality_30d"))
   expect_silent(.sr_assert_blind(list(1, "a"), "mortality_30d"))
+})
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+
+test_that(".sr_assert_blind does not recurse forever on POSIXlt (top level and nested)", {
+  lt <- as.POSIXlt(as.POSIXct("2024-03-01 10:00:00", tz = "UTC"))
+  expect_silent(.sr_assert_blind(lt, "mort"))
+  expect_silent(.sr_assert_blind(list(a = lt), "mort"))
+  expect_silent(.sr_assert_blind(list(range = list(from = lt, to = lt)), "mort", other_cols = "x"))
+  expect_error(.sr_assert_blind(list(a = lt, auc = 1), "mort"), "auc")
+})
+
+test_that(".sr_assert_blind pins the behaviour for named atomic vectors", {
+  expect_error(.sr_assert_blind(c(OR = 3, ICU = 5), "mort"), "OR")
+  expect_silent(.sr_assert_blind(c(order = 1), "mort"))
+})
+
+test_that("a DATE column is never suggested as a cluster", {
+  p <- .fx_project()
+  withr::defer(sr_duck_close(p))
+  d <- format(as.Date("2024-01-01") + (0:29) * 3)
+  p <- .rl_ingest(p, data.frame(hospital_admit_date = d, hospital_code = rep(LETTERS[1:3], 10L),
+                                v = seq_len(30L)), "dt")
+  expect_match(sr_store_manifest(p, "dt")$schema[[1L]]$type, "^DATE")
+  s <- sr_roles_suggest(p, "dt")
+  expect_identical(.rl_role_of(s, "hospital_admit_date"), "covariate")
+  expect_match(s$reason[s$column == "hospital_admit_date"], "date column")
+  expect_identical(.rl_role_of(s, "hospital_code"), "cluster")
+})
+
+test_that("reasons say label when the dictionary label made the match", {
+  p <- .fx_project()
+  withr::defer(sr_duck_close(p))
+  d <- format(as.Date("2024-01-01") + (0:29) * 3)
+  p <- .rl_ingest(p, data.frame(loc = rep(LETTERS[1:3], 10L), w = seq_len(30L) / 10, d1 = d, d2 = d), "lab")
+  p <- sr_dict_set(p, "lab", .rl_dict(c("loc", "w", "d1", "d2"),
+                                      c("Hospital site", "sampling weight", "Death event", "Visit")),
+                   source = "test")
+  s <- sr_roles_suggest(p, "lab")
+  why <- function(col) s$reason[s$column == col]
+  expect_identical(.rl_role_of(s, "loc"), "cluster")
+  expect_match(why("loc"), "label matches cluster pattern")
+  expect_identical(.rl_role_of(s, "w"), "weight")
+  expect_match(why("w"), "label matches weight pattern")
+  expect_identical(.rl_role_of(s, "d1"), "event_date")
+  expect_match(why("d1"), "label")
+  expect_identical(.rl_role_of(s, "d2"), "covariate")
+  expect_match(why("d2"), "no event keyword in its name or label")
 })

@@ -62,6 +62,7 @@ SR_PROTECTED_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "ti
 #' dictionary label:
 #'   id        ^(patient_?)?id$ | mrn | nric | record_id | study_id
 #'   cluster   site | hospital | centre | center | surgeon | cluster, with 2 to 200 distinct values
+#'             (a DATE / TIMESTAMP column is never a cluster)
 #'   date      _date$ | ^date_ | _dt$ or a DATE / TIMESTAMP type: event_date when death, event or
 #'             outcome is in the name, otherwise covariate
 #'   offset    follow-up, person-years / -days / -time, exposure_time
@@ -90,8 +91,12 @@ sr_roles_suggest <- function(project, table) {
   i <- which(free() & hit(re_id))
   assign_rule(i, "id", paste(via(re_id), "matches id pattern"))
 
+  re_dt <- "_date$|^date_|_dt$"
+  is_dt <- hit(re_dt) | grepl("^(DATE|TIMESTAMP)", toupper(sc$type))
+
+  # a date column is never a cluster, however its name reads
   re_cl <- "site|hospital|centre|center|surgeon|cluster"
-  cand <- which(free() & hit(re_cl))
+  cand <- which(free() & hit(re_cl) & !is_dt)
   if (length(cand)) {
     k <- .sr_roles_distinct(project, table, cols[cand])
     ok <- k >= 2 & k <= 200
@@ -100,13 +105,12 @@ sr_roles_suggest <- function(project, table) {
     assign_rule(cand[ok], "cluster", rs)
   }
 
-  re_dt <- "_date$|^date_|_dt$"
-  is_dt <- hit(re_dt) | grepl("^(DATE|TIMESTAMP)", toupper(sc$type))
   re_ev <- "death|event|outcome"
   i <- which(free() & is_dt)
   ev <- hit(re_ev)
-  assign_rule(i[ev[i]], "event_date", rep("date column with death, event or outcome in its name", n))
-  assign_rule(i[!ev[i]], "covariate", rep("date column (no event keyword in its name)", n))
+  assign_rule(i[ev[i]], "event_date",
+              paste("date column with death, event or outcome in its", via(re_ev)))
+  assign_rule(i[!ev[i]], "covariate", rep("date column (no event keyword in its name or label)", n))
 
   re_off <- "follow_?up|person_?(years|days|time)|exposure_time"
   i <- which(free() & hit(re_off))
@@ -209,6 +213,11 @@ sr_blind <- function(project) !isTRUE(project$state$sap$locked)
 #'    outcome column AND one of `other_cols`.
 #' Cell values are never inspected: a per-column profile whose `column` field lists the outcome is
 #' legal. Returns `x` invisibly when it passes.
+#' Limits: arrays (matrix / table) are checked by dimnames only; environments, R6 objects and POSIXlt are
+#' leaves and are not inspected. Names of named atomic vectors are checked too. Because names are
+#' matched exactly, pre-lock outputs must be data.frames with a `column` field, NOT lists or vectors keyed
+#' by column or level name: clinical names such as HR (heart rate), RR (respiratory rate) or OR
+#' (operating room) would trip the gate.
 .sr_assert_blind <- function(x, outcome_cols, other_cols = character()) {
   outcome_cols <- as.character(outcome_cols)
   other_cols <- as.character(other_cols)
@@ -223,7 +232,9 @@ sr_blind <- function(project) !isTRUE(project$state$sap$locked)
   }
   walk <- function(el, path) {
     where <- if (nzchar(path)) path else "<top level>"
-    if (is.environment(el)) return(invisible())
+    # leaves: environments / R6 objects, and POSIXlt (a list whose [[ and length are overridden, so
+    # walking it never ends)
+    if (is.environment(el) || inherits(el, "POSIXlt")) return(invisible())
     if (is.array(el)) {
       dn <- dimnames(el)
       if (!is.null(dn)) cross(c(names(dn), unlist(dn, use.names = FALSE)), where)
