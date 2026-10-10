@@ -30,6 +30,8 @@ ui <- do.call(bslib::page_navbar, c(
     title = "StatRouter",
     id = "main_nav",
     theme = bslib::bs_theme(version = 5),
+    # the Data tab is a normal scrolling page of cards; the other panels keep the fill layout
+    fillable = c("Project", .sr_panel_names),
     bslib::nav_panel("Project", mod_project_ui("project")),
     bslib::nav_panel("Data", mod_data_ui("data"), value = "Data")
   ),

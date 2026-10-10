@@ -596,3 +596,29 @@ test_that("ending the session during an import cancels it and removes the progre
     expect_false(file.exists(a$paths$lock))
   })
 })
+
+# ---- fix round 2 -------------------------------------------------------------------------------------
+
+test_that("the Data tab is a plain stack of cards that size to their content", {
+  html <- as.character(htmltools::renderTags(mod_data_ui("x"))$html)
+  doc <- xml2::read_html(paste0("<html><body>", html, "</body></html>"))
+  has <- function(cls) paste0("contains(concat(' ', normalize-space(@class), ' '), ' ", cls, ' ', "')")
+  cards <- xml2::xml_find_all(doc, paste0("//*[", has("card"), "]"))
+  expect_equal(length(cards), 10L)
+  # no fill item anywhere (card, grid or widget): a fill item is squeezed into the viewport height
+  expect_false(grepl("html-fill-item", html, fixed = TRUE))
+  # no grid wraps the cards (a grid row would share the page height between them)
+  inside_grid <- xml2::xml_find_all(doc, paste0("//*[", has("bslib-grid"), "]//*[", has("card"), "]"))
+  expect_equal(length(inside_grid), 0L)
+})
+
+test_that("the flow image scales to its card instead of showing at its pixel size", {
+  rv <- .md_rv(roles = TRUE)
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(table = "cardiac")
+    img <- output$flow_png
+    expect_match(img$src, "^data:image/png")
+    expect_match(img$style %||% "", "max-width:[[:space:]]*100%")
+    expect_match(img$style %||% "", "height:[[:space:]]*auto")
+  })
+})

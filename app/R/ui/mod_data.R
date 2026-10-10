@@ -343,13 +343,18 @@
 
 # ---- UI ----------------------------------------------------------------------------------------------
 
+# One card of the Data tab. The tab is a normal scrolling page: a card is not a fill item (it would be
+# squeezed into the viewport height) and its body is not a fill container, so it sizes to its content.
+.sr_data_card <- function(header, ...) {
+  bslib::card(fill = FALSE, bslib::card_header(header), bslib::card_body(fillable = FALSE, fill = FALSE, ...))
+}
+
 mod_data_ui <- function(id) {
   ns <- shiny::NS(id)
   ov_choices <- function(...) c(auto = "auto", ...)
-  bslib::layout_columns(
-    col_widths = c(12),
-    bslib::card(
-      bslib::card_header("1. Import a data file"),
+  shiny::div(
+    class = "sr-data-stack",
+    .sr_data_card("1. Import a data file",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shinyFiles::shinyFilesButton(ns("pick"), "Choose file", "Pick a data file", multiple = FALSE,
@@ -358,7 +363,7 @@ mod_data_ui <- function(id) {
                    shiny::textInput(ns("path"), "File path (chosen above or pasted)", width = "100%"))
       ),
       bslib::layout_columns(
-        col_widths = c(2, 2, 2, 2, 2, 2),
+        col_widths = c(2, 2, 2, 2, 2, 2), fill = FALSE,
         shiny::selectInput(ns("ov_delim"), "Delimiter", ov_choices(comma = ",", semicolon = ";", tab = "\\t", pipe = "|")),
         shiny::selectInput(ns("ov_encoding"), "Encoding", ov_choices("UTF-8", "windows-1252", "ISO-8859-1", "UTF-16LE")),
         shiny::selectInput(ns("ov_decimal"), "Decimal mark", ov_choices(point = ".", comma = ",")),
@@ -367,9 +372,9 @@ mod_data_ui <- function(id) {
         shiny::textInput(ns("tname"), "Table name (optional)")
       ),
       bslib::layout_columns(
-        col_widths = c(5, 7),
+        col_widths = c(5, 7), fill = FALSE,
         shiny::div(shiny::h6("What the file looks like"), shiny::verbatimTextOutput(ns("sniff"), placeholder = TRUE)),
-        shiny::div(shiny::h6("First 20 rows"), shiny::uiOutput(ns("preview_note")), DT::DTOutput(ns("preview")))
+        shiny::div(shiny::h6("First 20 rows"), shiny::uiOutput(ns("preview_note")), DT::DTOutput(ns("preview"), fill = FALSE))
       ),
       shiny::h6("Pre-flight"),
       shiny::uiOutput(ns("preflight")),
@@ -381,13 +386,11 @@ mod_data_ui <- function(id) {
         shiny::uiOutput(ns("progress"), class = "flex-grow-1")
       )
     ),
-    bslib::card(
-      bslib::card_header("2. Tables"),
+    .sr_data_card("2. Tables",
       shiny::uiOutput(ns("tables_list")),
       shiny::selectInput(ns("table"), "Working table", choices = character(0))
     ),
-    bslib::card(
-      bslib::card_header("3. View the data"),
+    .sr_data_card("3. View the data",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shiny::uiOutput(ns("view_nav"), inline = TRUE),
@@ -397,10 +400,9 @@ mod_data_ui <- function(id) {
         shiny::checkboxInput(ns("view_desc"), "Descending")
       ),
       shiny::uiOutput(ns("view_note")),
-      DT::DTOutput(ns("viewer"))
+      DT::DTOutput(ns("viewer"), fill = FALSE)
     ),
-    bslib::card(
-      bslib::card_header("4. Data dictionary"),
+    .sr_data_card("4. Data dictionary",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shiny::radioButtons(ns("dict_kind"), "Format", c("CSV" = "csv", "REDCap data dictionary" = "redcap",
@@ -410,27 +412,23 @@ mod_data_ui <- function(id) {
         shiny::div(class = "flex-grow-1", shiny::textInput(ns("dict_path"), "Dictionary path", width = "100%")),
         shiny::actionButton(ns("dict_attach"), "Attach", class = "btn-primary")
       ),
-      DT::DTOutput(ns("dict_table"))
+      DT::DTOutput(ns("dict_table"), fill = FALSE)
     ),
-    bslib::card(
-      bslib::card_header("5. Variable roles"),
+    .sr_data_card("5. Variable roles",
       shiny::uiOutput(ns("roles_ui")),
       shiny::actionButton(ns("roles_confirm"), "Confirm roles", class = "btn-primary")
     ),
-    bslib::card(
-      bslib::card_header("6. Data-quality checks"),
+    .sr_data_card("6. Data-quality checks",
       shiny::actionButton(ns("dq_run"), "Run DQ checks", class = "btn-primary"),
-      DT::DTOutput(ns("findings"))
+      DT::DTOutput(ns("findings"), fill = FALSE)
     ),
-    bslib::card(
-      bslib::card_header("7. Suggested actions"),
+    .sr_data_card("7. Suggested actions",
       shiny::numericInput(ns("sug_page"), "Findings page", value = 1, min = 1, step = 1, width = "120px"),
       shiny::uiOutput(ns("suggestions_ui")),
       shiny::actionButton(ns("export_query"), "Export query sheet", class = "btn-outline-primary")
     ),
-    bslib::card(
-      bslib::card_header("8. Recipe"),
-      DT::DTOutput(ns("recipe_steps")),
+    .sr_data_card("8. Recipe",
+      DT::DTOutput(ns("recipe_steps"), fill = FALSE),
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap mt-2",
         shiny::actionButton(ns("recipe_undo"), "Undo last step"),
@@ -441,12 +439,10 @@ mod_data_ui <- function(id) {
         shiny::actionButton(ns("recipe_apply"), "Apply recipe", class = "btn-primary")
       )
     ),
-    bslib::card(
-      bslib::card_header("9. Flow of records"),
+    .sr_data_card("9. Flow of records",
       shiny::imageOutput(ns("flow_png"), height = "auto")
     ),
-    bslib::card(
-      bslib::card_header("10. Readiness"),
+    .sr_data_card("10. Readiness",
       shiny::uiOutput(ns("readiness"))
     )
   )
@@ -867,7 +863,7 @@ mod_data_server <- function(id, project) {
           shiny::div(class = "text-muted small mb-2", why)
         )
       })
-      do.call(bslib::layout_columns, c(list(col_widths = c(4, 4, 4)), cells))
+      do.call(bslib::layout_columns, c(list(col_widths = c(4, 4, 4), fill = FALSE), cells))
     })
 
     shiny::observeEvent(input$roles_confirm, {
@@ -1037,7 +1033,9 @@ mod_data_server <- function(id, project) {
         TRUE
       })
       shiny::req(isTRUE(ok))
-      list(src = f, contentType = "image/png", alt = paste0("Flow of records for ", t))
+      # the file is 300 dpi (2100 px wide): scale it down to the card, keep the aspect ratio
+      list(src = f, contentType = "image/png", alt = paste0("Flow of records for ", t),
+           style = "max-width:100%; height:auto;")
     }, deleteFile = TRUE)
 
     # ---- readiness -------------------------------------------------------------------------------------
