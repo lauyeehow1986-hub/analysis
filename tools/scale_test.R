@@ -18,7 +18,8 @@
 #   * in-process phase (resume, profile, DQ): the parent is blocked inside DuckDB, so a later::later() loop
 #     could not fire (later callbacks run only when R is idle). A small watcher process (callr::r_bg) polls
 #     ps::ps_memory_info()$rss of the parent through ps::ps_handle() every 0.5 s instead. The OS peak
-#     working set of the parent (ps peak_wset) is read at the end as a cross-check, and the larger of
+#     working set of the parent (ps peak_wset, Windows only, since process start so it includes the generate
+#     phase) is read at the end as a conservative cross-check, and the larger of
 #     the two is the figure used.
 #
 # `dir` (default: the session temp dir) is where the CSV and the project are written, inside one folder
@@ -31,7 +32,10 @@
 # ---- helpers ----------------------------------------------------------------------------------------
 
 .sc_gb <- 1024^3
-.sc_fmt_gb <- function(bytes) sprintf("%.2f GB", bytes / .sc_gb)
+.sc_fmt_gb <- function(bytes) {
+  if (length(bytes) != 1L || is.na(bytes)) return("n/a")
+  sprintf("%.2f GB", bytes / .sc_gb)
+}
 .sc_fmt_secs <- function(s) {
   if (s < 90) sprintf("%.1f s", s) else sprintf("%.1f min (%.0f s)", s / 60, s)
 }
@@ -226,7 +230,7 @@
       finished_early <- TRUE
       break
     }
-    if (.sc_parts_on_disk(pdir, table) >= 2L) {
+    if (.sc_parts_in_checkpoint(pdir, table) >= 2L) {   # committed parts per checkpoint.json, not files on disk
       bg$kill()
       killed <- TRUE
       break
@@ -274,7 +278,10 @@
                 error = function(e) c(NA_real_, NA_real_))
   if (watcher$is_alive()) watcher$kill()
   inproc_sampled <- w[1L]
-  inproc_os <- tryCatch(as.numeric(ps::ps_memory_info(me)[["peak_wset"]]), error = function(e) NA_real_)
+  inproc_os <- tryCatch({
+    v <- ps::ps_memory_info(me)[["peak_wset"]]            # Windows only; NULL elsewhere
+    if (is.null(v)) NA_real_ else as.numeric(v)
+  }, error = function(e) NA_real_)
   inproc_peak <- max(inproc_sampled, inproc_os, na.rm = TRUE)
   spill_peak <- max(spill_peak, w[2L], na.rm = TRUE)
   spill_final <- .sc_dir_bytes(tmp_dir)
@@ -309,7 +316,7 @@
   .sc_say("rows stored            : %s (expected %s): %s", format(rows_stored, big.mark = ",", scientific = FALSE),
           format(rows, big.mark = ",", scientific = FALSE), if (rows_ok) "OK" else "MISMATCH")
   .sc_say("peak RSS: child        : %s (ps rss of the child, polled every 0.5 s)", .sc_fmt_gb(child_peak))
-  .sc_say("peak RSS: in-process   : %s (watcher process every 0.5 s: %s; OS peak working set: %s; baseline %s)",
+  .sc_say("peak RSS: in-process   : %s (watcher process every 0.5 s: %s; OS peak working set since process start (includes generate): %s; baseline %s)",
           .sc_fmt_gb(inproc_peak), .sc_fmt_gb(inproc_sampled), .sc_fmt_gb(inproc_os), .sc_fmt_gb(baseline))
   .sc_say("peak RSS               : %s (limit %s GB = DuckDB cap %s + 2)", .sc_fmt_gb(peak), format(limit_gb),
           format(caps$duckdb_memory_gb))

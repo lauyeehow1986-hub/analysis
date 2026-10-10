@@ -128,7 +128,7 @@
 #'    `external` (the source is referenced in place).
 #'  - Free space is read from the project's data dir (where the Parquet and spill files land); the share
 #'    flag from the source path. `drive_info(path)` returns list(free_bytes, remote, warnings).
-#'  - est_seconds = uncompressed / throughput (60 MB/s on locked16, 150 MB/s on laptop).
+#'  - est_seconds = uncompressed / throughput (4 MB/s on locked16, 9 MB/s on laptop).
 #'  - external_suggested: the file is larger than 2 GB on disk.
 #'  - Refused (ok = FALSE, with refuse_reason): an Excel file over 200 MB; a JSON document over 512 MB
 #'    uncompressed; unknown free space (fail closed); free space below need_bytes.

@@ -22,8 +22,7 @@ original file is never modified.
 | JSON | NDJSON (one record per line) and JSON documents |
 | REDCap | ODM XML export (one row per subject, event and repeat instance; read in one piece, so not resumable) |
 
-A file's type is decided by its first bytes, not only by its extension, so a CSV renamed to `.xlsx`
-the first bytes of the file win over its extension. Plain text and a few others are told apart by the extension.
+For formats with a recognisable signature (Parquet, SQLite, DuckDB, Feather, SPSS, Stata, SAS, R and so on), the first bytes of the file win over its extension; plain text and a few other formats are told apart by the extension alone.
 
 ### Limits
 
@@ -92,8 +91,8 @@ risky locations. Nothing is created in the project if the pre-flight refuses.
 | Space for DuckDB spill files | 1 x the DuckDB memory cap of the hardware profile |
 | Headroom | the larger of 2 GB or 5% of the uncompressed size |
 | Space for the source copy | the file's size on disk (not needed in external mode) |
-| Compressed sources | uncompressed size is estimated from a 1 MB sample; never assumed to be less than 3 x the file |
-| Excel and JSON limits | as in section 1 |
+| Compressed sources | for gz, bz2 and xz the uncompressed size is estimated from a 1 MB sample and is never assumed to be less than 3 x the file; for a zip the exact length of the member is used |
+| Excel and JSON limits | a file over 200 MB (Excel) or a JSON document over 512 MB uncompressed is refused here; the 1,048,576-row Excel cap is enforced later by the reader, before any part is written |
 | Free space unknown | refused (it fails closed) |
 | Network share | a UNC path or a remote drive is flagged, never probed |
 | Time | estimated from the size at 4 MB/s (locked16) or 9 MB/s (laptop) of uncompressed text |
@@ -149,9 +148,9 @@ The three dictionary checks do nothing when the table has no dictionary.
 |---|---|---|
 | missing_col | a column has at least 5% missing | info; warn at 30% or more; block at 30% or more if the column has a protected role (see section 5) |
 | missing_row | a row has more than half of its fields missing | info below 1% of rows, otherwise warn |
-| missing_codes | a sentinel value stands in for "missing": at least 0.5% of a numeric column (-99, -999, -9999, 999, 9999, -1, -9) or at least 0.1% of a text column ("NA", "N/A", ".", "-", "?", "unknown", "missing", empty text) | warn |
+| missing_codes | a sentinel value stands in for "missing". Numeric column: the code (-99, -999, -9999, 999, 9999, -1, -9, plus any missing codes declared in the dictionary) is at least 0.5% of the non-missing values AND lies more than 10 x MAD from the column's median (any value other than the median when MAD = 0), so -1 on a -1/0/1 scale is not flagged. Text column: one of "NA", "N/A", ".", "-", "?", "unknown", "missing" or empty text is at least 0.1% of the values | warn |
 | missing_pattern | the ten most common joint missingness patterns are listed | info |
-| missing_dependence | the missingness of a column depends on other columns: the largest standardised mean difference of the other columns between its missing and observed rows is at least 0.2 (info) or 0.5 (warn) | info or warn |
+| missing_dependence | for a column with at least 5% missing: the missingness depends on other columns, i.e. the largest standardised mean difference of the other columns between its missing and observed rows is at least 0.2 (info) or 0.5 (warn) | info or warn |
 
 For missing_dependence a group needs at least 30 rows, and a categorical column is considered only
 up to 20 levels.
@@ -161,13 +160,13 @@ up to 20 levels.
 | Check | Fires when | Severity |
 |---|---|---|
 | range | a known analyte (age, weight, heart rate and so on) lies outside its hard range, or outside its soft range | block (hard); info (soft) |
-| unit_mix | values fit the alternative unit of an analyte (for example pounds for kilograms, mg/dL for umol/L): at least 0.155% of rows and at least 3 rows | warn |
-| heaping | integer values pile up on a last digit of 0 or 5 beyond 40% of the values (20% is expected); needs 200 values and 20 distinct values | warn |
+| unit_mix | values fit the alternative unit of an analyte (for example pounds for kilograms, mg/dL for umol/L): at least 0.155% of the column's non-missing values and at least 3 values | warn |
+| heaping | every non-missing value of the column is a whole number and 40% or more of them end in 0 or 5 (20% is expected); needs 200 values and 20 distinct values | warn |
 | outlier | a value is more than 6 robust SDs from the median and outside the plausible range | info |
 | future_date | a date is after the run date plus one day | block |
 | old_date | a date is before 1900-01-01 | warn |
 | date_order | a later date comes before an earlier one (admission, surgery, discharge; birth before every date; time zero before event or censor) | warn |
-| immortal_time | exposure dates fall after time zero, so the exposed rows were immortal until exposed (at least 1% of rows) | warn |
+| immortal_time | exposure dates fall after time zero, so the exposed rows were immortal until exposed: strictly more than 1% of the exposed rows that have both dates | warn |
 
 The analytes, their name patterns, units and ranges come from a template shipped with the
 application (`inst/templates/plausibility.json`). If the dictionary gives a min or max for a column,
@@ -180,9 +179,9 @@ that value replaces the built-in hard and soft limit on that side.
 | dup_rows | rows are exact duplicates (the extra copies are counted) | warn |
 | dup_id | a value of the id column repeats on rows that are not exact duplicates | block |
 | nzv | near-zero variance: the most common value is more than 19 times as common as the second (95/5) and fewer than 10% of values are distinct; needs 20 rows | info for a protected role, otherwise warn |
-| high_card | a text column has more than 50 distinct values covering more than half of the rows | info |
-| collinear | two numeric columns have an absolute Pearson r of 0.98 or more (at most 200 columns examined) | warn |
-| cluster_detect | an id repeats, or a column named like site / hospital / centre / surgeon / cluster has 2 to 200 groups of at least 5 rows | info |
+| high_card | a text column with more than 50 distinct values and distinct values / rows above 0.5; id and ignore roles are skipped, and so is text that parses as numbers or dates | info |
+| collinear | two numeric columns have an absolute Pearson r of 0.98 or more, on the sample, with at least 30 complete pairs (at most 200 columns examined) | warn |
+| cluster_detect | an id column where at least 1% of the values are repeats, or a column named like site / hospital / centre / surgeon / cluster has 2 to 200 groups of at least 5 rows | info |
 | offset_detect | a positive follow-up / person-time column is found | info |
 
 ### 4.5 Leakage (outcome-blind)
