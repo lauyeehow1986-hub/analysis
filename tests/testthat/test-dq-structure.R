@@ -335,3 +335,46 @@ test_that("the clean twin has no warn-or-above finding and no nzv / high_card at
     expect_identical(sum(f$check %in% c("nzv", "high_card")), 0L, label = paste("n =", n))
   }
 })
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+
+test_that("blind leakage and separation never test the exposure roles; unblinded they do", {
+  y <- rep(0:1, 100)
+  df <- data.frame(y = y, trt = ifelse(y == 1, "Y", "N"), trt_copy = ifelse(y == 1, "Y", "N"),
+                   start = as.Date("2020-01-01") + y * 100 + rep(0:49, 4), noise = sin(seq_len(200)))
+  roles <- c(y = "outcome", trt = "exposure", start = "exposure_date")
+  p <- .st_small(df, roles = roles)
+  expect_true(sr_blind(p))
+  f <- .st_run(p, "small", c("leakage", "separation"))
+  expect_true(all(c("leakage", "separation") %in% f$check[f$column == "trt_copy"]))   # an ordinary column is tested
+  expect_false(any(f$column %in% c("trt", "start")))                                 # the exposure roles are not
+  p2 <- .st_unblind(p)
+  f2 <- .st_run(p2, "small", c("leakage", "separation"))
+  expect_true(all(c("leakage", "separation") %in% f2$check[f2$column == "trt"]))
+  expect_true("leakage" %in% f2$check[f2$column == "start"])
+})
+
+test_that("a separation finding keeps its id across the SAP lock", {
+  p <- .st_cardiac()
+  blind <- .st_one(p, "cardiac", "separation")
+  p2 <- .st_unblind(p)
+  open <- .st_one(p2, "cardiac", "separation")
+  expect_false(is.null(open$where[[which(open$column == "lab_status")]]))             # unblinded carries a where
+  expect_identical(open$id[order(open$column)], blind$id[order(blind$column)])
+})
+
+test_that("collinear needs at least 30 complete pairs", {
+  a <- c(seq_len(100) + 0.5, rep(NA, 100))
+  b <- c(rep(NA, 97), a[98:100], rep(NA, 100))                                         # 3 rows in common, r = 1
+  b[98:100] <- a[98:100] * 2
+  g <- c(rep(NA, 100), seq_len(100) + 0.25)
+  h <- c(rep(NA, 100), (seq_len(100) + 0.25) * 3)                                      # 100 rows in common
+  df <- data.frame(a = a, b = b, g = g, h = h)
+  f <- .st_one(.st_small(df), "small", "collinear")
+  expect_identical(f$column, "h")
+  expect_identical(f$detail[[1L]]$pair$other, "g")
+})
+
+test_that("the throwaway sap.locked reducer is gone after the unblinding tests", {
+  expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))
+})

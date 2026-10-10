@@ -26,6 +26,7 @@ SR_DQ_HIGH_CARD_MIN <- 50L
 SR_DQ_HIGH_CARD_SHARE <- 0.5
 SR_DQ_COLLINEAR_R <- 0.98
 SR_DQ_COLLINEAR_MAX_COLS <- 200L
+SR_DQ_COLLINEAR_MIN_PAIRS <- 30L
 SR_DQ_COLLINEAR_MAX_PAIRS <- 50L
 SR_DQ_CLUSTER_LEVELS <- c(2L, 200L)
 SR_DQ_CLUSTER_MIN_ROWS <- 5L
@@ -199,8 +200,11 @@ SR_DQ_ID_REPEAT_SHARE <- 0.01
   varies <- vapply(m, function(v) sum(!is.na(v)) >= 3L && isTRUE(stats::sd(v, na.rm = TRUE) > 0), NA)
   cols <- cols[varies]
   if (length(cols) < 2L) return(sr_findings_empty())
-  r <- suppressWarnings(stats::cor(do.call(cbind, m[cols]), use = "pairwise.complete.obs"))
-  hit <- which(upper.tri(r) & !is.na(r) & abs(r) >= SR_DQ_COLLINEAR_R, arr.ind = TRUE)
+  mm <- do.call(cbind, m[cols])
+  r <- suppressWarnings(stats::cor(mm, use = "pairwise.complete.obs"))
+  common <- crossprod(!is.na(mm))                       # complete pairs per column pair
+  hit <- which(upper.tri(r) & !is.na(r) & abs(r) >= SR_DQ_COLLINEAR_R & common >= SR_DQ_COLLINEAR_MIN_PAIRS,
+               arr.ind = TRUE)
   if (!nrow(hit)) return(sr_findings_empty())
   hr <- abs(r[hit])
   ord <- order(-hr, hit[, 1L], hit[, 2L])

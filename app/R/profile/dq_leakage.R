@@ -11,7 +11,8 @@
 # so it is the same blind or not.
 #
 # Candidates: every column except the outcome and the columns that are deterministic for it by
-# construction (id, cluster, time_zero, event_date, censor_date, time, event) and `ignore`. AUC is the
+# construction (id, cluster, time_zero, event_date, censor_date, time, event) and `ignore`, and, while blind,
+# the exposure roles (exposure, exposure_date: "no deaths in the treated arm" is an outcome-by-exposure fact). AUC is the
 # rank-based Mann-Whitney statistic; a categorical column is scored by the outcome rate of its level (the
 # levels ordered by outcome rate), over the levels with at least 10 rows and only for 2-50 levels, so a
 # free-text column cannot "leak" through singleton levels. Both are computed on the reproducible sample.
@@ -22,6 +23,9 @@ SR_DQ_LEAK_MIN_LEVEL <- 10L
 SR_DQ_LEAK_MAX_LEVELS <- 50L
 SR_DQ_LEAK_SKIP_ROLES <- c("outcome", "id", "cluster", "time_zero", "event_date", "censor_date", "time", "event",
                            "ignore")
+# The exposure roles are not candidates while blind: "the treated arm has no deaths" is an outcome-by-exposure
+# statistic. Once the SAP is locked they are checked like any other column.
+SR_DQ_LEAK_BLIND_SKIP_ROLES <- c("exposure", "exposure_date")
 SR_DQ_POD_SHARE <- 0.5
 SR_DQ_POD_MIN_N <- 10L
 
@@ -70,7 +74,8 @@ SR_DQ_POD_MIN_N <- 10L
 
 # The columns of the sample that may be tested against the outcome.
 .sr_dq_leak_cands <- function(ctx, oc) {
-  skip <- names(ctx$roles)[ctx$roles %in% SR_DQ_LEAK_SKIP_ROLES]
+  skip_roles <- c(SR_DQ_LEAK_SKIP_ROLES, if (isTRUE(ctx$blind)) SR_DQ_LEAK_BLIND_SKIP_ROLES)
+  skip <- names(ctx$roles)[ctx$roles %in% skip_roles]
   setdiff(names(ctx$sample), c(oc, skip))
 }
 
@@ -153,7 +158,7 @@ SR_DQ_POD_MIN_N <- 10L
       "separation", "leakage", col, "warn", k, k / n,
       sprintf("%s has %d level(s) with at least %d rows in which the outcome never varies (%s): a regression on it separates",
               col, nrow(lv), SR_DQ_LEAK_MIN_LEVEL, paste(utils::head(lv$level, 3L), collapse = ", ")),
-      where = where, examples = lv$level, detail = list(levels = lv))
+      where = where, examples = lv$level, detail = list(levels = lv), id_where = NULL)   # same id blind and unblinded
   }
   .sr_dq_bind(out)
 }
