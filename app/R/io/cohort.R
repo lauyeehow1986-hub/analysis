@@ -18,8 +18,9 @@
 #    "exclude" drops them. A row is matching when its where is TRUE (NULL is not a match).
 #  - Feature (one column per feature): the rows of `table` matching `where` inside `window`, with a
 #    NON-NULL `col` (every aggregate ignores a NULL col), aggregated per id:
-#      first / last       the value on the earliest / latest date (needs date_col). Rows on the same date
-#                         are broken by the value: first takes the smallest, last the greatest.
+#      first / last       the value on the earliest / latest date (needs date_col; a row with a NULL date
+#                         is not a candidate). Rows on the same date are broken by the value: first takes
+#                         the smallest, last the greatest.
 #      count              the number of rows;  any  TRUE when there is at least one row
 #      min / max / mean   over the values (mean needs a numeric col)
 #    An empty window gives NULL, except count (0) and any (FALSE).
@@ -29,12 +30,14 @@
 #    event = 0, time = min(censor days, horizon). The censor date is the latest censor_date_col per id
 #    in censor_table when it is given, else in the base table when only censor_date_col is given, else
 #    there is none and time = horizon; an id with no censor date is censored at the horizon. A censor
-#    date before the index gives a negative time (it is not clamped).
+#    date before the index gives a negative time (it is not clamped); the number of such ids is recorded
+#    as n_negative_time in the payload and the state, and sr_cohort_build() warns.
 #  - Output columns: <id>, index_date, the features (in order), then time and event. One row per id,
 #    ORDER BY id.
 #
 # Outcome-blind: a criterion (or the index filter) whose where uses a column that has the outcome role in
-# its own table is flagged outcome_dependent in the flow, and sr_flow() hides the counts from it on until
+# its own table, or that reads the outcome event table or the censor table (a count of "died in the first
+# 30 days" is an outcome count whatever the roles), is flagged outcome_dependent in the flow, and sr_flow() hides the counts from it on until
 # the SAP is locked. The payload keeps the true counts. The new table gets the roles id (spec$id),
 # outcome (event) and time (time), so the outcome-blind guard applies to it.
 #
@@ -319,7 +322,9 @@ sr_cohort_spec <- function(base, id, index, criteria = list(), features = list()
       last = sprintf("arg_max(%s, struct_pack(d := %s, v := %s))", col, dt, col),
       count = "count(*)", any = "count(*) > 0",
       min = sprintf("min(%s)", col), max = sprintf("max(%s)", col), mean = sprintf("avg(%s)", col))
-    cond <- all_of(sprintf("sr_x_t.%s = sr_x_c.%s", id, id), sprintf("%s IS NOT NULL", col), win(f$window, f$date_col))
+    # first / last rank by date: a row with no date is not a candidate (arg_max would rank NULL greatest)
+    undated <- if (f$agg %in% c("first", "last")) sprintf("sr_x_t.%s IS NOT NULL", Q(f$date_col)) else NULL
+    cond <- all_of(sprintf("sr_x_t.%s = sr_x_c.%s", id, id), sprintf("%s IS NOT NULL", col), undated, win(f$window, f$date_col))
     extra[[nm]] <- sprintf("SELECT sr_x_c.%s, %s AS v FROM %s AS sr_x_c JOIN %s AS sr_x_t ON %s GROUP BY sr_x_c.%s",
                            id, expr, prev, src(f$table, f$where), cond, id)
     joins <- c(joins, sprintf("LEFT JOIN %s ON %s.%s = sr_x_c.%s", nm, nm, id, id))
@@ -376,8 +381,10 @@ sr_cohort_sql <- function(project, spec) {
 
 # ---- build ------------------------------------------------------------------------------------------
 
-# TRUE when a where uses a column that has the outcome role in its own table.
-.sr_cohort_outcome_dep <- function(project, table, where) {
+# TRUE when a filter reads the outcome: its table is the outcome event table or the censor table, or it
+# uses a column that has the outcome role in its own table.
+.sr_cohort_outcome_dep <- function(project, spec, table, where) {
+  if (table %in% c(spec$outcome$event_table, spec$outcome$censor_table)) return(TRUE)
   length(intersect(.sr_rc_where_cols(where), sr_role_cols(project, table, "outcome"))) > 0L
 }
 
@@ -387,6 +394,8 @@ sr_cohort_sql <- function(project, spec) {
 #' The flow (data.frame(step, label, n_before, n_after, outcome_dependent)) has a row "index" (n_before =
 #' distinct ids of the base table, n_after = those with an index date) and one row per criterion; its counts
 #' are true counts (sr_flow() hides the outcome-dependent ones while the SAP is not locked).
+#' A negative time (censor date before the index) is kept; the count is recorded as n_negative_time and a
+#' warning names it.
 #' @return the project with the events applied.
 sr_cohort_build <- function(project, spec) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
@@ -401,8 +410,8 @@ sr_cohort_build <- function(project, spec) {
                                    paste(sprintf("(SELECT count(*) FROM %s) AS n%d", nms, seq_along(nms)), collapse = ", ")))
   n <- vapply(seq_along(nms), function(i) as.numeric(cnt[[i]][1L]), numeric(1))
   nc <- length(spec$criteria)
-  dep <- c(.sr_cohort_outcome_dep(project, spec$index$table, spec$index$where),
-           vapply(spec$criteria, function(cr) .sr_cohort_outcome_dep(project, cr$table, cr$where), logical(1)))
+  dep <- c(.sr_cohort_outcome_dep(project, spec, spec$index$table, spec$index$where),
+           vapply(spec$criteria, function(cr) .sr_cohort_outcome_dep(project, spec, cr$table, cr$where), logical(1)))
   flow <- data.frame(
     step = c("index", if (nc) paste0("c", seq_len(nc))),
     label = c("Patients with an index date", vapply(spec$criteria, function(cr) cr$label, "")),
@@ -410,15 +419,26 @@ sr_cohort_build <- function(project, spec) {
     outcome_dependent = dep, stringsAsFactors = FALSE)
 
   w <- .sr_derived_write(project, spec$name, sql$final, sql$cols, "the cohort")
+  n_neg <- 0
+  if (!is.null(spec$outcome)) {
+    sr_store_view(project, spec$name)
+    n_neg <- as.numeric(sr_duck_query(con, sprintf("SELECT count(*) AS n FROM %s WHERE %s < 0",
+                                                   .sr_join_q(con, spec$name), .sr_join_q(con, "time")))$n[1L])
+  }
   payload <- list(
     name = spec$name, spec = spec,
     sql = list(steps = as.list(sql$steps), extra = as.list(sql$extra), final = sql$final),
-    flow = flow, store_hash = w$store_hash, store = w$store)
+    flow = flow, n_negative_time = n_neg, store_hash = w$store_hash, store = w$store)
   project <- .sr_derived_append(project, spec$name, "cohort.built", payload)
 
   roles <- stats::setNames("id", spec$id)
   if (!is.null(spec$outcome)) roles <- c(roles, event = "outcome", time = "time")
-  sr_roles_set(project, spec$name, roles)
+  project <- sr_roles_set(project, spec$name, roles)
+  if (n_neg > 0) {
+    warning(sprintf("%.0f id(s) of cohort '%s' have a negative time: censor date before index (kept as is; a survival model cannot use them)",
+                    n_neg, spec$name), call. = FALSE)
+  }
+  project
 }
 
 # The flow as a data.frame: the event payload carries it as a list of rows once it went through the log.
@@ -435,7 +455,7 @@ sr_reducer_register("cohort.built", function(state, event) {
   if (!is.character(name) || length(name) != 1L || is.na(name)) stop("cohort.built needs a name", call. = FALSE)
   co <- state$cohorts %||% list()
   c1 <- list()
-  for (k in c("name", "spec", "sql", "store_hash")) c1[k] <- list(p[[k]])
+  for (k in c("name", "spec", "sql", "n_negative_time", "store_hash")) c1[k] <- list(p[[k]])
   c1["flow"] <- list(.sr_cohort_flow_df(p$flow))
   co[[name]] <- c1
   state$cohorts <- co

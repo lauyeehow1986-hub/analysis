@@ -139,6 +139,8 @@ sr_flow <- function(project, table) {
   if (nrow(coh)) n_total <- attr(coh, "n_start")
   out <- rbind(coh, .sr_fl_recipe(project, table, isTRUE(attr(coh, "hidden"))))
   rownames(out) <- NULL
+  attr(out, "hidden") <- NULL                 # helpers of .sr_fl_cohort, not part of the result
+  attr(out, "n_start") <- NULL
   attr(out, "n_total") <- n_total
   attr(out, "label") <- .sr_fl_ascii(paste0("Records in ", table))
   out

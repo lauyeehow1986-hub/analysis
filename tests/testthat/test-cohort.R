@@ -24,7 +24,7 @@
   set.seed(21)
   ids <- sprintf("P%03d", 1:320)
   patients <- data.frame(id = ids, site = rep(c("A", "B"), 160),
-                         last_fu_date = .ch_t0 + sample(300:1500, 320), stringsAsFactors = FALSE)
+                         last_fu_date = .ch_t0 + sample(600:1500, 320), stringsAsFactors = FALSE)
   patients$last_fu_date[sample(320, 12)] <- NA
   nv <- sample(1:5, 300, replace = TRUE)
   visits <- data.frame(id = rep(ids[1:300], nv), visit_date = .ch_t0 + sample(0:500, sum(nv), replace = TRUE),
@@ -448,4 +448,115 @@ test_that("while blind, an outcome-dependent criterion and every later flow row 
   q <- sr_cohort_build(fx$p, .ch_spec(name = "open_cohort", outcome = FALSE))
   expect_true(sr_blind(q))
   expect_false(anyNA(sr_flow(q, "open_cohort")$n_after))
+})
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+
+# Like .ch_ing, but a NA is an empty field (a NULL in the store), not the text "NA".
+.ch_ing_na <- function(p, df, table) {
+  csv <- file.path(dirname(p$paths$dir), paste0(table, ".csv"))
+  .fx_write_csv(df, csv, na = "")
+  sr_ingest(p, csv, table = table,
+            options = list(drive_info = function(path) list(free_bytes = 1e13, remote = FALSE, warnings = character())))
+}
+
+test_that("first and last ignore rows with a NULL date, with or without a window", {
+  p <- .ch_project()
+  pat <- data.frame(id = c("a", "b", "c"), stringsAsFactors = FALSE)
+  vis <- data.frame(id = c("a", "b", "c"), vd = as.Date(rep("2021-03-01", 3)), stringsAsFactors = FALSE)
+  # a: an undated value (9) that would win both last (NULL ranked greatest) and first (when all else ties);
+  # b: only undated rows; c: dated rows, one on the same date as another (tie -> value)
+  lab <- data.frame(id = c("a", "a", "a", "b", "b", "c", "c", "c"),
+                    ld = as.Date(c("2021-01-01", NA, "2021-02-01", NA, NA, "2021-02-01", "2021-02-01", "2021-01-15")),
+                    v = c(5, 9, 7, 1, 2, 4, 6, 3), stringsAsFactors = FALSE)
+  p <- .ch_ing(p, pat, "pat")
+  p <- .ch_ing(p, vis, "vis")
+  p <- .ch_ing_na(p, lab, "lab")
+  expect_true(anyNA(.ch_read(p, "lab")$ld))
+  ft <- function(nm, agg, window) list(name = nm, table = "lab", col = "v", agg = agg, window = window, date_col = "ld")
+  spec <- sr_cohort_spec("pat", "id", list(table = "vis", date_col = "vd"), name = "nd",
+                         features = list(ft("last_all", "last", NULL), ft("first_all", "first", NULL),
+                                         ft("last_win", "last", c(-365, 0)), ft("first_win", "first", c(-365, 0))))
+  p <- sr_cohort_build(p, spec)
+  g <- .ch_read(p, "nd")
+  expect_equal(g$last_all, c(7, NA, 6))       # the undated 9 (a) is not the latest; b has no dated row; c: tie -> greater
+  expect_equal(g$first_all, c(5, NA, 3))
+  expect_equal(g$last_win, c(7, NA, 6))
+  expect_equal(g$first_win, c(5, NA, 3))
+})
+
+test_that("a censor date before the index keeps the negative time, counts it and warns", {
+  p <- .ch_project()
+  pat <- data.frame(id = c("a", "b", "c"), stringsAsFactors = FALSE)
+  vis <- data.frame(id = c("a", "b", "c"), vd = as.Date(rep("2021-03-01", 3)), stringsAsFactors = FALSE)
+  ev <- data.frame(id = "c", ed = as.Date("2021-03-11"), stringsAsFactors = FALSE)
+  fu <- data.frame(id = c("a", "b", "c"), fd = as.Date(c("2021-02-01", "2021-04-01", "2021-02-01")), stringsAsFactors = FALSE)
+  for (nm in c("pat", "vis", "ev", "fu")) p <- .ch_ing(p, get(nm), nm)
+  mk <- function(name) sr_cohort_spec("pat", "id", list(table = "vis", date_col = "vd"), name = name,
+    outcome = list(event_table = "ev", event_date_col = "ed", horizon_days = 100, censor_table = "fu", censor_date_col = "fd"))
+  expect_warning(p <- sr_cohort_build(p, mk("neg")), "1 id.*censor date before index")
+  g <- .ch_read(p, "neg")
+  expect_equal(g$time, c(-28, 31, 10))          # a: censored 28 days before the index; c: the event wins
+  expect_equal(g$event, c(0, 0, 1))
+  expect_equal(p$state$cohorts$neg$n_negative_time, 1)
+  built <- Filter(function(x) identical(x$type, "cohort.built"), sr_events_read(p$paths$events))
+  expect_equal(built[[length(built)]]$payload$n_negative_time, 1)
+  # no negative time: no warning, a count of 0
+  fu$fd[1L] <- as.Date("2021-03-05")
+  p2 <- .ch_project()
+  for (nm in c("pat", "vis", "ev", "fu")) p2 <- .ch_ing(p2, get(nm), nm)
+  expect_no_warning(p2 <- sr_cohort_build(p2, mk("pos")))
+  expect_equal(p2$state$cohorts$pos$n_negative_time, 0)
+})
+
+test_that("a criterion on the event or censor table is outcome-dependent whatever the roles", {
+  fx <- .ch_fixture()
+  p <- fx$p                                          # no roles on deaths
+  expect_identical(sr_role_cols(p, "deaths", "outcome"), character())
+  spec <- .ch_spec()
+  spec$criteria <- list(
+    spec$criteria[[1L]],
+    list(label = "Not dead within a year", type = "exclude", table = "deaths", date_col = "death_date",
+         where = list(col = "died", op = "==", value = 1), window = c(0, 365)),
+    spec$criteria[[2L]])
+  p <- sr_cohort_build(p, spec)
+  pl <- p$state$cohorts$cohort$flow
+  expect_identical(pl$outcome_dependent, c(FALSE, FALSE, TRUE, FALSE))
+  expect_lt(pl$n_after[3L], pl$n_before[3L])
+  fl <- sr_flow(p, "cohort")
+  expect_true(sr_blind(p))
+  expect_false(anyNA(fl$n_after[1:2]))
+  expect_true(all(is.na(fl$n_after[3:4])))
+  expect_true(all(endsWith(fl$label[3:4], " (count hidden until SAP lock)")))
+  p$state$sap <- list(locked = TRUE)
+  fl2 <- sr_flow(p, "cohort")
+  expect_false(anyNA(fl2$n_after))
+  expect_equal(fl2$n_after, pl$n_after)
+  # the censor table counts the same way (and so does an index filter on the event table)
+  fu <- data.frame(id = fx$d$patients$id, fd = fx$d$patients$last_fu_date, stringsAsFactors = FALSE)
+  q <- .ch_ing(fx$p, fu, "fu")
+  s2 <- .ch_spec(name = "c2")
+  s2$outcome$censor_table <- "fu"
+  s2$outcome$censor_date_col <- "fd"
+  s2$criteria[[1L]] <- list(label = "Has a follow-up date", type = "include", table = "fu")
+  q <- sr_cohort_build(q, s2)
+  expect_identical(q$state$cohorts$c2$flow$outcome_dependent, c(FALSE, TRUE, FALSE))
+  s3 <- .ch_spec(name = "c3")
+  s3$index <- list(table = "deaths", date_col = "death_date", pick = "first")
+  q <- sr_cohort_build(q, s3)
+  expect_true(q$state$cohorts$c3$flow$outcome_dependent[1L])
+})
+
+test_that("sr_flow returns no helper attributes, only n_total and label", {
+  fx <- .ch_fixture()
+  p <- sr_cohort_build(fx$p, .ch_spec())
+  for (blind in c(TRUE, FALSE)) {
+    if (!blind) p$state$sap <- list(locked = TRUE)
+    fl <- sr_flow(p, "cohort")
+    expect_null(attr(fl, "hidden"))
+    expect_null(attr(fl, "n_start"))
+    expect_setequal(setdiff(names(attributes(fl)), c("names", "class", "row.names")), c("n_total", "label"))
+  }
+  expect_setequal(setdiff(names(attributes(sr_flow(fx$p, "patients"))), c("names", "class", "row.names")),
+                  c("n_total", "label"))
 })
