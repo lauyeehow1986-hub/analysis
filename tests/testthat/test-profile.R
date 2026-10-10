@@ -458,10 +458,18 @@ test_that("the sample connection is single-threaded, locked, and has its own spi
   expect_identical(tmp, file.path(data, "tmp", "sample"))
   expect_true(dir.exists(tmp))
   expect_false(identical(tmp, normalizePath(get1(main, "temp_directory"), winslash = "/", mustWork = FALSE)))
-  # memory: half of the application connection's limit (both printed by DuckDB as "<x> GiB")
-  gib <- function(s) as.numeric(sub("[[:space:]]*GiB$", "", s))
-  expect_match(get1(one, "memory_limit"), "GiB$")
-  expect_equal(gib(get1(one, "memory_limit")), gib(get1(main, "memory_limit")) / 2, tolerance = 0.02)
+  # memory: half of the application connection's limit, compared in bytes. DuckDB prints the setting as
+  # "<x> <unit>" with one decimal (for example "6.5 GiB"), so parse the unit and allow the rounding.
+  to_bytes <- function(s) {
+    m <- regmatches(s, regexec("^([0-9.]+)[[:space:]]*([A-Za-z]+)$", s))[[1L]]
+    mult <- c(B = 1, KB = 1e3, MB = 1e6, GB = 1e9, TB = 1e12, KiB = 1024, MiB = 1024^2, GiB = 1024^3, TiB = 1024^4)
+    expect_true(m[3L] %in% names(mult))
+    as.numeric(m[2L]) * mult[[m[3L]]]
+  }
+  one_b <- to_bytes(get1(one, "memory_limit"))
+  main_b <- to_bytes(get1(main, "memory_limit"))
+  expect_equal(one_b, main_b / 2, tolerance = 0.05)
+  expect_equal(one_b, sr_profile_caps(p$meta$profile)$duckdb_memory_gb * 1e9 / 2, tolerance = 0.05)
   expect_equal(as.integer(get1(main, "threads")), sr_profile_caps(p$meta$profile)$duckdb_threads)
   # the lock holds
   expect_error(DBI::dbExecute(one, "SET threads = 4"), "locked")
@@ -508,4 +516,39 @@ test_that("quantile levels do not depend on options(OutDec)", {
   r <- .pf_row(sr_profile_table(p, "cardiac")$columns, "age")
   expect_equal(r$q01, unname(stats::quantile(src$age, 0.01, type = 7)), tolerance = 1e-9)
   expect_equal(r$q99, unname(stats::quantile(src$age, 0.99, type = 7)), tolerance = 1e-9)
+})
+
+# ---- fix round 2 ------------------------------------------------------------------------------------
+
+test_that("a blind sample's row order ignores the dropped outcome column", {
+  p <- .fx_project()
+  n <- 40L
+  d <- data.frame(out = as.integer(seq_len(n) %% 2L), uid = seq_len(n),
+                  grp = rep(c("a", "b", "c", "d"), length.out = n), stringsAsFactors = FALSE)
+  csv <- file.path(dirname(p$paths$dir), "blindorder.csv")
+  .fx_write_csv(d, csv)
+  p <- sr_ingest(p, csv, table = "bo")
+  withr::defer(sr_duck_close(p))
+  p <- sr_roles_set(p, "bo", c(out = "outcome", grp = "exposure"))
+  expect_true(sr_blind(p))
+  s <- sr_sample(p, "bo", seed = 3L)
+  expect_identical(names(s), c("uid", "grp"))
+  expect_equal(nrow(s), n)
+  # ordered by the kept columns only: uid ascending, not stratified by the outcome
+  expect_identical(as.integer(s$uid), seq_len(n))
+  by_outcome_first <- d[order(d$out, d$uid, d$grp), ]
+  expect_false(identical(as.integer(s$uid), as.integer(by_outcome_first$uid)))
+  # deterministic for a seed
+  expect_identical(sr_sample(p, "bo", seed = 3L), s)
+  # once unblinded the order is by every column, the outcome first
+  sr_reducer_register("sap.locked", function(state, event) {
+    state$sap$locked <- TRUE
+    state
+  })
+  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
+  p <- sr_project_append(p, "sap.locked", list())
+  expect_false(sr_blind(p))
+  u <- sr_sample(p, "bo", seed = 3L)
+  expect_identical(names(u), c("out", "uid", "grp"))
+  expect_identical(as.integer(u$uid), as.integer(by_outcome_first$uid))
 })

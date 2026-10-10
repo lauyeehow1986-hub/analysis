@@ -131,8 +131,9 @@ SR_PROFILE_TOP_N <- 10L
   normalizePath(file, winslash = "/", mustWork = TRUE)
 }
 
-#' The reproducible sample of a store table as a data.frame (rows ordered by every column). Reads the
-#' sample file for this seed made by sr_profile_table(); when there is none, makes one with the default
+#' The reproducible sample of a store table as a data.frame (rows ordered by every column; while blind, by
+#' the returned columns only, so the row order cannot reveal the dropped outcome). Reads the sample file
+#' for this seed made by sr_profile_table(); when there is none, makes one with the default
 #' sample size (100000 rows, or the whole table when it is smaller).
 #' While sr_blind(project) the outcome-role columns are dropped from the returned frame (there is no
 #' override). The sample parquet on disk keeps every column: it is an internal artefact and must not be
@@ -148,10 +149,13 @@ sr_sample <- function(project, table, seed = 1L) {
   keep <- cols
   if (sr_blind(project)) keep <- setdiff(cols, sr_role_cols(project, table, "outcome"))
   if (!length(keep)) stop("table '", table, "' has no column that may be shown before the SAP is locked", call. = FALSE)
-  # ORDER BY every stored column (the dropped ones too) so the row order does not depend on the filter
+  # ORDER BY the returned columns only while blind: ordering by a dropped outcome column would leak its
+  # strata through the row order. Rows tied on every kept column look identical, so the result is still
+  # deterministic. Unblinded, order by every stored column.
+  order_cols <- if (sr_blind(project)) keep else cols
   sr_duck_query(con, sprintf("SELECT %s FROM read_parquet(%s) ORDER BY %s",
                              paste(DBI::dbQuoteIdentifier(con, keep), collapse = ", "), DBI::dbQuoteString(con, file),
-                             paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", ")))
+                             paste(DBI::dbQuoteIdentifier(con, order_cols), collapse = ", ")))
 }
 
 # ---- the profile ------------------------------------------------------------------------------------
