@@ -24,9 +24,11 @@
 # the two are identical().
 #
 # Outcome-blind rule: a check sees ctx$sample, which sr_sample() already strips of the outcome columns
-# while blind. The one exception is missing_dependence for an outcome column with >= 5% missing: it may
-# read is.na(outcome) from the sample file (never the values). Every finding set passes
-# .sr_assert_blind() before it is stored.
+# while blind. The exceptions read the outcome of the SAME sample rows through .sr_dq_sample_col()
+# (dq_completeness.R), inside the check function, and never let a value out: missing_dependence for an
+# outcome column with >= 5% missing reads is.na(outcome) only; leakage and separation (dq_leakage.R) read
+# the binary outcome to flag a column, and while blind report the column name only (no AUC, level, count
+# or direction). Every finding set passes .sr_assert_blind() before it is stored.
 
 SR_DQ_DOMAINS <- c("conformance", "completeness", "plausibility", "uniqueness", "structure", "leakage")
 SR_DQ_SEVERITIES <- c("info", "warn", "block")

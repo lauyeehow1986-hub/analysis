@@ -214,20 +214,30 @@ SR_DQ_SMD_CAP <- 10
 
 # ---- missing_dependence -----------------------------------------------------------------------------
 
+# The values of one column over the sample rows, in the order of ctx$sample. This is the ONE internal
+# reader of a column the blind sample dropped (an outcome): it is read from the sample file with the same
+# ORDER BY as sr_sample() (the kept columns), so row i of the result belongs to row i of ctx$sample. Rows
+# tied on every kept column are identical in ctx$sample, so any order among them gives the same
+# (row, value) pairs. The values never leave the check function that asked for them; a check may turn them
+# into a marginal (is.na, a flag) or, for leakage and separation, into a statistic it reports under the
+# blind rules of those checks.
+.sr_dq_sample_col <- function(ctx, col) {
+  s <- ctx$sample
+  if (col %in% names(s)) return(s[[col]])
+  con <- ctx$con
+  keep <- DBI::dbQuoteIdentifier(con, names(s))
+  r <- sr_duck_query(con, sprintf("SELECT %s AS sr_dq_v FROM read_parquet(%s) ORDER BY %s",
+                                  DBI::dbQuoteIdentifier(con, col), DBI::dbQuoteString(con, ctx$profile$sample_file),
+                                  paste(keep, collapse = ", ")))
+  if (nrow(r) != nrow(s)) stop("the sample file and the sample do not have the same rows", call. = FALSE)
+  r$sr_dq_v
+}
+
 # The missingness indicator of `col` over the sample rows, and the sample's other columns. A column the
-# blind sample dropped (an outcome) contributes ONLY its is.na() flag, read from the sample file.
+# blind sample dropped (an outcome) contributes ONLY its is.na() flag.
 .sr_dq_miss_frame <- function(ctx, col) {
   s <- ctx$sample
-  if (col %in% names(s)) {
-    return(list(m = is.na(s[[col]]), cov = s[, setdiff(names(s), col), drop = FALSE]))
-  }
-  con <- ctx$con
-  keep <- names(s)
-  r <- sr_duck_query(con, sprintf("SELECT (%s IS NULL) AS sr_dq_m, %s FROM read_parquet(%s)",
-                                  DBI::dbQuoteIdentifier(con, col),
-                                  paste(DBI::dbQuoteIdentifier(con, keep), collapse = ", "),
-                                  DBI::dbQuoteString(con, ctx$profile$sample_file)))
-  list(m = as.logical(r$sr_dq_m), cov = r[, keep, drop = FALSE])
+  list(m = is.na(.sr_dq_sample_col(ctx, col)), cov = s[, setdiff(names(s), col), drop = FALSE])
 }
 
 # |standardised difference| of one covariate between the rows where `m` is TRUE and FALSE: for a numeric

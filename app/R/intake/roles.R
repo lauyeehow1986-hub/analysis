@@ -13,6 +13,11 @@ SR_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "exposure_dat
               "censor_date", "time", "event", "offset", "weight", "covariate", "ignore")
 SR_PROTECTED_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "time", "event")
 
+# Column-name patterns (matched case-insensitively on the name or the dictionary label) that suggest a role;
+# sr_roles_suggest() and the DQ checks cluster_detect / offset_detect share them.
+SR_RE_CLUSTER <- "site|hospital|centre|center|surgeon|cluster"
+SR_RE_OFFSET <- "follow_?up|person_?(years|days|time)|exposure_time"
+
 # ---- helpers ----------------------------------------------------------------------------------------
 
 # The stored schema (data.frame(name, type), schema order) of a store table, or an error naming it.
@@ -95,7 +100,7 @@ sr_roles_suggest <- function(project, table) {
   is_dt <- hit(re_dt) | grepl("^(DATE|TIMESTAMP)", toupper(sc$type))
 
   # a date column is never a cluster, however its name reads
-  re_cl <- "site|hospital|centre|center|surgeon|cluster"
+  re_cl <- SR_RE_CLUSTER
   cand <- which(free() & hit(re_cl) & !is_dt)
   if (length(cand)) {
     k <- .sr_roles_distinct(project, table, cols[cand])
@@ -112,7 +117,7 @@ sr_roles_suggest <- function(project, table) {
               paste("date column with death, event or outcome in its", via(re_ev)))
   assign_rule(i[!ev[i]], "covariate", rep("date column (no event keyword in its name or label)", n))
 
-  re_off <- "follow_?up|person_?(years|days|time)|exposure_time"
+  re_off <- SR_RE_OFFSET
   i <- which(free() & hit(re_off))
   assign_rule(i, "offset", paste(via(re_off), "matches follow-up or exposure-time pattern"))
 
