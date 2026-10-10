@@ -614,7 +614,8 @@ sr_reducer_register("recipe.checkout", function(state, event) {
 #' `recipe_hash` (its SHA-256). `into` may be a table this function made from the same source before: it is
 #' replaced atomically (apply after an undo, or from another branch). Any other existing name is refused.
 #' The rows are written in a total order (ORDER BY every column), as a join's are, so the same recipe over
-#' the same data gives the same store hash. Roles and the dictionary are not carried to `into`.
+#' the same data gives the same store hash. The roles and the dictionary of `table` reach `into` with the
+#' recipe's renames and drops applied (see .sr_rc_carry), recorded in the same `recipe.applied` event.
 #' @return the project with the event applied.
 sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
@@ -622,6 +623,7 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
   .sr_store_check_table(into)
   if (identical(into, table)) stop("into must differ from the source table", call. = FALSE)
   cur <- .sr_rc_current(project, table)
+  carry <- .sr_rc_carry(project, table, into, cur$steps)
   old <- project$state$tables[[into]]
   replace <- identical(old$format, "recipe") && identical(as.character(unlist(old$derived_from)), table)
   if (!replace && (into %in% sr_store_tables(project) || dir.exists(sr_store_dir(project, into)) ||
@@ -655,11 +657,21 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
     name_map = .sr_rc_name_map(table, cur$steps),
     store = list(dir = paste0("data/store/", into), rows = rows, ncol = length(schema), schema = schema,
                  parts = parts))
-  out <- tryCatch(sr_project_append(project, "recipe.applied", payload), error = function(e) {
+  if (!is.null(carry$roles)) {
+    payload$roles <- list(columns = as.list(names(carry$roles)), roles = as.list(unname(carry$roles)))
+  }
+  dw <- NULL
+  tryCatch({
+    if (!is.null(carry$dict)) {
+      dw <- .sr_dict_write(project, into, carry$dict, "recipe")
+      payload$dict <- dw$record
+    }
+    sr_project_append(project, "recipe.applied", payload)
+  }, error = function(e) {
+    if (!is.null(dw)) .sr_dict_restore(dw)
     if (!replace) unlink(sr_store_dir(project, into), recursive = TRUE)   # no event: do not leave the table behind
     stop(e)
   })
-  .sr_rc_carry(out, table, into, cur$steps)
 }
 
 # Per step: TRUE when the step reads or writes an outcome-family column (its col, or a column of its
@@ -725,23 +737,24 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
   x
 }
 
-# Give `into` the roles and the dictionary of `table` through the usual roles.set / dict.set events, with
-# the recipe's renames and drops applied (the checks at add time mean a role-assigned column is never renamed
-# and a protected one never dropped, so in practice only unprotected columns vanish). Both events replace the
-# whole map, so applying again over the same source leaves the same end state. A cast step does not touch the
-# `type` of a dictionary entry.
+# What `into` gets from `table`: list(roles, dict), the roles and the dictionary with the recipe's renames and
+# drops applied (the checks at add time mean a role-assigned column is never renamed and a protected one never
+# dropped, so in practice only unprotected columns vanish). sr_recipe_apply records both in `recipe.applied`
+# (no separate roles.set / dict.set event). `roles` is NULL when neither table has roles (otherwise it
+# replaces the whole map, empty included); `dict` is NULL when `table` has no dictionary. Applying again over
+# the same source leaves the same end state. A cast step does not touch the `type` of a dictionary entry.
 .sr_rc_carry <- function(project, table, into, steps) {
   roles <- .sr_rc_carry_names(sr_roles(project, table), steps)
-  if (length(roles) || length(sr_roles(project, into))) project <- sr_roles_set(project, into, roles)
+  if (!length(roles) && !length(sr_roles(project, into))) roles <- NULL
   d <- sr_dict_get(project, table)
   if (!is.null(d)) {
     kept <- .sr_rc_carry_names(stats::setNames(d$variable, d$variable), steps)   # names = new, values = old
     d <- d[d$variable %in% unname(kept), , drop = FALSE]
     d$variable <- names(kept)[match(d$variable, unname(kept))]
     rownames(d) <- NULL
-    project <- sr_dict_set(project, into, d, "recipe")
+    d <- sr_dict_validate(d)
   }
-  project
+  list(roles = roles, dict = d)
 }
 
 # `recipe.applied` adds (or replaces) the clean table: format "recipe", no source file, derived from `table`.
@@ -763,6 +776,9 @@ sr_reducer_register("recipe.applied", function(state, event) {
   t$name_map <- p$name_map
   tabs[[into]] <- t
   state$tables <- tabs
+  # older logs have neither: their roles.set / dict.set events follow and set the same state
+  if (!is.null(p$roles)) state <- .sr_roles_state_set(state, into, p$roles)
+  if (!is.null(p$dict)) state <- .sr_dict_state_set(state, into, p$dict)
   state
 })
 

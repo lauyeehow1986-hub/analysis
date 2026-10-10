@@ -203,14 +203,21 @@ sr_role_cols <- function(project, table, role) {
 sr_reducer_register("roles.set", function(state, event) {
   p <- event$payload
   if (!is.character(p$table) || length(p$table) != 1L || is.na(p$table)) stop("roles.set needs a table", call. = FALSE)
-  cols <- as.character(unlist(p$columns, use.names = FALSE))
-  vals <- as.character(unlist(p$roles, use.names = FALSE))
+  .sr_roles_state_set(state, p$table, p)
+})
+
+# Set state$roles[[table]] to the whole map in `r` (list(columns, roles), as an event payload carries it):
+# the roles.set reducer, shared with recipe.applied and cohort.built so an old log (the derived-table event,
+# then roles.set) and a new one (the roles in the derived-table event) give the same state.
+.sr_roles_state_set <- function(state, table, r) {
+  cols <- as.character(unlist(r$columns, use.names = FALSE))
+  vals <- as.character(unlist(r$roles, use.names = FALSE))
   if (length(cols) != length(vals)) stop("roles.set needs one role per column", call. = FALSE)
   roles <- state$roles %||% list()
-  roles[[p$table]] <- stats::setNames(vals, cols)
+  roles[[table]] <- stats::setNames(vals, cols)
   state$roles <- roles
   state
-})
+}
 
 # ---- the outcome family and lineage -----------------------------------------------------------------
 

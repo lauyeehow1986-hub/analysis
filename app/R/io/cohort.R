@@ -450,11 +450,10 @@ sr_cohort_build <- function(project, spec) {
     sql = list(steps = as.list(sql$steps), extra = as.list(sql$extra), final = sql$final),
     flow = flow, n_negative_time = n_neg, store_hash = w$store_hash, store = w$store,
     outcome_dependent = any(dep), name_map = .sr_cohort_name_map(spec))
-  project <- .sr_derived_append(project, spec$name, "cohort.built", payload)
-
   roles <- stats::setNames("id", spec$id)
   if (!is.null(spec$outcome)) roles <- c(roles, event = "outcome", time = "time")
-  project <- sr_roles_set(project, spec$name, roles)
+  payload$roles <- list(columns = as.list(names(roles)), roles = as.list(unname(roles)))   # no separate roles.set
+  project <- .sr_derived_append(project, spec$name, "cohort.built", payload)
   if (n_neg > 0) {
     warning(sprintf("%.0f id(s) of cohort '%s' have a negative time: censor date before index (kept as is; a survival model cannot use them)",
                     n_neg, spec$name), call. = FALSE)
@@ -499,5 +498,7 @@ sr_reducer_register("cohort.built", function(state, event) {
   t$name_map <- p$name_map
   tabs[[name]] <- t
   state$tables <- tabs
+  # older logs have no roles here: their roles.set event follows and sets the same state
+  if (!is.null(p$roles)) state <- .sr_roles_state_set(state, name, p$roles)
   state
 })

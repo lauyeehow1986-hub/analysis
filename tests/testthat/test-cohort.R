@@ -560,3 +560,37 @@ test_that("sr_flow returns no helper attributes, only n_total and label", {
   expect_setequal(setdiff(names(attributes(sr_flow(fx$p, "patients"))), c("names", "class", "row.names")),
                   c("n_total", "label"))
 })
+
+# ---- I6: the cohort's roles come from the one cohort.built event --------------------------------------
+
+test_that("build records the roles in cohort.built with no roles.set event; old logs and reopening replay the same", {
+  fx <- .ch_fixture()
+  p <- fx$p
+  n0 <- length(sr_events_read(p$paths$events))
+  base <- p$state
+  p <- sr_cohort_build(p, .ch_spec())
+  evs <- sr_events_read(p$paths$events)
+  types <- vapply(evs, function(e) e$type, "")
+  expect_identical(types[-seq_len(n0)], "cohort.built")
+  ev <- evs[[length(evs)]]
+  expect_identical(as.character(unlist(ev$payload$roles$columns)), c("id", "event", "time"))
+  expect_identical(sr_roles(p, "cohort"), c(id = "id", event = "outcome", time = "time"))
+  # an old log: cohort.built without roles, then roles.set
+  old_ev <- ev
+  old_ev$payload <- ev$payload[setdiff(names(ev$payload), "roles")]
+  old <- .sr_reducer_get("cohort.built")(base, old_ev)
+  old <- .sr_reducer_get("roles.set")(old, list(type = "roles.set", payload = list(
+    table = "cohort", columns = ev$payload$roles$columns, roles = ev$payload$roles$roles)))
+  expect_identical(old, p$state)
+  # reopening gives the in-memory state
+  dir <- p$paths$dir
+  st <- p$state
+  sr_duck_close(p)
+  sr_project_close(p)
+  r <- sr_project_open(dir)
+  withr::defer(sr_duck_close(r))
+  withr::defer(sr_project_close(r))
+  expect_identical(r$state$roles, st$roles)
+  expect_identical(r$state$tables, st$tables)
+  expect_identical(r$state$cohorts, st$cohorts)
+})

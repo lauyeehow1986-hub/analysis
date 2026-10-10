@@ -278,21 +278,41 @@ sr_dict_set <- function(project, table, dict, source) {
     stop("source must be a single non-empty string", call. = FALSE)
   }
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  w <- .sr_dict_write(project, table, dict, source)
+  tryCatch(sr_project_append(project, "dict.set", c(list(table = table), w$record)), error = function(e) {
+    .sr_dict_restore(w)   # the event is the commit: without it the file must not change what state says
+    stop(e)
+  })
+}
+
+# Validate `dict` and write it as data/dict/<table>.json (atomically). Returns the state record
+# (file, sha256, n, source) that the committing event carries, and what .sr_dict_restore needs to undo the
+# write when that event cannot be appended. dict.set and recipe.applied use it.
+.sr_dict_write <- function(project, table, dict, source) {
   dict <- sr_dict_validate(dict)
   file <- .sr_dict_file(project, table)
   dir.create(dirname(file), recursive = TRUE, showWarnings = FALSE)
   old <- if (file.exists(file)) .sr_read_bytes(file) else NULL
   bytes <- c(charToRaw(enc2utf8(.sr_dict_to_json(dict))), as.raw(0x0A))
   .sr_write_atomic(file, bytes)
-  out <- tryCatch(
-    sr_project_append(project, "dict.set", list(table = table, file = .sr_dict_rel(table), sha256 = .sr_sha256(bytes),
-                                                n = nrow(dict), source = source)),
-    error = function(e) {
-      # the event is the commit: without it the file must not change what state says
-      if (is.null(old)) unlink(file) else try(.sr_write_atomic(file, old), silent = TRUE)
-      stop(e)
-    })
-  out
+  list(file = file, old = old,
+       record = list(file = .sr_dict_rel(table), sha256 = .sr_sha256(bytes), n = nrow(dict), source = source))
+}
+
+.sr_dict_restore <- function(w) {
+  if (is.null(w$old)) unlink(w$file) else try(.sr_write_atomic(w$file, w$old), silent = TRUE)
+  invisible(NULL)
+}
+
+# Merge the dictionary record `rec` (file, sha256, n, source) into state$dict[[table]]: the dict.set reducer,
+# shared with recipe.applied so an old log (recipe.applied, then dict.set) and a new one give the same state.
+.sr_dict_state_set <- function(state, table, rec) {
+  d <- state$dict %||% list()
+  old <- d[[table]] %||% list()
+  for (k in names(rec)) old[k] <- list(rec[[k]])
+  d[[table]] <- old
+  state$dict <- d
+  state
 }
 
 #' The stored dictionary of `table`, or NULL when it has none. The file is checked against the SHA-256
@@ -322,12 +342,7 @@ sr_dict_get <- function(project, table) {
 sr_reducer_register("dict.set", function(state, event) {
   p <- event$payload
   if (!is.character(p$table) || length(p$table) != 1L || is.na(p$table)) stop("dict.set needs a table", call. = FALSE)
-  d <- state$dict %||% list()
-  old <- d[[p$table]] %||% list()
-  for (k in setdiff(names(p), "table")) old[k] <- list(p[[k]])
-  d[[p$table]] <- old
-  state$dict <- d
-  state
+  .sr_dict_state_set(state, p$table, p[setdiff(names(p), "table")])
 })
 
 # ---- matching -------------------------------------------------------------------------------------

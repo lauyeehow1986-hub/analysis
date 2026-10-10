@@ -588,3 +588,65 @@ test_that("sr_recipe_undo(step_id) undoes that active step; the rest must still 
   withr::defer(sr_project_close(q))
   expect_identical(vapply(sr_recipe_steps(q), function(s) s$id, ""), "s3")
 })
+
+# ---- I6: the clean table's roles and dictionary come from the one recipe.applied event ------------------
+
+.rc_types <- function(p) vapply(sr_events_read(p$paths$events), function(e) e$type, "")
+
+test_that("apply records the roles and the dictionary in recipe.applied, with no roles.set or dict.set event; replay is identical", {
+  p <- .rc_cardiac()
+  p <- sr_roles_set(p, "cardiac", c(.rc_roles, notes = "covariate"))
+  p <- sr_recipe_add(p, "cardiac", .rc_step("drop_var", list(col = "notes"), "free text"))
+  n0 <- length(.rc_types(p))
+  p <- sr_recipe_apply(p, "cardiac")
+  types <- .rc_types(p)
+  expect_identical(types[-seq_len(n0)], "recipe.applied")
+  ev <- sr_events_read(p$paths$events)[[length(types)]]
+  expect_false(is.null(ev$payload$roles))
+  expect_identical(ev$payload$dict$source, "recipe")
+  expect_identical(ev$payload$dict$file, "data/dict/cardiac_clean.json")
+  expect_false("notes" %in% names(sr_roles(p, "cardiac_clean")))
+  expect_identical(sr_roles(p, "cardiac_clean")[["mortality_30d"]], "outcome")
+  expect_false("notes" %in% sr_dict_get(p, "cardiac_clean")$variable)
+  # the source loses its roles: re-applying sets an empty map on the clean table, still in one event
+  p <- sr_roles_set(p, "cardiac", stats::setNames(character(0), character(0)))
+  n1 <- length(.rc_types(p))
+  p <- sr_recipe_apply(p, "cardiac")
+  expect_identical(.rc_types(p)[-seq_len(n1)], "recipe.applied")
+  expect_length(sr_roles(p, "cardiac_clean"), 0L)
+  # reopening gives the in-memory state
+  dir <- p$paths$dir
+  st <- p$state
+  dd <- sr_dict_get(p, "cardiac_clean")
+  sr_duck_close(p)
+  sr_project_close(p)
+  q <- sr_project_open(dir)
+  withr::defer(sr_duck_close(q))
+  withr::defer(sr_project_close(q))
+  expect_identical(q$state$roles, st$roles)
+  expect_identical(q$state$dict, st$dict)
+  expect_identical(q$state$tables, st$tables)
+  expect_identical(sr_dict_get(q, "cardiac_clean"), dd)
+})
+
+test_that("an old log (recipe.applied, then roles.set and dict.set) replays to the same state as the new event", {
+  p <- .rc_cardiac()
+  p <- sr_recipe_add(p, "cardiac", .rc_step("drop_var", list(col = "notes"), "free text"))
+  base <- p$state
+  p <- sr_recipe_apply(p, "cardiac")
+  evs <- sr_events_read(p$paths$events)
+  ev <- evs[[length(evs)]]
+  expect_identical(ev$type, "recipe.applied")
+  new <- .sr_reducer_get("recipe.applied")(base, ev)
+  pl <- ev$payload
+  old_ev <- ev
+  old_ev$payload <- pl[setdiff(names(pl), c("roles", "dict"))]
+  old <- .sr_reducer_get("recipe.applied")(base, old_ev)
+  if (!is.null(pl$roles)) {
+    old <- .sr_reducer_get("roles.set")(old, list(type = "roles.set", payload = list(
+      table = "cardiac_clean", columns = pl$roles$columns, roles = pl$roles$roles)))
+  }
+  old <- .sr_reducer_get("dict.set")(old, list(type = "dict.set", payload = c(list(table = "cardiac_clean"), pl$dict)))
+  expect_identical(old, new)
+  expect_identical(new, p$state)
+})
