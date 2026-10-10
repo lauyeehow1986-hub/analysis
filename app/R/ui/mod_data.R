@@ -216,7 +216,7 @@
   mirai::mirai({
     source(file.path(app_dir, "global.R"), local = FALSE, encoding = "UTF-8")
     p <- sr_project_open(project_dir)
-    if (isTRUE(p$readonly)) {
+    out <- if (isTRUE(p$readonly)) {
       list(ok = FALSE, cancelled = FALSE, warnings = NULL,
            error = "the project is locked by another session")
     } else {
@@ -227,18 +227,48 @@
       res$project <- NULL
       res
     }
+    # the session may be gone (it cannot clean up after a worker still running): the worker removes the
+    # cancel and progress files it was given
+    try(unlink(c(progress_file, cancel_file)), silent = TRUE)
+    out
   }, .args = list(app_dir = app_dir, project_dir = project_dir, path = path, table = table, sniff = sniff,
                   external = external, progress_file = progress_file, cancel_file = cancel_file))
 }
 
+# TRUE when two project folder paths are the same folder (case and slash style do not matter).
+.sr_data_same_dir <- function(a, b) {
+  ok <- function(x) is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+  if (!ok(a) || !ok(b)) return(FALSE)
+  norm <- function(x) tolower(normalizePath(x, winslash = "/", mustWork = FALSE))
+  identical(norm(a), norm(b))
+}
+
+# Suggestions most severe first (block, warn, info, anything else last), the finding order kept within a
+# severity.
+.sr_data_sort_suggestions <- function(s) {
+  if (!is.data.frame(s) || !nrow(s) || is.null(s$severity)) return(s)
+  rank <- match(as.character(s$severity), c("block", "warn", "info"), nomatch = 4L)
+  s[order(rank, seq_len(nrow(s))), , drop = FALSE]
+}
+
+# How many suggestions one page of the Suggested actions card shows.
+.SR_DATA_SUGGEST_PAGE <- 50L
+
 # ---- outcome-blind helpers ----------------------------------------------------------------------------
 
+# The marker .sr_data_hidden_cols() and .sr_data_outcome_names() return when they cannot tell which columns
+# are outcome columns: every column is then hidden (fail closed).
+.SR_DATA_ALL <- "<all columns>"
+
 # TRUE when the row count of `table` must not be shown: its flow (or the flow of the table it was derived
-# from) has a hidden count. Never errors: a table whose flow cannot be computed shows its count.
+# from) has a hidden count. Never errors, and fails closed: while blind, a table whose flow cannot be
+# computed (or that is nested too deep to follow) has its count hidden.
 .sr_data_rows_hidden <- function(project, table, depth = 0L) {
-  if (!sr_blind(project) || depth > 5L) return(FALSE)
+  if (!sr_blind(project)) return(FALSE)
+  if (depth > 5L) return(TRUE)
   fl <- tryCatch(sr_flow(project, table), error = function(e) NULL)
-  if (is.data.frame(fl) && nrow(fl) &&
+  if (!is.data.frame(fl)) return(TRUE)
+  if (nrow(fl) &&
       (anyNA(fl$n_before) || anyNA(fl$n_after) || any(endsWith(as.character(fl$label), SR_FLOW_HIDDEN)))) {
     return(TRUE)
   }
@@ -246,10 +276,47 @@
   any(vapply(src, function(s) !identical(s, table) && .sr_data_rows_hidden(project, s, depth + 1L), NA))
 }
 
-# The columns of `table` the viewer must not show: the outcome-role columns while blind.
+# The columns of `table` the viewer must not show: the outcome-role columns while blind; .SR_DATA_ALL when
+# they cannot be determined.
 .sr_data_hidden_cols <- function(project, table) {
   if (!sr_blind(project)) return(character())
-  tryCatch(sr_role_cols(project, table, "outcome"), error = function(e) character())
+  tryCatch(as.character(sr_role_cols(project, table, "outcome")), error = function(e) .SR_DATA_ALL)
+}
+
+# TRUE when `hidden` (from .sr_data_hidden_cols() or .sr_data_outcome_names()) hides anything.
+.sr_data_any_hidden <- function(hidden) length(hidden) > 0L
+
+# `cols` without the hidden ones; nothing at all when everything is hidden.
+.sr_data_visible <- function(cols, hidden) {
+  if (.SR_DATA_ALL %in% hidden) character() else setdiff(cols, hidden)
+}
+
+# The names of the outcome columns of every table of the project (a file about to be imported may be
+# another file of any of them, or a re-import of one): while blind, nothing from the raw file with such a
+# name may be shown. Character(0) when not blind or nothing is an outcome; .SR_DATA_ALL when it cannot be
+# determined.
+.sr_data_outcome_names <- function(project) {
+  if (is.null(project) || !sr_blind(project)) return(character())
+  tryCatch({
+    tabs <- union(sr_store_tables(project), names(project$state$tables))
+    unique(unlist(lapply(tabs, function(t) as.character(sr_role_cols(project, t, "outcome")))))
+  }, error = function(e) .SR_DATA_ALL)
+}
+
+# A column name reduced for comparison: case, spaces and punctuation do not matter, so a raw header such as
+# "Mortality 30d" is still taken for the outcome column mortality_30d.
+.sr_data_norm_name <- function(x) gsub("[^a-z0-9]", "", tolower(as.character(x)))
+
+# The preview data frame without the columns whose header is an outcome name. A file with no header row
+# cannot be matched by name, and neither can raw lines the preview could not split, so those are not shown
+# at all while outcome columns exist.
+.sr_data_preview_hide <- function(df, hidden, header = TRUE) {
+  note <- function() data.frame(note = "columns hidden until SAP lock", stringsAsFactors = FALSE)
+  if (!length(hidden)) return(df)
+  if (.SR_DATA_ALL %in% hidden || identical(header, FALSE) || identical(names(df), "line")) return(note())
+  keep <- !(.sr_data_norm_name(names(df)) %in% .sr_data_norm_name(hidden))
+  if (!any(keep)) return(note())
+  df[, keep, drop = FALSE]
 }
 
 # ---- rendering helpers --------------------------------------------------------------------------------
@@ -302,7 +369,7 @@ mod_data_ui <- function(id) {
       bslib::layout_columns(
         col_widths = c(5, 7),
         shiny::div(shiny::h6("What the file looks like"), shiny::verbatimTextOutput(ns("sniff"), placeholder = TRUE)),
-        shiny::div(shiny::h6("First 20 rows"), DT::DTOutput(ns("preview")))
+        shiny::div(shiny::h6("First 20 rows"), shiny::uiOutput(ns("preview_note")), DT::DTOutput(ns("preview")))
       ),
       shiny::h6("Pre-flight"),
       shiny::uiOutput(ns("preflight")),
@@ -323,9 +390,8 @@ mod_data_ui <- function(id) {
       bslib::card_header("3. View the data"),
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
-        shiny::actionButton(ns("view_prev"), "Previous", class = "btn-sm"),
+        shiny::uiOutput(ns("view_nav"), inline = TRUE),
         shiny::numericInput(ns("view_page"), "Page", value = 1, min = 1, step = 1, width = "90px"),
-        shiny::actionButton(ns("view_next"), "Next", class = "btn-sm"),
         shiny::selectInput(ns("view_size"), "Rows per page", c(25, 50, 100, 250), selected = 25, width = "130px"),
         shiny::uiOutput(ns("view_order_ui")),
         shiny::checkboxInput(ns("view_desc"), "Descending")
@@ -358,6 +424,7 @@ mod_data_ui <- function(id) {
     ),
     bslib::card(
       bslib::card_header("7. Suggested actions"),
+      shiny::numericInput(ns("sug_page"), "Findings page", value = 1, min = 1, step = 1, width = "120px"),
       shiny::uiOutput(ns("suggestions_ui")),
       shiny::actionButton(ns("export_query"), "Export query sheet", class = "btn-outline-primary")
     ),
@@ -395,7 +462,8 @@ mod_data_server <- function(id, project) {
     shinyFiles::shinyFileChoose(input, "dict_pick", roots = roots, session = session)
 
     # The import that is running, if any (transient: temp files and the folder to reopen).
-    job <- shiny::reactiveValues(busy = FALSE, dir = NULL, table = NULL, progress = NULL, cancel = NULL)
+    job <- shiny::reactiveValues(busy = FALSE, dir = NULL, name = NULL, table = NULL, progress = NULL,
+                                 cancel = NULL)
     task <- shiny::ExtendedTask$new(function(...) .sr_data_spawn(...))
 
     notify <- function(msg, type = "message") {
@@ -480,10 +548,21 @@ mod_data_server <- function(id, project) {
       .sr_data_sniff_text(s)
     })
 
+    # While blind the raw file may be another copy of a table with outcome columns: nothing under an outcome
+    # column name of any table is shown (the same rule as the viewer).
+    preview_hidden <- shiny::reactive(.sr_data_outcome_names(project()))
+
+    output$preview_note <- shiny::renderUI({
+      if (.sr_data_any_hidden(preview_hidden())) {
+        shiny::p(class = "text-muted small", "outcome columns hidden until SAP lock")
+      }
+    })
+
     output$preview <- DT::renderDT({
       s <- sniff_eff()
       shiny::req(s, is.null(attr(s, "error")))
-      .sr_data_dt(.sr_data_preview(path_in(), s, 20L), page_length = 20L)
+      df <- .sr_data_preview_hide(.sr_data_preview(path_in(), s, 20L), preview_hidden(), s$header)
+      .sr_data_dt(df, page_length = 20L)
     }, server = FALSE)
 
     output$preflight <- shiny::renderUI({
@@ -505,16 +584,18 @@ mod_data_server <- function(id, project) {
     })
 
     # ---- import ----------------------------------------------------------------------------------------
-    finish_import <- function(res, dir, table) {
+    # `where` is "" when the import ran in the project that is open, else " in <project name>".
+    finish_import <- function(res, dir, table, where = "") {
       if (is.list(res$warnings) || is.character(res$warnings)) {
         for (w in unlist(res$warnings)) notify(paste0("Import: ", w), "warning")
       }
       if (isTRUE(res$ok)) {
-        notify(sprintf("Imported '%s'.", table), "message")
+        notify(if (nzchar(where)) sprintf("Import finished%s: imported '%s'.", where, table)
+               else sprintf("Imported '%s'.", table), "message")
       } else if (isTRUE(res$cancelled)) {
-        notify("Import cancelled; importing the same file again resumes it.", "warning")
+        notify(sprintf("Import cancelled%s; importing the same file again resumes it.", where), "warning")
       } else {
-        notify(paste0("Import failed: ", res$error %||% "unknown error"), "error")
+        notify(sprintf("Import failed%s: %s", where, res$error %||% "unknown error"), "error")
       }
     }
 
@@ -546,8 +627,14 @@ mod_data_server <- function(id, project) {
       # background: release our lock so the worker can take it, start the worker, reopen when it is done
       dir <- p$paths$dir
       try(sr_project_close(p), silent = TRUE)
+      # the lock is released for the worker: until it is back the session holds a read-only copy, so no
+      # write can go through a handle that no longer owns the project
+      ro <- p
+      ro$readonly <- TRUE
+      project(ro)
       job$busy <- TRUE
       job$dir <- dir
+      job$name <- as.character(p$meta$name %||% basename(dir))[1L]
       job$table <- name
       job$progress <- prog
       job$cancel <- canc
@@ -559,13 +646,29 @@ mod_data_server <- function(id, project) {
       if (!isTRUE(started)) reopen(dir)
     })
 
-    # Reopen the project folder after a worker has used it. The worker released the lock.
+    # The session is gone while the worker still runs: ask it to stop (it keeps its checkpoint, removes the
+    # cancel and progress files itself and releases the project lock). The progress file is not needed any more.
+    session$onSessionEnded(function() {
+      if (isTRUE(shiny::isolate(job$busy))) {
+        try(file.create(shiny::isolate(job$cancel)), silent = TRUE)
+        try(unlink(shiny::isolate(job$progress)), silent = TRUE)
+      }
+    })
+
+    # Take the project folder back after a worker has used it (the worker released the lock). Only when the
+    # open project is still the one the import started on, and still the read-only copy: another project
+    # that was opened meanwhile is left alone (nothing it holds is released), and so is the same project
+    # when it was opened afresh. Returns "" when the import's project is the open one, else " in <name>".
     reopen <- function(dir) {
       job$busy <- FALSE
-      p <- .sr_data_try("Reopen project", function() sr_project_open(dir))
-      if (!is.null(p)) project(p)
+      cur <- shiny::isolate(project())
+      same <- !is.null(cur) && .sr_data_same_dir(cur$paths$dir, dir)
+      if (same && isTRUE(cur$readonly)) {
+        p <- .sr_data_try("Reopen project", function() sr_project_open(dir))
+        if (!is.null(p)) project(p)
+      }
       unlink(c(job$progress, job$cancel))
-      invisible(NULL)
+      if (same) "" else paste0(" in ", shiny::isolate(job$name) %||% basename(dir))
     }
 
     shiny::observeEvent(task$status(), {
@@ -575,8 +678,8 @@ mod_data_server <- function(id, project) {
       table <- shiny::isolate(job$table)
       res <- tryCatch(task$result(), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
       if (!is.list(res)) res <- list(ok = FALSE, error = paste(format(res), collapse = " "))
-      reopen(dir)
-      finish_import(res, dir, table)
+      where <- reopen(dir)
+      finish_import(res, dir, table, where)
     }, ignoreInit = TRUE)
 
     shiny::observeEvent(input$cancel, {
@@ -642,7 +745,7 @@ mod_data_server <- function(id, project) {
       shiny::req(p, t)
       m <- tryCatch(sr_store_manifest(p, t), error = function(e) NULL)
       if (is.null(m)) return(character())
-      setdiff(vapply(m$schema, function(s) s$name, ""), .sr_data_hidden_cols(p, t))
+      .sr_data_visible(vapply(m$schema, function(s) s$name, ""), .sr_data_hidden_cols(p, t))
     })
 
     output$view_order_ui <- shiny::renderUI({
@@ -650,10 +753,33 @@ mod_data_server <- function(id, project) {
       shiny::selectInput(ns("view_order"), "Sort by", cols, selected = utils::head(cols, 1L), width = "200px")
     })
 
+    # While the row count of the table is hidden the viewer is one page: any further page would show where
+    # the rows end. Previous and Next are disabled and refuse.
+    single_page <- shiny::reactive({
+      p <- project()
+      t <- tbl()
+      !is.null(p) && !is.null(t) && .sr_data_rows_hidden(p, t)
+    })
+
+    output$view_nav <- shiny::renderUI({
+      off <- isTRUE(single_page())
+      shiny::tagList(
+        shiny::actionButton(ns("view_prev"), "Previous", class = "btn-sm", disabled = off),
+        shiny::actionButton(ns("view_next"), "Next", class = "btn-sm", disabled = off),
+        if (off) shiny::span(class = "text-muted small", "one page only until SAP lock")
+      )
+    })
+
+    refuse_paging <- function() {
+      notify("View: paging is off until SAP lock (the row count is hidden)", "warning")
+      shiny::updateNumericInput(session, "view_page", value = 1)
+    }
     shiny::observeEvent(input$view_prev, {
+      if (isTRUE(single_page())) return(refuse_paging())
       shiny::updateNumericInput(session, "view_page", value = max(1, (input$view_page %||% 1) - 1))
     })
     shiny::observeEvent(input$view_next, {
+      if (isTRUE(single_page())) return(refuse_paging())
       shiny::updateNumericInput(session, "view_page", value = (input$view_page %||% 1) + 1)
     })
 
@@ -661,8 +787,9 @@ mod_data_server <- function(id, project) {
       p <- project()
       t <- tbl()
       shiny::req(p, t)
-      h <- .sr_data_hidden_cols(p, t)
-      if (length(h)) shiny::p(class = "text-muted small", "outcome columns hidden until SAP lock")
+      if (.sr_data_any_hidden(.sr_data_hidden_cols(p, t))) {
+        shiny::p(class = "text-muted small", "outcome columns hidden until SAP lock")
+      }
     })
 
     output$viewer <- DT::renderDT({
@@ -670,11 +797,14 @@ mod_data_server <- function(id, project) {
       t <- tbl()
       shiny::req(p, t)
       hidden <- .sr_data_hidden_cols(p, t)
+      if (.SR_DATA_ALL %in% hidden) {      # cannot tell the outcome columns: show none of the data
+        return(.sr_data_dt(data.frame(note = "columns hidden until SAP lock", stringsAsFactors = FALSE)))
+      }
       cols <- view_cols()
       size <- suppressWarnings(as.integer(input$view_size %||% 25L))
       if (is.na(size) || size < 1L) size <- 25L
       page <- suppressWarnings(as.integer(input$view_page %||% 1L))
-      if (is.na(page) || page < 1L) page <- 1L
+      if (is.na(page) || page < 1L || isTRUE(single_page())) page <- 1L
       ord <- .sr_data_text(input$view_order)
       if (!nzchar(ord) || !(ord %in% cols)) ord <- utils::head(cols, 1L)    # never an outcome column while blind
       df <- .sr_data_try("View", function() {
@@ -785,8 +915,10 @@ mod_data_server <- function(id, project) {
       s <- tryCatch(sr_suggest(p, t), error = function(e) NULL)
       f <- findings()
       if (is.data.frame(s) && is.data.frame(f)) s$severity <- f$severity[match(s$finding_id, f$id)]
-      s
+      .sr_data_sort_suggestions(s)
     })
+
+    shiny::observeEvent(tbl(), shiny::updateNumericInput(session, "sug_page", value = 1), ignoreInit = TRUE)
 
     output$suggestions_ui <- shiny::renderUI({
       p <- project()
@@ -794,8 +926,15 @@ mod_data_server <- function(id, project) {
       if (is.null(p) || is.null(s) || !nrow(s)) {
         return(shiny::p(class = "text-muted small", "No findings to decide yet. Run the DQ checks first."))
       }
-      cap <- 200L
-      shown <- utils::head(s, cap)
+      per <- .SR_DATA_SUGGEST_PAGE
+      n <- nrow(s)
+      npages <- max(1L, as.integer(ceiling(n / per)))
+      pg <- suppressWarnings(as.integer(input$sug_page %||% 1L))
+      if (is.na(pg) || pg < 1L) pg <- 1L
+      pg <- min(pg, npages)
+      from <- (pg - 1L) * per + 1L
+      to <- min(n, pg * per)
+      shown <- s[from:to, , drop = FALSE]
       rows <- lapply(seq_len(nrow(shown)), function(i) {
         id <- shown$finding_id[i]
         done <- p$state$actions[[id]]
@@ -816,7 +955,8 @@ mod_data_server <- function(id, project) {
         )
       })
       shiny::tagList(
-        if (nrow(s) > cap) shiny::p(class = "small text-muted", sprintf("Showing the first %d of %d findings.", cap, nrow(s))),
+        shiny::p(class = "small text-muted",
+                 sprintf("showing %d-%d of %d findings, most severe first (page %d of %d)", from, to, n, pg, npages)),
         shiny::tags$table(
           class = "table table-sm align-middle",
           shiny::tags$thead(shiny::tags$tr(shiny::tags$th("Severity"), shiny::tags$th("Finding"),

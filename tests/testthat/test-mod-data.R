@@ -416,3 +416,183 @@ test_that("Cancel with no import running only says so", {
     expect_match(seen$msg, "No import", fixed = TRUE)
   })
 })
+
+# ---- fix round 1 -------------------------------------------------------------------------------------
+
+# Replace the global function `name` for the rest of the test; returns the original.
+.md_stub_global <- function(name, fn, env = parent.frame()) {
+  old <- get(name, envir = globalenv())
+  assign(name, fn, envir = globalenv())
+  withr::defer(assign(name, old, envir = globalenv()), envir = env)
+  invisible(old)
+}
+
+# A recipe step that drops outcome-dependent cases: the flow then has a hidden count while blind.
+.md_outcome_step <- function() {
+  list(op = "drop_cases", reason = "deliberate",
+       args = list(where = list(col = "mortality_30d", op = "==", value = 1), confirm_outcome_dependent = TRUE))
+}
+
+# Run the event loop until `done()` is TRUE or `secs` pass.
+.md_wait <- function(done, session, secs = 90) {
+  t0 <- Sys.time()
+  while (!done() && as.numeric(difftime(Sys.time(), t0, units = "secs")) < secs) {
+    later::run_now(0.2)
+    session$flushReact()
+  }
+  invisible(done())
+}
+
+test_that("the raw-file preview hides outcome columns of any table while blind", {
+  rv0 <- .md_rv()                                          # no roles yet: nothing is known to hide
+  csv0 <- .md_csv(shiny::isolate(rv0()), n = 100L, name = "again.csv")
+  shiny::testServer(mod_data_server, args = list(project = rv0), {
+    session$setInputs(path = csv0)
+    expect_match(output$preview, "mortality_30d", fixed = TRUE)
+  })
+  rv <- .md_rv(roles = TRUE)
+  csv <- .md_csv(shiny::isolate(rv()), n = 100L, name = "again2.csv")
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(path = csv)
+    expect_match(output$preview, "patient_id", fixed = TRUE)
+    expect_false(grepl("mortality_30d", output$preview, fixed = TRUE))
+    expect_match(paste(output$preview_note$html), "outcome columns hidden until SAP lock", fixed = TRUE)
+    p <- rv()
+    p$state$sap <- list(locked = TRUE)
+    rv(p)
+    session$flushReact()
+    expect_match(output$preview, "mortality_30d", fixed = TRUE)
+    expect_false(any(grepl("outcome columns hidden", paste(output$preview_note$html), fixed = TRUE)))
+  })
+})
+
+test_that("suggestions are ordered block first and paged, so a block finding past 200 can be decided", {
+  n <- 250L
+  ids <- sprintf("f%03d", seq_len(n))
+  sev <- c(rep("warn", 20L), rep("block", n - 20L))        # the blocks come late in finding order
+  cols <- sprintf("c%03d", seq_len(n))
+  fake_f <- data.frame(id = ids, check = "range", domain = "plausibility", column = cols, severity = sev,
+                       n_affected = 1, message = "m", stringsAsFactors = FALSE)
+  fake_s <- data.frame(finding_id = ids, check = "range", column = cols, action = "recheck", reason = "r",
+                       stringsAsFactors = FALSE)
+  fake_s$proposed_step <- vector("list", n)
+  .md_stub_global("sr_dq_findings", function(project, table) fake_f)
+  .md_stub_global("sr_suggest", function(project, table) fake_s)
+  decided <- new.env()
+  decided$id <- character()
+  .md_stub_global("sr_action_decide", function(project, finding_id, action, reason = NULL, step = NULL,
+                                               table = NULL) {
+    decided$id <- c(decided$id, finding_id)
+    project
+  })
+  rv <- .md_rv()
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(table = "cardiac", sug_page = 1)
+    html <- paste(output$suggestions_ui$html)
+    expect_match(html, "showing 1-50 of 250", fixed = TRUE)
+    expect_match(html, "f021", fixed = TRUE)               # the first block
+    expect_false(grepl("f001", html, fixed = TRUE))        # warns sort after the blocks
+    session$setInputs(sug_page = 5)
+    html <- paste(output$suggestions_ui$html)
+    expect_match(html, "showing 201-250 of 250", fixed = TRUE)
+    expect_match(html, "f250", fixed = TRUE)               # block number 230 of 230
+    do.call(session$setInputs, .md_decide("f250", "recheck", "to be checked"))
+    expect_identical(decided$id, "f250")
+  })
+})
+
+test_that("a finished import leaves a different open project alone and says where it finished", {
+  skip_if_not_installed("mirai")
+  skip_if_not_installed("later")
+  withr::local_options(sr.ingest_sync = FALSE)
+  seen <- .md_spy_notify()
+  a <- .fx_project()
+  csv <- .md_csv(a, n = 200L)
+  b <- .fx_project()
+  rv <- shiny::reactiveVal(a)
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(path = csv, import = 1)
+    expect_true(job$busy)
+    ro <- shiny::isolate(rv())
+    expect_true(ro$readonly)                                # no lock is held while the worker runs
+    expect_error(sr_project_append(ro, "roles.set", list()), "read-only", fixed = TRUE)
+    rv(b)                                                   # the user opens another project meanwhile
+    session$flushReact()
+    .md_wait(function() !isTRUE(job$busy), session)
+    expect_false(job$busy)
+    cur <- shiny::isolate(rv())
+    expect_identical(cur$paths$dir, b$paths$dir)
+    expect_false(cur$readonly)
+    expect_true(file.exists(b$paths$lock))                  # the lock of the open project is untouched
+    expect_true(any(grepl("import finished in fixture", seen$msg, ignore.case = TRUE)))
+    q <- sr_project_open(a$paths$dir)
+    withr::defer(sr_project_close(q))
+    expect_false(q$readonly)                                # the worker released the first project
+    expect_equal(q$state$tables$cardiac$store$rows, 200)
+  })
+})
+
+test_that("while row counts are hidden the viewer is one page and paging is refused", {
+  seen <- .md_spy_notify()
+  rv <- .md_rv(roles = TRUE)
+  rv(sr_recipe_add(shiny::isolate(rv()), "cardiac", .md_outcome_step()))
+  rec <- new.env()
+  rec$offset <- numeric()
+  orig <- get("sr_table_page", envir = globalenv())
+  .md_stub_global("sr_table_page", function(project, table, offset, limit, ...) {
+    rec$offset <- c(rec$offset, offset)
+    orig(project, table, offset, limit, ...)
+  })
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(table = "cardiac", view_size = 25, view_page = 3)
+    expect_match(output$viewer, "patient_id", fixed = TRUE)
+    expect_true(length(rec$offset) >= 1L)
+    expect_true(all(rec$offset == 0))                       # page 3 was clamped to page 1
+    expect_match(paste(output$view_nav$html), "disabled", fixed = TRUE)
+    session$setInputs(view_next = 1)
+    expect_true(any(grepl("paging", seen$msg, ignore.case = TRUE)))
+  })
+})
+
+test_that("an error in a blind check hides the columns and the count instead of showing them", {
+  rv <- .md_rv(roles = TRUE)
+  csv <- .md_csv(shiny::isolate(rv()), n = 100L, name = "closed.csv")
+  .md_stub_global("sr_role_cols", function(...) stop("boom", call. = FALSE))
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(table = "cardiac", view_size = 25, view_page = 1, path = csv)
+    expect_false(grepl("patient_id", output$viewer, fixed = TRUE))
+    expect_false(grepl("mortality_30d", output$viewer, fixed = TRUE))
+    expect_match(paste(output$view_note$html), "outcome columns hidden until SAP lock", fixed = TRUE)
+    expect_false(grepl("patient_id", output$preview, fixed = TRUE))
+  })
+  rv2 <- .md_rv(roles = TRUE)
+  .md_stub_global("sr_flow", function(...) stop("boom", call. = FALSE))
+  shiny::testServer(mod_data_server, args = list(project = rv2), {
+    expect_match(paste(output$tables_list$html), "hidden until SAP lock", fixed = TRUE)
+    expect_false(grepl(">600<", paste(output$tables_list$html), fixed = TRUE))
+  })
+  expect_true(.sr_data_rows_hidden(shiny::isolate(rv2()), "cardiac"))
+})
+
+test_that("ending the session during an import cancels it and removes the progress file", {
+  skip_if_not_installed("mirai")
+  skip_if_not_installed("later")
+  withr::local_options(sr.ingest_sync = FALSE)
+  a <- .fx_project()
+  csv <- .md_csv(a, n = 200L)
+  rv <- shiny::reactiveVal(a)
+  shiny::testServer(mod_data_server, args = list(project = rv), {
+    session$setInputs(path = csv, import = 1)
+    prog <- job$progress
+    canc <- job$cancel
+    expect_true(is.character(prog))
+    session$close()
+    expect_true(file.exists(canc))
+    expect_false(file.exists(prog))
+    # the worker removes the cancel file itself when it is done, after it has released the project
+    t0 <- Sys.time()
+    while (file.exists(canc) && as.numeric(difftime(Sys.time(), t0, units = "secs")) < 90) later::run_now(0.2)
+    expect_false(file.exists(canc))
+    expect_false(file.exists(a$paths$lock))
+  })
+})
