@@ -771,3 +771,54 @@ test_that("invalid UTF-8 inside a Parquet or Feather file is refused with the co
   expect_match(err, "memo")
   expect_false(dir.exists(sr_store_dir(p, "bf")))
 })
+
+# ---- M5: a double kept as text reads back exactly through DuckDB's own parser --------------------------------
+
+test_that("a double kept as text in a mixed JSON column reads back exactly through DuckDB (M5)", {
+  p <- .cg_project()
+  dir.create(.cg_dir(p), recursive = TRUE)
+  # R's parser reads the 15/16-digit forms of these back as the same double; DuckDB's does not
+  y <- c(-0.62910206698387094, -0.25256787105878997, 2.1166287381128708, 0.45726138365887947, 0.1, 1.5)
+  f <- file.path(.cg_dir(p), "mix.ndjson")
+  .cg_write_lines(c('{"id":0,"v":"text"}', sprintf('{"id":%d,"v":%s}', seq_along(y), sprintf("%.17g", y))), f)
+  p <- .cg_ing(p, f, table = "mx")
+  expect_identical(.cg_schema(p, "mx")[["v"]], "VARCHAR")
+  sr_store_view(p, "mx")
+  got <- sr_duck_query(sr_duck(p), 'SELECT id, v, CAST(v AS DOUBLE) AS z FROM "mx" WHERE id > 0 ORDER BY id')
+  expect_identical(got$z, y)
+  expect_identical(got$v[5:6], c("0.1", "1.5"))   # the shortest text is kept where it reads back
+})
+
+test_that("the number text without a connection is exact (%.17g) for non-whole values", {
+  y <- c(-0.62910206698387094, 0.1, 3, NA, Inf)
+  expect_identical(.sr_json_numtext(y), c(sprintf("%.17g", y[1:2]), "3", NA, "Inf"))
+})
+
+# ---- M6: invalid UTF-8 inside nested columns ----------------------------------------------------------------
+
+test_that("invalid UTF-8 inside a nested list or struct column is refused with the column named (M6)", {
+  p <- .cg_project()
+  dir.create(.cg_dir(p), recursive = TRUE)
+  con <- sr_duck(p)
+  for (k in list(list(sel = "['ok', 'QQQQQQQQ'] AS tags", col = "tags", tb = "nl"),
+                 list(sel = "{'a': 'QQQQQQQQ', 'b': 1} AS info", col = "info", tb = "ns"))) {
+    pq <- file.path(.cg_dir(p), paste0(k$tb, ".parquet"))
+    DBI::dbExecute(con, sprintf("COPY (SELECT * FROM (SELECT 1 AS id, %s UNION ALL SELECT 2, NULL)) TO %s (FORMAT parquet, COMPRESSION uncompressed)",
+                                k$sel, DBI::dbQuoteString(con, pq)))
+    .cg_patch_q(pq)
+    err <- tryCatch({ .cg_ing(p, pq, table = k$tb); "installed" }, error = function(e) conditionMessage(e))
+    expect_match(err, "UTF-8")
+    expect_match(err, k$col)
+    expect_false(dir.exists(sr_store_dir(p, k$tb)))
+  }
+  skip_if_not_installed("arrow")
+  fe <- file.path(.cg_dir(p), "nested.feather")
+  df <- data.frame(id = 1:2)
+  df$tags <- list(c("ok", "QQQQQQQQ"), "other")
+  arrow::write_feather(df, fe, compression = "uncompressed")
+  .cg_patch_q(fe)
+  err <- tryCatch({ .cg_ing(p, fe, table = "nf"); "installed" }, error = function(e) conditionMessage(e))
+  expect_match(err, "UTF-8")
+  expect_match(err, "tags")
+  expect_false(dir.exists(sr_store_dir(p, "nf")))
+})

@@ -266,3 +266,14 @@ test_that("a copied project folder with an in-project source reopens with status
   unlink(st$path)
   expect_identical(sr_source_status(q, "t")$status, "missing")
 })
+
+test_that("sr_source_hash on a read-only project refuses before hashing anything (M9)", {
+  p <- .ex_project()
+  csv <- .ex_csv()
+  p <- .ex_ingest(p, csv, "t")
+  ro <- p
+  ro$readonly <- TRUE
+  seen <- 0L
+  expect_error(sr_source_hash(ro, "t", progress = function(done, total) seen <<- seen + 1L), "read-only")
+  expect_identical(seen, 0L)
+})

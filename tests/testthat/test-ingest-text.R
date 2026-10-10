@@ -681,3 +681,66 @@ test_that("quoted NA and empty strings survive as text; unquoted NA and empty st
   d2 <- .ing_all(p, "nulls2")
   expect_true("NA" %in% d2$code)                                  # unquoted NA is a value under this nullstr
 })
+
+# ---- M3 / M4: the previous store and source copy are never lost ----------------------------------------------
+
+.ing_swap <- function(name, value, env = parent.frame()) {
+  orig <- get(name, envir = globalenv(), inherits = FALSE)
+  assign(name, value, envir = globalenv())
+  withr::defer(assign(name, orig, envir = globalenv()), envir = env)
+  invisible(orig)
+}
+
+test_that("a previous store left in replaced/ that cannot be put back stops the ingest and is kept (M3)", {
+  skip_if_not(.Platform$OS.type == "windows")      # an open file blocks a folder rename on Windows only
+  p <- .ing_project()
+  a <- file.path(dirname(p$paths$dir), "a.csv")
+  .ing_lines(c("id,x", "1,a", "2,b"), a)
+  p <- .ing(p, a, table = "tt")
+  d <- .ing_data(p)
+  store <- file.path(d, "store", "tt")
+  repl <- file.path(d, "ingest", "tt", "replaced")
+  nparts <- length(p$state$tables$tt$store$parts)
+  expect_true(file.rename(store, repl))            # a crash between the two renames of an install
+  h <- file(file.path(repl, "manifest.json"), "rb")   # an open file (an AV scan) blocks putting it back
+  withr::defer(try(close(h), silent = TRUE))
+  b <- file.path(dirname(p$paths$dir), "b.csv")
+  .ing_lines(c("id,x", "1,c"), b)
+  expect_error(suppressWarnings(.ing(p, b, table = "tt")), "replaced")
+  expect_true(file.exists(file.path(repl, "manifest.json")))
+  expect_length(list.files(repl, pattern = "[.]parquet$"), nparts)
+  # with the file closed, the next ingest puts the old store back first and then replaces it
+  close(h)
+  p <- suppressWarnings(.ing(p, b, table = "tt"))
+  expect_equal(p$state$tables$tt$store$rows, 1)
+  expect_false(dir.exists(repl))
+})
+
+test_that("a source copy that cannot be installed leaves the store, the old copy and state as they were (M4)", {
+  p <- .ing_project()
+  a <- file.path(dirname(p$paths$dir), "a.csv")
+  .ing_lines(c("id,x", "1,a", "2,b"), a)
+  p <- .ing(p, a, table = "tt")
+  d <- .ing_data(p)
+  old_src <- file.path(d, "source", "tt.csv")
+  old_sha <- sr_sha256_file(old_src)
+  old_hash <- p$state$tables$tt$store_hash
+  n0 <- length(sr_events_read(p$paths$events))
+  b <- file.path(dirname(p$paths$dir), "b.csv")
+  .ing_lines(c("id,x", "1,c"), b)
+  real <- .ing_swap(".sr_rename_retry", NULL)
+  assign(".sr_rename_retry", function(from, to, tries = 5L) {
+    if (startsWith(basename(from), "copy.") && basename(dirname(to)) == "source") stop("cannot move (test)", call. = FALSE)
+    real(from, to, tries)
+  }, envir = globalenv())
+  expect_error(suppressWarnings(.ing(p, b, table = "tt")), "test")
+  expect_identical(sr_sha256_file(old_src), old_sha)
+  expect_identical(sr_store_hash(sr_store_manifest(p, "tt")), old_hash)
+  expect_length(sr_events_read(p$paths$events), n0)
+  # a failed store install puts the old source copy back as well
+  assign(".sr_rename_retry", real, envir = globalenv())
+  .ing_swap(".sr_store_install", function(ck, manifest) stop("install failed (test)", call. = FALSE))
+  expect_error(suppressWarnings(.ing(p, b, table = "tt")), "test")
+  expect_identical(sr_sha256_file(old_src), old_sha)
+  expect_length(sr_events_read(p$paths$events), n0)
+})

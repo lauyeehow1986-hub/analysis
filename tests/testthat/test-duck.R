@@ -315,3 +315,13 @@ test_that("the guard validates its input", {
   expect_error(.sr_duck_guard("SELECT 'open"), "refused")        # unterminated quote: not guessable
   expect_error(.sr_duck_guard("SELECT 1 /* open"), "refused")    # unterminated comment
 })
+
+test_that("UPDATE EXTENSIONS is refused; an ordinary UPDATE is not (M7)", {
+  expect_true(.refused("UPDATE EXTENSIONS"))
+  expect_true(.refused("update extensions (httpfs)"))
+  expect_true(.refused("EXPLAIN UPDATE EXTENSIONS"))
+  expect_true(.refused("SELECT 1; UPDATE /* x */ EXTENSIONS;"))
+  expect_false(.refused("UPDATE t SET x = 1"))
+  expect_false(.refused("UPDATE \"extensions\" SET x = 1"))
+  expect_false(.refused("UPDATE extensions_log SET x = 1"))
+})

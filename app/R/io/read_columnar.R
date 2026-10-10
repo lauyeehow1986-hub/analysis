@@ -53,14 +53,19 @@
   invisible(TRUE)
 }
 
-# The first VARCHAR column of `from` (a table expression) that holds text which is not valid UTF-8, else
-# NULL. One pass over all the text columns; only on a failure is each column tried on its own.
+# The first text column of `from` (a table expression) that holds text which is not valid UTF-8, else
+# NULL. Text columns are VARCHAR and the nested ones with VARCHAR inside (VARCHAR[], STRUCT, MAP), read in
+# full through a cast to VARCHAR. One pass over all of them; only on a failure is each column tried on its own.
 .sr_col_bad_utf8 <- function(con, from) {
   d <- sr_duck_query(con, paste("DESCRIBE SELECT * FROM", from))
-  nm <- as.character(d$column_name)[as.character(d$column_type) == "VARCHAR"]
+  ty <- as.character(d$column_type)
+  txt <- grepl("VARCHAR", ty, fixed = TRUE)
+  nm <- as.character(d$column_name)[txt]
   if (!length(nm)) return(NULL)
+  nested <- stats::setNames(ty[txt] != "VARCHAR", nm)
   probe <- function(cols) {
     q <- DBI::dbQuoteIdentifier(con, cols)
+    q <- ifelse(nested[cols], paste0("CAST(", q, " AS VARCHAR)"), q)
     tryCatch({
       sr_duck_query(con, sprintf("SELECT %s FROM %s", paste0("max(length(", q, "))", collapse = ", "), from))
       TRUE
@@ -417,9 +422,11 @@
     "VARCHAR")
 }
 
-# Numbers as text that parses back to the same double: whole numbers below 1e15 as digits, else the
-# shortest of %.15g / %.16g / %.17g that round-trips.
-.sr_json_numtext <- function(x) {
+# Numbers as text that DuckDB (the parser that will read them, e.g. in a recipe cast) parses back to the
+# same double: whole numbers below 1e15 as digits, else %.17g (always exact), or the shorter %.16g /
+# %.15g where DuckDB's CAST(text AS DOUBLE) on `con` gives the same double. R's own parser is not the
+# check: for about 1 in 10,000 doubles it accepts a short form that DuckDB reads 1 ulp away.
+.sr_json_numtext <- function(x, con = NULL) {
   out <- character(length(x))
   fin <- is.finite(x)
   whole <- fin & x == trunc(x) & abs(x) < 1e15
@@ -429,12 +436,17 @@
     y <- x[rest]
     s <- as.character(y)
     f <- is.finite(y)
-    s[f] <- sprintf("%.15g", y[f])
-    for (d in 16:17) {
-      bad <- f & as.numeric(s) != y
-      bad[is.na(bad)] <- FALSE
-      if (!any(bad)) break
-      s[bad] <- sprintf(paste0("%.", d, "g"), y[bad])
+    s[f] <- sprintf("%.17g", y[f])
+    if (!is.null(con) && any(f)) {
+      for (d in 16:15) {
+        cand <- sprintf(paste0("%.", d, "g"), y)
+        try_i <- which(f & nchar(cand) < nchar(s))
+        if (!length(try_i)) next
+        ok <- .sr_col_with_reg(con, data.frame(i = try_i, s = cand[try_i], y = y[try_i]), function(from) {
+          sr_duck_query(con, sprintf("SELECT i FROM %s WHERE TRY_CAST(s AS DOUBLE) = y", from))$i
+        })
+        s[ok] <- cand[ok]
+      }
     }
     out[rest] <- s
   }
@@ -442,7 +454,7 @@
 }
 
 # The values as an R vector for the column type (they were checked to fit). `s` is the column scan.
-.sr_json_conv <- function(vals, type, s) {
+.sr_json_conv <- function(vals, type, s, con = NULL) {
   n <- length(vals)
   tp <- s$tp
   switch(type,
@@ -467,7 +479,7 @@
       ii <- tp == "integer"
       if (any(ii)) out[ii] <- as.character(unlist(vals[ii], use.names = FALSE))
       id <- tp == "double"
-      if (any(id)) out[id] <- .sr_json_numtext(unlist(vals[id], use.names = FALSE))
+      if (any(id)) out[id] <- .sr_json_numtext(unlist(vals[id], use.names = FALSE), con)
       out
     })
 }
@@ -544,7 +556,7 @@
     if (length(widen) || length(added)) stop(.sr_json_conflict(widen, added))
   }
   cols <- ck$columns
-  lst <- lapply(cols, function(cl) .sr_json_conv(vl[[cl$name]], cl$type, sc[[cl$name]]))
+  lst <- lapply(cols, function(cl) .sr_json_conv(vl[[cl$name]], cl$type, sc[[cl$name]], con))
   rm(vl)
   names(lst) <- vapply(cols, function(cl) cl$name, "")
   n <- length(flat)

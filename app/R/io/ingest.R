@@ -163,6 +163,7 @@ sr_table_name <- function(path, existing = character()) {
     }
   }
   old <- file.path(ck$ingest_dir, "replaced")
+  .sr_store_replaced_check(ck)
   if (dir.exists(old)) unlink(old, recursive = TRUE)
   parent <- dirname(ck$final_dir)
   if (!dir.exists(parent) && !isTRUE(dir.create(parent, recursive = TRUE, showWarnings = FALSE))) {
@@ -171,21 +172,45 @@ sr_table_name <- function(path, existing = character()) {
   had <- dir.exists(ck$final_dir)
   if (had) .sr_rename_retry(ck$final_dir, old)
   tryCatch(.sr_rename_retry(ck$store_dir, ck$final_dir), error = function(e) {
-    if (had) file.rename(old, ck$final_dir)
+    if (had) {
+      tryCatch(.sr_rename_retry(old, ck$final_dir), error = function(e2) {
+        stop(conditionMessage(e), "; and the previous store could not be put back: ", .sr_store_replaced_msg(ck),
+             call. = FALSE)
+      })
+    }
     stop(e)
   })
   if (had) unlink(old, recursive = TRUE)
   invisible(m)
 }
 
+.sr_store_replaced_msg <- function(ck) {
+  sprintf("it is in data/ingest/%s/replaced; move that folder to data/store/%s (nothing else may be there) and try again",
+          ck$table, ck$table)
+}
+
+# Refuse to go on (and so to clear data/ingest/<table>) while the only copy of the previous store is in
+# data/ingest/<table>/replaced: a crash between the two renames of .sr_store_install that could not be
+# put back by .sr_store_recover.
+.sr_store_replaced_check <- function(ck) {
+  if (file.exists(file.path(ck$ingest_dir, "replaced", "manifest.json")) && !dir.exists(ck$final_dir)) {
+    stop("the previous store of table '", ck$table, "' was not put back: ", .sr_store_replaced_msg(ck), call. = FALSE)
+  }
+  invisible(ck)
+}
+
 # A crash between the two renames of .sr_store_install leaves the previous table in
-# data/ingest/<table>/replaced and nothing in data/store/<table>: put it back.
+# data/ingest/<table>/replaced and nothing in data/store/<table>: put it back. A rename that fails (an
+# AV-held file, something in the way) stops here, before anything under data/ingest/<table> is cleared.
 .sr_store_recover <- function(ck) {
   old <- file.path(ck$ingest_dir, "replaced")
   if (!dir.exists(ck$final_dir) && file.exists(file.path(old, "manifest.json"))) {
     parent <- dirname(ck$final_dir)
     if (!dir.exists(parent)) dir.create(parent, recursive = TRUE, showWarnings = FALSE)
-    file.rename(old, ck$final_dir)
+    tryCatch(.sr_rename_retry(old, ck$final_dir), error = function(e) {
+      stop("the previous store of table '", ck$table, "' could not be put back (", conditionMessage(e), "): ",
+           .sr_store_replaced_msg(ck), call. = FALSE)
+    })
   }
   invisible(ck)
 }
@@ -403,6 +428,7 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   sniff_hash <- .sr_ingest_sniff_hash(sniff, options)
   ck <- .sr_ck_new(project, table, fp, sniff_hash, as.numeric(chunk_bytes))
   .sr_store_recover(ck)
+  .sr_source_restore(data, table, file.path(ck$ingest_dir, "source_old"))   # a crash mid source install
 
   # resume a valid checkpoint, else start fresh. The table's existing store (data/store/<table>) is
   # not touched until the new one is complete: everything is built under data/ingest/<table>.
@@ -421,7 +447,10 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
       }
     }
   }
-  if (!resumed) .sr_clear_dir(ck$ingest_dir)
+  if (!resumed) {
+    .sr_store_replaced_check(ck)          # never clear the only copy of the previous store
+    .sr_clear_dir(ck$ingest_dir)
+  }
   for (d in c(ck$ingest_dir, ck$store_dir)) {
     if (!dir.exists(d) && !isTRUE(dir.create(d, recursive = TRUE, showWarnings = FALSE))) {
       stop("cannot create directory: ", d, call. = FALSE)
@@ -457,9 +486,18 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
   # verified manifest, swap into data/store, the source copy into data/source, checkpoint done, event
   parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
   rows <- sum(vapply(parts, function(p) p$rows, numeric(1)))
-  manifest <- .sr_store_install(ck, list(table = table, parts = parts, schema = res$schema, rows = rows))
+  # the source copy first (the old copies moved aside), then the store; a failure of either puts the old
+  # copies back, so nothing on disk is ahead of state until both are in place and the event is next
+  aside <- file.path(ck$ingest_dir, "source_old")
+  if (!external) .sr_source_install(data, table, copy, rel, aside)
+  manifest <- tryCatch(
+    .sr_store_install(ck, list(table = table, parts = parts, schema = res$schema, rows = rows)),
+    error = function(e) {
+      if (!external) .sr_source_restore(data, table, aside, copy = copy, rel = rel)
+      stop(e)
+    })
   store_hash <- sr_store_hash(manifest)
-  if (!external) .sr_source_install(data, table, copy, rel)
+  if (!external) unlink(aside, recursive = TRUE)
   ck$done <- TRUE
   .sr_ck_write(ck)
   unlink(file.path(ck$ingest_dir, c("source.csv", "chunk.csv")))
@@ -535,15 +573,49 @@ sr_ingest <- function(project, path, table = sr_table_name(path), sniff = sr_sni
 }
 
 # Move the staged source copy to data/source/<table>.<ext>, replacing the previous copy (and any
-# other data/source/<table>.* left by an earlier ingest with a different extension).
-.sr_source_install <- function(data, table, copy, rel) {
+# other data/source/<table>.* left by an earlier ingest with a different extension). The previous copies
+# are first moved into `aside` (data/ingest/<table>/source_old, created even when there are none); a
+# failure puts them back. The caller deletes `aside` once the store is installed, or calls
+# .sr_source_restore when the store install fails.
+.sr_source_install <- function(data, table, copy, rel, aside) {
   src_dir <- file.path(data, "source")
   if (!dir.exists(src_dir) && !isTRUE(dir.create(src_dir, recursive = TRUE, showWarnings = FALSE))) {
     stop("cannot create directory: ", src_dir, call. = FALSE)
   }
-  unlink(list.files(src_dir, pattern = paste0("^", table, "[.]"), full.names = TRUE))
-  .sr_rename_retry(copy, file.path(src_dir, basename(rel)))
+  .sr_source_restore(data, table, aside)
+  if (!isTRUE(dir.create(aside, recursive = TRUE, showWarnings = FALSE)) && !dir.exists(aside)) {
+    stop("cannot create directory: ", aside, call. = FALSE)
+  }
+  tryCatch({
+    for (f in list.files(src_dir, pattern = paste0("^", table, "[.]"), full.names = TRUE)) {
+      .sr_rename_retry(f, file.path(aside, basename(f)))
+    }
+    .sr_rename_retry(copy, file.path(src_dir, basename(rel)))
+  }, error = function(e) {
+    .sr_source_restore(data, table, aside, copy = copy, rel = rel)
+    stop(e)
+  })
   invisible(rel)
+}
+
+# Put back the source copies moved into `aside` by .sr_source_install. The new copy (data/source/<name of
+# rel>, or a file there with the name of an old copy) is moved back to the staged `copy` when that is gone,
+# so a resume need not copy it again, else deleted; any other data/source/<table>.* is an old copy not yet
+# moved aside and stays. Then the old copies return and `aside` goes. No-op without `aside`. Also run before
+# an ingest starts: a crash between the source install and the event leaves `aside` behind.
+.sr_source_restore <- function(data, table, aside, copy = NULL, rel = NULL) {
+  if (!dir.exists(aside)) return(invisible(FALSE))
+  src_dir <- file.path(data, "source")
+  olds <- list.files(aside)
+  new_names <- unique(c(olds, if (!is.null(rel)) basename(rel)))
+  for (nm in new_names) {
+    f <- file.path(src_dir, nm)
+    if (!file.exists(f)) next
+    if (!is.null(copy) && !file.exists(copy)) .sr_rename_retry(f, copy) else unlink(f)
+  }
+  for (nm in olds) .sr_rename_retry(file.path(aside, nm), file.path(src_dir, nm))
+  unlink(aside, recursive = TRUE)
+  invisible(TRUE)
 }
 
 # `data.imported` sets the table's entry. Keys the payload does not carry survive (a later task adds
@@ -675,6 +747,7 @@ sr_source_relocate <- function(project, table, new_path) {
 #' already known (computed when it was copied in) is not hashed again: the project is returned
 #' unchanged.
 sr_source_hash <- function(project, table, progress = NULL) {
+  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)   # before hours of hashing
   if (is.character(table) && length(table) == 1L && !is.na(table) && .sr_is_derived(project$state$tables[[table]])) {
     return(project)                      # derived (join or recipe): no source to hash
   }

@@ -280,6 +280,10 @@ sr_duck_close <- function(project) {
            " statement is not allowed in application SQL (allowlist: ",
            paste(.sr_duck_allowed, collapse = " "), ")", call. = FALSE)
     }
+    # UPDATE is allowed for tables, but UPDATE EXTENSIONS reaches the extension repository
+    if (grepl("^UPDATE[[:space:]]+EXTENSIONS(?![A-Za-z0-9_$])", body, ignore.case = TRUE, perl = TRUE)) {
+      stop("refused: UPDATE EXTENSIONS is not allowed (extensions are locked down; air-gap)", call. = FALSE)
+    }
   }
   if (seen == 0L) stop("refused: no SQL statement", call. = FALSE)
   inst <- "(?<![A-Za-z0-9_])INSTALL(?![A-Za-z0-9_])"
