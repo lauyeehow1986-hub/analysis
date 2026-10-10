@@ -568,13 +568,13 @@ sr_reducer_register("data.imported", function(state, event) {
 # project dir, so a copied or moved project folder keeps working.
 
 # A table made by a join (join.R) has no source file: it is derived from two other tables.
-.sr_is_derived <- function(entry) is.list(entry) && identical(entry$format, "join")
+.sr_is_derived <- function(entry) is.list(entry) && isTRUE(entry$format %in% c("join", "recipe"))
 
 # The table's entry in state, or an error naming the table.
 .sr_ext_entry <- function(project, table) {
   if (!is.character(table) || length(table) != 1L || is.na(table)) stop("table must be a single string", call. = FALSE)
   e <- project$state$tables[[table]]
-  if (.sr_is_derived(e)) stop("table '", table, "' is derived by a join and has no source file", call. = FALSE)
+  if (.sr_is_derived(e)) stop("table '", table, "' is derived by a ", e$format, " from other tables and has no source file", call. = FALSE)
   if (is.null(e) || !is.list(e$source)) stop("unknown table: ", table, call. = FALSE)
   e
 }
@@ -616,7 +616,7 @@ sr_reducer_register("data.imported", function(state, event) {
 sr_source_status <- function(project, table) {
   if (is.character(table) && length(table) == 1L && !is.na(table) && .sr_is_derived(project$state$tables[[table]])) {
     return(list(status = "derived", path = NA_character_,
-                detail = "derived by a join of other tables; it has no source file"))
+                detail = paste0("derived by a ", project$state$tables[[table]]$format, " of other tables; it has no source file")))
   }
   entry <- .sr_ext_entry(project, table)
   path <- .sr_ext_path(project, entry)
@@ -676,7 +676,7 @@ sr_source_relocate <- function(project, table, new_path) {
 #' unchanged.
 sr_source_hash <- function(project, table, progress = NULL) {
   if (is.character(table) && length(table) == 1L && !is.na(table) && .sr_is_derived(project$state$tables[[table]])) {
-    return(project)                      # derived by a join: no source to hash
+    return(project)                      # derived (join or recipe): no source to hash
   }
   entry <- .sr_ext_entry(project, table)
   external <- isTRUE(entry$source$external)
