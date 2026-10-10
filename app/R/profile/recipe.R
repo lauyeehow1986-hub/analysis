@@ -409,7 +409,8 @@ sr_recipe_steps <- function(project, branch = NULL) {
 
 # ---- the chain --------------------------------------------------------------------------------------
 
-# Compile `steps` over store table `table`: list(sql, layers, cols, src). Each layer is
+# Compile `steps` over store table `table`: list(sql, chain, layers, cols, src); `chain` is the WITH clause
+# alone ("" for no step). Each layer is
 # list(id, op, prev, name, changed, nulls) with the quoted names of the layer before and of itself.
 .sr_rc_compile <- function(project, table, steps) {
   con <- sr_duck(project)
@@ -434,12 +435,9 @@ sr_recipe_steps <- function(project, branch = NULL) {
     cols <- L$cols
     types <- L$types
   }
-  sql <- if (length(ctes)) {
-    paste0("WITH ", paste(ctes, collapse = ",\n"), "\nSELECT * FROM ", prev)
-  } else {
-    paste0("SELECT * FROM ", src)
-  }
-  list(sql = sql, layers = layers, cols = cols, src = src)
+  chain <- if (length(ctes)) paste0("WITH ", paste(ctes, collapse = ",\n")) else ""
+  sql <- if (length(ctes)) paste0(chain, "\nSELECT * FROM ", prev) else paste0("SELECT * FROM ", src)
+  list(sql = sql, chain = chain, layers = layers, cols = cols, src = src)
 }
 
 # The compile of the current branch's active steps over `table`, after checking the table and the branch.
@@ -605,7 +603,7 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
   }
   sr_store_view(project, table)
   con <- sr_duck(project)
-  if (replace) try(sr_duck_exec(con, paste("DROP VIEW IF EXISTS", .sr_rc_q(con, into))), silent = TRUE)
+  if (replace) sr_duck_exec(con, paste("DROP VIEW IF EXISTS", .sr_rc_q(con, into)))   # a stale view over the old parquet
   ck <- .sr_ck_new(project, into, NULL, NULL, 0)
   if (!isTRUE(dir.create(ck$store_dir, recursive = TRUE, showWarnings = FALSE))) {
     stop("cannot create directory: ", ck$store_dir, call. = FALSE)
@@ -624,10 +622,44 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
     steps = cur$steps, store_hash = store_hash,
     store = list(dir = paste0("data/store/", into), rows = rows, ncol = length(schema), schema = schema,
                  parts = parts))
-  tryCatch(sr_project_append(project, "recipe.applied", payload), error = function(e) {
+  out <- tryCatch(sr_project_append(project, "recipe.applied", payload), error = function(e) {
     if (!replace) unlink(sr_store_dir(project, into), recursive = TRUE)   # no event: do not leave the table behind
     stop(e)
   })
+  .sr_rc_carry(out, table, into, cur$steps)
+}
+
+# Apply the renames and drops of `steps`, in order, to a vector named by columns (roles) or by variables:
+# the names after the recipe, a dropped column removed.
+.sr_rc_carry_names <- function(x, steps) {
+  for (st in steps) {
+    col <- st$args[["col"]]
+    if (st$op == "drop_var") {
+      x <- x[names(x) != col]
+    } else if (st$op == "rename") {
+      names(x)[names(x) == col] <- st$args[["to"]]
+    }
+  }
+  x
+}
+
+# Give `into` the roles and the dictionary of `table` through the usual roles.set / dict.set events, with
+# the recipe's renames and drops applied (the checks at add time mean a role-assigned column is never renamed
+# and a protected one never dropped, so in practice only unprotected columns vanish). Both events replace the
+# whole map, so applying again over the same source leaves the same end state. A cast step does not touch the
+# `type` of a dictionary entry.
+.sr_rc_carry <- function(project, table, into, steps) {
+  roles <- .sr_rc_carry_names(sr_roles(project, table), steps)
+  if (length(roles) || length(sr_roles(project, into))) project <- sr_roles_set(project, into, roles)
+  d <- sr_dict_get(project, table)
+  if (!is.null(d)) {
+    kept <- .sr_rc_carry_names(stats::setNames(d$variable, d$variable), steps)   # names = new, values = old
+    d <- d[d$variable %in% unname(kept), , drop = FALSE]
+    d$variable <- names(kept)[match(d$variable, unname(kept))]
+    rownames(d) <- NULL
+    project <- sr_dict_set(project, into, d, "recipe")
+  }
+  project
 }
 
 # `recipe.applied` adds (or replaces) the clean table: format "recipe", no source file, derived from `table`.
@@ -664,7 +696,6 @@ sr_recipe_counts <- function(project, table) {
   if (!n) return(out)
   sr_store_view(project, table)
   con <- sr_duck(project)
-  chain <- sub("\nSELECT [*] FROM .*$", "", cur$sql)
   cnt <- function(from, where = NULL) {
     paste0("(SELECT count(*) FROM ", from, if (is.null(where)) "" else paste0(" WHERE ", where), ")")
   }
@@ -675,7 +706,7 @@ sr_recipe_counts <- function(project, table) {
              sprintf("%s AS c%d", if (is.null(L$changed)) "0" else cnt(L$prev, L$changed), i),
              sprintf("%s AS n%d", if (is.null(L$nulls)) "NULL" else cnt(L$prev, L$nulls), i))
   }
-  d <- sr_duck_query(con, paste0(chain, "\nSELECT ", paste(sel, collapse = ", ")))
+  d <- sr_duck_query(con, paste0(cur$chain, "\nSELECT ", paste(sel, collapse = ", ")))
   g <- function(k) as.numeric(d[[k]][1L])
   data.frame(step_id = vapply(cur$layers, function(L) L$id, ""),
              rows_before = vapply(seq_len(n), function(i) g(sprintf("r%d", i - 1L)), numeric(1)),

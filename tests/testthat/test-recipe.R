@@ -494,3 +494,73 @@ test_that("every filter a full DQ run emits compiles through sr_where_sql and ex
     }
   }
 })
+
+# ---- roles and dictionary reach the clean table -----------------------------------------------------
+
+.rc_drop_var_step <- function(col) .rc_step("drop_var", list(col = col), "r")
+
+test_that("apply carries the roles and the dictionary to the clean table", {
+  p <- .rc_cardiac()
+  p <- sr_roles_set(p, "cardiac", c(.rc_roles, notes = "covariate", bmi_copy = "covariate"))
+  src_dict <- sr_dict_get(p, "cardiac")
+  expect_true(all(c("notes", "lab_status") %in% src_dict$variable))
+  p <- sr_recipe_add(p, "cardiac", .rc_step("drop_var", list(col = "notes"), "free text"))
+  p <- sr_recipe_add(p, "cardiac", .rc_step("rename", list(col = "lab_status", to = "lab_state"), "name"))
+  p <- sr_recipe_apply(p, "cardiac")
+  r <- sr_roles(p, "cardiac_clean")
+  # (a) the study roles are the source's
+  expect_identical(r[["mortality_30d"]], "outcome")
+  expect_identical(r[["patient_id"]], "id")
+  expect_identical(sr_role_cols(p, "cardiac_clean", "outcome"), "mortality_30d")
+  # (b) a dropped column is gone from the roles and the dictionary; a renamed one has its new name
+  expect_false("notes" %in% names(r))
+  expect_true("bmi_copy" %in% names(r))
+  d <- sr_dict_get(p, "cardiac_clean")
+  expect_false("notes" %in% d$variable)
+  expect_false("lab_status" %in% d$variable)
+  expect_true("lab_state" %in% d$variable)
+  expect_identical(d$label[d$variable == "lab_state"], src_dict$label[src_dict$variable == "lab_status"])
+  # the source is untouched
+  expect_identical(sr_roles(p, "cardiac")[["notes"]], "covariate")
+  expect_true("notes" %in% sr_dict_get(p, "cardiac")$variable)
+  # (c) outcome-blind until the SAP is locked: the sample of the clean table hides the outcome
+  expect_true(sr_blind(p))
+  s <- sr_sample(p, "cardiac_clean")
+  expect_false("mortality_30d" %in% names(s))
+  expect_true("patient_id" %in% names(s))
+  # the protected-role refusals work for a recipe over the clean table
+  pc <- sr_recipe_checkout(sr_recipe_branch(p, "onclean", from_step = "s1"), "onclean")
+  pc <- sr_recipe_undo(pc)                        # no active step left: the branch is unbound
+  expect_error(sr_recipe_add(pc, "cardiac_clean", .rc_drop_var_step("mortality_30d")), "protected")
+  expect_error(sr_recipe_add(pc, "cardiac_clean", .rc_step("rename", list(col = "bmi_copy", to = "bmi_dup"), "n")), "role")
+  # re-applying is idempotent: same roles, same dictionary
+  p2 <- sr_recipe_apply(p, "cardiac")
+  expect_identical(sr_roles(p2, "cardiac_clean"), r)
+  expect_identical(sr_dict_get(p2, "cardiac_clean"), d)
+  # (d) the roles survive a reopen
+  dir <- p2$paths$dir
+  sr_duck_close(p2)
+  sr_project_close(p2)
+  q <- sr_project_open(dir)
+  withr::defer(sr_duck_close(q))
+  withr::defer(sr_project_close(q))
+  expect_identical(sr_roles(q, "cardiac_clean"), r)
+  expect_identical(sr_dict_get(q, "cardiac_clean"), d)
+  expect_false("mortality_30d" %in% names(sr_sample(q, "cardiac_clean")))
+})
+
+test_that("a table with no roles and no dictionary gets none", {
+  p <- .rc_small(data.frame(a = 1:3, b = 4:6))
+  p <- sr_recipe_add(p, "small", .rc_step("drop_var", list(col = "b"), "x"))
+  p <- sr_recipe_apply(p, "small")
+  expect_length(sr_roles(p, "small_clean"), 0L)
+  expect_null(sr_dict_get(p, "small_clean"))
+})
+
+test_that("the role map follows renames and drops of the recipe steps", {
+  steps <- list(list(op = "rename", args = list(col = "a", to = "b")),
+                list(op = "drop_var", args = list(col = "c")),
+                list(op = "set_missing", args = list(col = "b")))
+  out <- .sr_rc_carry_names(c(a = "covariate", c = "covariate", d = "id"), steps)
+  expect_identical(out, c(b = "covariate", d = "id"))
+})
