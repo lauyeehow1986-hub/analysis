@@ -567,8 +567,8 @@ sr_reducer_register("data.imported", function(state, event) {
 # freeze gate needs. An in-project source (a copy under data/source) is resolved against the current
 # project dir, so a copied or moved project folder keeps working.
 
-# A table made by a join (join.R) has no source file: it is derived from two other tables.
-.sr_is_derived <- function(entry) is.list(entry) && isTRUE(entry$format %in% c("join", "recipe"))
+# A table made by a join (join.R) or a cohort (cohort.R) has no source file: it is derived from other tables.
+.sr_is_derived <- function(entry) is.list(entry) && isTRUE(entry$format %in% c("join", "recipe", "cohort"))
 
 # The table's entry in state, or an error naming the table.
 .sr_ext_entry <- function(project, table) {

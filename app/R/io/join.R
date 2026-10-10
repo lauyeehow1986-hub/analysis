@@ -155,6 +155,57 @@ sr_join_check <- function(project, left, right, by) {
                     q(spec$right), " AS sr_r ON ", on, " ORDER BY ", paste(q(out), collapse = ", ")))
 }
 
+# ---- shared by the derived-table builders (join, cohort) ---------------------------------------------
+
+# A derived table needs a new, valid name: not a table of the store, not a staging directory of an
+# unfinished ingest, not an entry of the state (also not a join or a cohort of that name).
+.sr_derived_check_name <- function(project, into) {
+  .sr_store_check_table(into)
+  if (into %in% sr_store_tables(project) || dir.exists(sr_store_dir(project, into)) ||
+      !is.null(project$state$tables[[into]]) || !is.null(project$state$joins[[into]]) ||
+      !is.null(project$state$cohorts[[into]])) {
+    stop("table '", into, "' already exists", call. = FALSE)
+  }
+  stage <- file.path(sr_project_paths(project$paths$dir)$data, "ingest", into)
+  if (dir.exists(stage) || file.exists(stage)) {
+    stop("table '", into, "' has a staging directory in data/ingest (an unfinished ingest?); resume or ",
+         "remove it, or choose another name", call. = FALSE)
+  }
+  invisible(into)
+}
+
+# Materialise the rows of `sql` (a SELECT over store view names) as the store table `into`, the way ingest
+# does it: COPY to a Parquet part under data/ingest/<into>, then .sr_store_install() swaps the verified
+# store into data/store/<into>. `cols` are the output columns (ORDER BY all of them gives the rows a total
+# order). Returns list(store_hash, store) where `store` is the block the event carries.
+.sr_derived_write <- function(project, into, sql, cols, what) {
+  con <- sr_duck(project)
+  ck <- .sr_ck_new(project, into, NULL, NULL, 0)
+  if (!isTRUE(dir.create(ck$store_dir, recursive = TRUE, showWarnings = FALSE))) {
+    stop("cannot create directory: ", ck$store_dir, call. = FALSE)
+  }
+  on.exit(unlink(ck$ingest_dir, recursive = TRUE), add = TRUE)
+
+  part <- .sr_part_path(ck)
+  rows <- .sr_col_copy(con, from = paste0("(", sql, ") AS sr_j"), to = part, what = what,
+                       order = paste(.sr_join_q(con, cols), collapse = ", "))
+  .sr_part_commit(ck, part, rows)
+  schema <- .sr_col_schema(con, ck)
+  parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
+  manifest <- .sr_store_install(ck, list(table = into, parts = parts, schema = schema, rows = rows))
+  list(store_hash = sr_store_hash(manifest),
+       store = list(dir = paste0("data/store/", into), rows = rows, ncol = length(schema), schema = schema,
+                    parts = parts))
+}
+
+# Append the event that records a derived table; with no event the table is not left behind.
+.sr_derived_append <- function(project, into, type, payload) {
+  tryCatch(sr_project_append(project, type, payload), error = function(e) {
+    unlink(sr_store_dir(project, into), recursive = TRUE)
+    stop(e)
+  })
+}
+
 #' Join two ingested tables into a new store table `into` and append `join.created`.
 #'
 #' `into` must be a new, valid table name (checked first, before any work). A many-to-many join is
@@ -172,16 +223,7 @@ sr_join <- function(project, left, right, by, type = c("left", "inner", "full"),
   if (!is.logical(allow_many_to_many) || length(allow_many_to_many) != 1L || is.na(allow_many_to_many)) {
     stop("allow_many_to_many must be TRUE or FALSE", call. = FALSE)
   }
-  if (into %in% sr_store_tables(project) || dir.exists(sr_store_dir(project, into)) ||
-      !is.null(project$state$tables[[into]]) || !is.null(project$state$joins[[into]])) {
-    stop("table '", into, "' already exists", call. = FALSE)
-  }
-  stage <- sr_project_paths(project$paths$dir)$data
-  stage <- file.path(stage, "ingest", into)
-  if (dir.exists(stage) || file.exists(stage)) {
-    stop("table '", into, "' has a staging directory in data/ingest (an unfinished ingest?); resume or ",
-         "remove it, or choose another name", call. = FALSE)
-  }
+  .sr_derived_check_name(project, into)
   spec <- .sr_join_spec(project, left, right, by)
   report <- .sr_join_report(project, spec)
   if (identical(report$relationship, "many_to_many") && !allow_many_to_many) {
@@ -193,31 +235,13 @@ sr_join <- function(project, left, right, by, type = c("left", "inner", "full"),
   con <- sr_duck(project)
   sel <- .sr_join_select(con, spec, type)
   sql <- sel$sql
-  ck <- .sr_ck_new(project, into, NULL, NULL, 0)
-  if (!isTRUE(dir.create(ck$store_dir, recursive = TRUE, showWarnings = FALSE))) {
-    stop("cannot create directory: ", ck$store_dir, call. = FALSE)
-  }
-  on.exit(unlink(ck$ingest_dir, recursive = TRUE), add = TRUE)
-
-  part <- .sr_part_path(ck)
-  rows <- .sr_col_copy(con, from = paste0("(", sql, ") AS sr_j"), to = part, what = "the join",
-                       order = paste(.sr_join_q(con, sel$cols), collapse = ", "))
-  .sr_part_commit(ck, part, rows)
-  schema <- .sr_col_schema(con, ck)
-  parts <- lapply(ck$parts, function(p) list(file = p$file, rows = p$rows, sha256 = p$sha256))
-  manifest <- .sr_store_install(ck, list(table = into, parts = parts, schema = schema, rows = rows))
-  store_hash <- sr_store_hash(manifest)
+  w <- .sr_derived_write(project, into, sql, sel$cols, "the join")
 
   payload <- list(
     into = into, left = spec$left, right = spec$right,
     by = as.list(stats::setNames(spec$rk, spec$lk)), type = type, report = report, sql = sql,
-    store_hash = store_hash,
-    store = list(dir = paste0("data/store/", into), rows = rows, ncol = length(schema), schema = schema,
-                 parts = parts))
-  tryCatch(sr_project_append(project, "join.created", payload), error = function(e) {
-    unlink(sr_store_dir(project, into), recursive = TRUE)     # no event: do not leave the table behind
-    stop(e)
-  })
+    store_hash = w$store_hash, store = w$store)
+  .sr_derived_append(project, into, "join.created", payload)
 }
 
 # `join.created` records the join and adds the result as a table (format "join", no source file: it

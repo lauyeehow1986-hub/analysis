@@ -13,6 +13,10 @@
 # column removes is a marginal outcome count. A drop_cases step whose filter uses an outcome-role column,
 # and every row after it (whose counts descend from it), show NA for n_before, n_after and n_excluded,
 # and their label ends in SR_FLOW_HIDDEN; the diagram prints "n = hidden" for them. The reasons stay.
+# The same holds for a cohort row flagged outcome_dependent (the cohort builder sets it for a criterion
+# whose filter uses an outcome-role column): it and every later row, cohort or recipe, are hidden.
+# With a cohort, the n_total attribute (the first box) is the number of ids the cohort started from, not
+# the rows of the table, whose size is the count after the last criterion.
 #
 # Text: the labels the code generates are ASCII only (anything else becomes <U+XXXX>); a reason is the
 # user's own text and passes through as UTF-8. The diagram uses the Windows font Arial through ragg and
@@ -52,8 +56,11 @@ SR_FLOW_COLS <- c("step", "label", "n_before", "n_after", "n_excluded", "reason"
 }
 
 # The cohort flow of the state (written by the cohort builder) as the flow columns; NULL or empty gives
-# no row. Missing optional columns are filled in: n_excluded = n_before - n_after.
-.sr_fl_cohort <- function(x) {
+# no row. Missing optional columns are filled in: n_excluded = n_before - n_after. While `blind`, a row
+# with outcome_dependent TRUE and every row after it have NA counts and the hidden label. Attributes:
+# "hidden" (TRUE when a row was hidden: the recipe rows that follow are hidden too) and "n_start" (the
+# true n_before of the first row, NA with no row).
+.sr_fl_cohort <- function(x, blind = FALSE) {
   if (is.null(x) || !length(x)) return(.sr_fl_empty())
   if (!is.data.frame(x)) {
     x <- tryCatch(do.call(rbind, lapply(x, function(r) as.data.frame(r, stringsAsFactors = FALSE))),
@@ -64,25 +71,36 @@ SR_FLOW_COLS <- c("step", "label", "n_before", "n_after", "n_excluded", "reason"
   n <- nrow(x)
   nb <- as.numeric(x$n_before)
   na <- as.numeric(x$n_after)
-  data.frame(
+  label <- .sr_fl_ascii(if (is.null(x$label)) paste0("Cohort step ", seq_len(n)) else x$label)
+  dep <- if (is.null(x$outcome_dependent)) rep(FALSE, n) else as.logical(x$outcome_dependent)
+  hide <- blind & cumsum(!is.na(dep) & dep) > 0L
+  n_start <- nb[1L]
+  nex <- if (is.null(x$n_excluded)) nb - na else as.numeric(x$n_excluded)
+  nb[hide] <- NA_real_
+  na[hide] <- NA_real_
+  nex[hide] <- NA_real_
+  label[hide] <- paste0(label[hide], SR_FLOW_HIDDEN)
+  out <- data.frame(
     step = .sr_fl_ascii(if (is.null(x$step)) paste0("c", seq_len(n)) else x$step),
-    label = .sr_fl_ascii(if (is.null(x$label)) paste0("Cohort step ", seq_len(n)) else x$label),
-    n_before = nb, n_after = na,
-    n_excluded = if (is.null(x$n_excluded)) nb - na else as.numeric(x$n_excluded),
+    label = label, n_before = nb, n_after = na, n_excluded = nex,
     reason = .sr_fl_reason(if (is.null(x$reason)) rep("", n) else x$reason),
     stringsAsFactors = FALSE)
+  attr(out, "hidden") <- any(hide)
+  attr(out, "n_start") <- n_start
+  out
 }
 
 # The active drop_cases steps of the current branch when it is bound to `table`, as flow rows, with the
-# counts hidden from the first outcome-dependent step on while blind.
-.sr_fl_recipe <- function(project, table) {
+# counts hidden from the first outcome-dependent step on while blind (from the first step when `hidden`:
+# an outcome-dependent cohort row came before).
+.sr_fl_recipe <- function(project, table, hidden = FALSE) {
   br <- .sr_rc_branch(project)
   steps <- .sr_rc_active(br)
   if (!length(steps) || !identical(br$table, table)) return(.sr_fl_empty())
   ct <- sr_recipe_counts(project, table)
   blind <- sr_blind(project)
   outcome <- sr_role_cols(project, table, "outcome")
-  hidden <- FALSE
+  hidden <- blind && isTRUE(hidden)
   rows <- list()
   for (st in steps) {
     if (!identical(st$op, "drop_cases")) next
@@ -107,16 +125,19 @@ SR_FLOW_COLS <- c("step", "label", "n_before", "n_after", "n_excluded", "reason"
 #' The participant flow of `table`: the cohort steps (when a cohort was built, state$cohorts[[table]]$flow),
 #' then the active drop_cases steps of the current recipe branch (when it is bound to `table`), in order.
 #' While the SAP is not locked, an exclusion that filters on the outcome column and every row after it have
-#' NA counts and a label ending "(count hidden until SAP lock)": that count is an outcome statistic.
+#' NA counts and a label ending "(count hidden until SAP lock)": that count is an outcome statistic. The same
+#' goes for a cohort row with outcome_dependent TRUE, and every row after it.
 #' @return data.frame(step, label, n_before, n_after, n_excluded, reason), with attributes "n_total" (the
-#'   rows of the table) and "label" (the first box of the diagram).
+#'   rows of the table; with a cohort, the ids it started from) and "label" (the first box of the diagram).
 sr_flow <- function(project, table) {
   .sr_store_check_table(table)
   if (!(table %in% sr_store_tables(project))) stop("table '", table, "' is not in the store", call. = FALSE)
   sr_store_view(project, table)
   con <- sr_duck(project)
   n_total <- as.numeric(sr_duck_query(con, paste("SELECT count(*) AS n FROM", .sr_rc_q(con, table)))$n)
-  out <- rbind(.sr_fl_cohort(project$state$cohorts[[table]]$flow), .sr_fl_recipe(project, table))
+  coh <- .sr_fl_cohort(project$state$cohorts[[table]]$flow, sr_blind(project))
+  if (nrow(coh)) n_total <- attr(coh, "n_start")
+  out <- rbind(coh, .sr_fl_recipe(project, table, isTRUE(attr(coh, "hidden"))))
   rownames(out) <- NULL
   attr(out, "n_total") <- n_total
   attr(out, "label") <- .sr_fl_ascii(paste0("Records in ", table))
