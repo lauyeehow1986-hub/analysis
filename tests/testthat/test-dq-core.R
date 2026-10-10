@@ -72,9 +72,13 @@ test_that("a finding id is the first 12 hex characters of sha256(check|column|wh
 
 # ---- registry --------------------------------------------------------------------------------------
 
-test_that("the nine checks are registered in a fixed order", {
-  expect_identical(sr_dq_checks(), c("coercion", "dict_type", "dict_levels", "dict_range", "missing_col",
-                                     "missing_row", "missing_codes", "missing_pattern", "missing_dependence"))
+test_that("the nine Task 13 checks are registered in a fixed order", {
+  # later tasks register more checks after these; the nine keep their relative order
+  nine <- c("coercion", "dict_type", "dict_levels", "dict_range", "missing_col", "missing_row", "missing_codes",
+            "missing_pattern", "missing_dependence")
+  reg <- sr_dq_checks()
+  expect_true(all(nine %in% reg))
+  expect_identical(reg[reg %in% nine], nine)
 })
 
 test_that("an unknown check name is an error and registration validates its arguments", {

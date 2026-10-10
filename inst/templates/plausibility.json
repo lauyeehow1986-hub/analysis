@@ -1,0 +1,15 @@
+[
+  {"analyte": "age", "name_regex": "^age", "unit": "years", "hard": [0, 120], "soft": [18, 100], "alt_units": []},
+  {"analyte": "weight", "name_regex": "weight|wt", "unit": "kg", "hard": [20, 300], "soft": [35, 200],
+   "alt_units": [{"unit": "lb", "factor": 2.20462, "offset": 0}]},
+  {"analyte": "height", "name_regex": "height|ht", "unit": "cm", "hard": [100, 230], "soft": [140, 210],
+   "alt_units": [{"unit": "m", "factor": 0.01, "offset": 0}]},
+  {"analyte": "bmi", "name_regex": "bmi", "unit": "kg/m2", "hard": [10, 80], "soft": [15, 60], "alt_units": []},
+  {"analyte": "sbp", "name_regex": "sbp|systolic", "unit": "mmHg", "hard": [50, 300], "soft": [70, 250], "alt_units": []},
+  {"analyte": "creatinine", "name_regex": "creat", "unit": "umol/L", "hard": [10, 2000], "soft": [30, 1000],
+   "alt_units": [{"unit": "mg/dL", "factor": 0.011312217194570135, "offset": 0}]},
+  {"analyte": "glucose", "name_regex": "gluc", "unit": "mmol/L", "hard": [0.5, 50], "soft": [2, 33],
+   "alt_units": [{"unit": "mg/dL", "factor": 18.016, "offset": 0}]},
+  {"analyte": "hba1c", "name_regex": "hba1c|a1c", "unit": "%", "hard": [3, 20], "soft": [4, 15],
+   "alt_units": [{"unit": "mmol/mol", "factor": 10.929, "offset": -23.49735}]}
+]
