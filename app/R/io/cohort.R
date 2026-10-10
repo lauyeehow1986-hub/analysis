@@ -35,11 +35,15 @@
 #  - Output columns: <id>, index_date, the features (in order), then time and event. One row per id,
 #    ORDER BY id.
 #
-# Outcome-blind: a criterion (or the index filter) whose where uses a column that has the outcome role in
-# its own table, or that reads the outcome event table or the censor table (a count of "died in the first
-# 30 days" is an outcome count whatever the roles), is flagged outcome_dependent in the flow, and sr_flow() hides the counts from it on until
-# the SAP is locked. The payload keeps the true counts. The new table gets the roles id (spec$id),
-# outcome (event) and time (time), so the outcome-blind guard applies to it.
+# Outcome-blind: a criterion (or the index filter) whose where uses an outcome-family column of its table
+# (sr_outcome_family_cols: outcome, event, event_date, censor_date, time, offset, by lineage), or that
+# reads the outcome event table or the censor table (a count of "died in the first 30 days" is an outcome
+# count whatever the roles), is flagged outcome_dependent in the flow, and sr_flow() hides the counts from
+# it on until the SAP is locked. The payload keeps the true counts. `cohort.built` also persists
+# outcome_dependent (any step is) on the table, so its rows stay hidden, and a name map (each feature is
+# derived from its col and the columns of its where), so a feature made from a family column is a family
+# column of the cohort. The new table gets the roles id (spec$id), outcome (event) and time (time), so the
+# outcome-blind guard applies to it.
 #
 # The CTEs and aliases of the SQL start with sr_x_; a table with such a name cannot be used.
 
@@ -382,10 +386,27 @@ sr_cohort_sql <- function(project, spec) {
 # ---- build ------------------------------------------------------------------------------------------
 
 # TRUE when a filter reads the outcome: its table is the outcome event table or the censor table, or it
-# uses a column that has the outcome role in its own table.
-.sr_cohort_outcome_dep <- function(project, spec, table, where) {
+# uses an outcome-family column of its table (in `state`, by lineage).
+.sr_cohort_dep_one <- function(state, spec, table, where) {
   if (table %in% c(spec$outcome$event_table, spec$outcome$censor_table)) return(TRUE)
-  length(intersect(.sr_rc_where_cols(where), sr_role_cols(project, table, "outcome"))) > 0L
+  length(intersect(.sr_rc_where_cols(where), .sr_family_names(state, table))) > 0L
+}
+
+# The outcome dependence of each flow step of a spec (the index, then each criterion), against `state`.
+.sr_cohort_spec_dep <- function(state, spec) {
+  c(.sr_cohort_dep_one(state, spec, spec$index$table, spec$index$where),
+    vapply(spec$criteria %||% list(), function(cr) .sr_cohort_dep_one(state, spec, cr$table, cr$where), logical(1)))
+}
+
+# The name map of a cohort: each feature column is derived from its col and the columns of its where.
+.sr_cohort_name_map <- function(spec) {
+  out <- list()
+  for (f in spec$features) {
+    for (cc in unique(c(f$col, .sr_rc_where_cols(f$where)))) {
+      out[[length(out) + 1L]] <- list(from = f$table, col = cc, to = f$name)
+    }
+  }
+  out
 }
 
 #' Build a cohort: count every step, materialise the final table as store table `spec$name`, append
@@ -410,8 +431,7 @@ sr_cohort_build <- function(project, spec) {
                                    paste(sprintf("(SELECT count(*) FROM %s) AS n%d", nms, seq_along(nms)), collapse = ", ")))
   n <- vapply(seq_along(nms), function(i) as.numeric(cnt[[i]][1L]), numeric(1))
   nc <- length(spec$criteria)
-  dep <- c(.sr_cohort_outcome_dep(project, spec, spec$index$table, spec$index$where),
-           vapply(spec$criteria, function(cr) .sr_cohort_outcome_dep(project, spec, cr$table, cr$where), logical(1)))
+  dep <- .sr_cohort_spec_dep(project$state, spec)
   flow <- data.frame(
     step = c("index", if (nc) paste0("c", seq_len(nc))),
     label = c("Patients with an index date", vapply(spec$criteria, function(cr) cr$label, "")),
@@ -428,7 +448,8 @@ sr_cohort_build <- function(project, spec) {
   payload <- list(
     name = spec$name, spec = spec,
     sql = list(steps = as.list(sql$steps), extra = as.list(sql$extra), final = sql$final),
-    flow = flow, n_negative_time = n_neg, store_hash = w$store_hash, store = w$store)
+    flow = flow, n_negative_time = n_neg, store_hash = w$store_hash, store = w$store,
+    outcome_dependent = any(dep), name_map = .sr_cohort_name_map(spec))
   project <- .sr_derived_append(project, spec$name, "cohort.built", payload)
 
   roles <- stats::setNames("id", spec$id)
@@ -471,6 +492,11 @@ sr_reducer_register("cohort.built", function(state, event) {
   t$store <- p$store
   t$store_hash <- p$store_hash
   t$derived_from <- as.list(from)
+  # older logs have no flag: any outcome-dependent flow step makes the table dependent
+  t$outcome_dependent <- if (is.null(p$outcome_dependent)) {
+    any(as.logical(c1$flow$outcome_dependent) %in% TRUE)
+  } else isTRUE(p$outcome_dependent)
+  t$name_map <- p$name_map
   tabs[[name]] <- t
   state$tables <- tabs
   state

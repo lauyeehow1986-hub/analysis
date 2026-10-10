@@ -19,10 +19,13 @@
 # median and MAD of outlier. p_affected is a share of ALL rows. A column that holds numbers as text is
 # read through TRY_CAST when >= 95% of its values parse (coercion reports the rest).
 #
-# Outcome-blind: a blind outcome column gets its marginals only (range, unit_mix, heaping, future_date,
-# old_date). outlier needs its sample values, which the blind sample does not have, so it is skipped;
-# date_order and immortal_time never pair the outcome with another column. Every `detail` is a data.frame
-# with a `column` field.
+# Outcome-blind: a blind outcome-family column (outcome, event, event_date, censor_date, time, offset; see
+# sr_outcome_family_cols) gets its marginals only (range, unit_mix, heaping, future_date, old_date).
+# outlier needs its sample values, which the blind sample does not have, so it is skipped; immortal_time
+# never pairs a family column. date_order still checks a pair with a family date (time zero before the
+# event date is the outcome's own plausibility), but while blind such a finding is a flag: it names the
+# later column only, with no count, share, example or detail. Every `detail` is a data.frame with a
+# `column` field.
 
 SR_DQ_UNIT_MIX_MIN_SHARE <- 0.00155
 SR_DQ_UNIT_MIX_MIN_N <- 3L
@@ -469,7 +472,7 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
 
 # ---- date_order -------------------------------------------------------------------------------------
 
-# Date columns that may be paired with others: a blind outcome column is never paired.
+# Date columns that may be paired with others: a blind outcome-family column is never paired.
 .sr_pl_pairable <- function(ctx) {
   dc <- .sr_pl_date_cols(ctx)
   dc[!(dc$column %in% .sr_dq_blind_outcome(ctx)), , drop = FALSE]
@@ -482,7 +485,8 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
 .sr_pl_by_name <- function(dc, re) dc$column[grepl(re, tolower(dc$column), perl = TRUE)]
 
 .sr_dq_check_date_order <- function(ctx) {
-  dc <- .sr_pl_pairable(ctx)
+  dc <- .sr_pl_date_cols(ctx)
+  fam <- .sr_dq_blind_outcome(ctx)
   if (nrow(dc) < 2L) return(sr_findings_empty())
   admit <- .sr_pl_by_name(dc, "admi(t|ss)")
   surgery <- .sr_pl_by_name(dc, "surg|operation|procedure")
@@ -518,6 +522,13 @@ SR_DQ_PL_SKIP_ROLES <- c("id", "cluster", "weight", "ignore", SR_DQ_PL_DATE_ROLE
     if (k < 1) next
     earlier <- pairs[[i]][1L]
     later <- pairs[[i]][2L]
+    if (any(c(earlier, later) %in% fam)) {
+      out[[length(out) + 1L]] <- .sr_dq_finding(
+        "date_order", "plausibility", later, "warn", NA_integer_, NA_real_,
+        sprintf("%s is out of order with another date column in some rows (details withheld until the SAP is locked)", later),
+        salt = earlier)
+      next
+    }
     val <- sprintf("concat(CAST(%s AS VARCHAR), ' < ', CAST(%s AS VARCHAR))", ex(later), ex(earlier))
     evd <- .sr_dq_values(ctx, val, preds[i], limit = SR_DQ_EXAMPLES_N)
     out[[length(out) + 1L]] <- .sr_dq_finding(

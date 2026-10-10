@@ -7,8 +7,9 @@
 # function: the values never leave it. While blind the findings name the column and nothing else: n_affected
 # and p_affected are NA, `where` is NULL, examples and detail are empty, and the message carries no AUC, no
 # level name, no direction and no count. Once the SAP is locked, leakage carries its AUC in a `detail` frame
-# and separation lists the levels. post_outcome_date compares two date columns and never reads the outcome,
-# so it is the same blind or not.
+# and separation lists the levels. post_outcome_date compares a date column with the event date (an
+# outcome-family column): while blind it is a flag too, naming the date column only, with no count, share
+# or detail, and the family and exposure columns are not candidates.
 #
 # Candidates: every column except the outcome and the columns that are deterministic for it by
 # construction (id, cluster, time_zero, event_date, censor_date, time, event) and `ignore`, and, while blind,
@@ -16,6 +17,8 @@
 # rank-based Mann-Whitney statistic; a categorical column is scored by the outcome rate of its level (the
 # levels ordered by outcome rate), over the levels with at least 10 rows and only for 2-50 levels, so a
 # free-text column cannot "leak" through singleton levels. Both are computed on the reproducible sample.
+# An offset (a family column the blind sample drops) is still a candidate: it is read through
+# .sr_dq_sample_col(), inside the check.
 
 SR_DQ_LEAK_AUC <- 0.99
 SR_DQ_LEAK_MIN_N <- 10L
@@ -76,13 +79,14 @@ SR_DQ_POD_MIN_N <- 10L
 .sr_dq_leak_cands <- function(ctx, oc) {
   skip_roles <- c(SR_DQ_LEAK_SKIP_ROLES, if (isTRUE(ctx$blind)) SR_DQ_LEAK_BLIND_SKIP_ROLES)
   skip <- names(ctx$roles)[ctx$roles %in% skip_roles]
-  setdiff(names(ctx$sample), c(oc, skip))
+  dropped <- intersect(.sr_dq_blind_outcome(ctx), ctx$profile$columns$column)
+  setdiff(union(names(ctx$sample), dropped), c(oc, skip))
 }
 
 # One candidate as a number and as a category (each NULL when it does not apply): dates and logicals and
 # numbers are numeric; text that is >= 95% numbers is numeric; other text and logicals are categorical.
 .sr_dq_leak_view <- function(ctx, col) {
-  x <- ctx$sample[[col]]
+  x <- .sr_dq_sample_col(ctx, col)
   if (inherits(x, c("Date", "POSIXct"))) return(list(num = as.numeric(x), cat = NULL))
   if (is.logical(x)) return(list(num = as.integer(x), cat = as.character(x)))
   if (is.numeric(x)) return(list(num = as.numeric(x), cat = NULL))
@@ -166,12 +170,15 @@ SR_DQ_POD_MIN_N <- 10L
 # ---- post_outcome_date ------------------------------------------------------------------------------
 
 .sr_dq_check_post_outcome_date <- function(ctx) {
-  dc <- .sr_pl_pairable(ctx)
+  dc <- .sr_pl_date_cols(ctx)
   if (nrow(dc) < 2L) return(sr_findings_empty())
   ev <- .sr_pl_by_role(ctx, dc, "event_date")
   if (!length(ev)) ev <- .sr_pl_by_name(dc, "death|died|event|outcome")
   if (!length(ev)) return(sr_findings_empty())
   skip <- c(ev, .sr_pl_by_role(ctx, dc, "censor_date"))
+  if (isTRUE(ctx$blind)) {
+    skip <- c(skip, .sr_dq_blind_outcome(ctx), names(ctx$roles)[ctx$roles %in% SR_DQ_LEAK_BLIND_SKIP_ROLES])
+  }
   cand <- setdiff(dc$column, skip)
   if (!length(cand)) return(sr_findings_empty())
   expr <- function(col) dc$expr[match(col, dc$column)]
@@ -189,6 +196,12 @@ SR_DQ_POD_MIN_N <- 10L
     if (both < SR_DQ_POD_MIN_N || k / both <= SR_DQ_POD_SHARE) next
     d <- pairs[[i]][1L]
     e <- pairs[[i]][2L]
+    if (isTRUE(ctx$blind)) {
+      out[[length(out) + 1L]] <- .sr_dq_finding(
+        "post_outcome_date", "leakage", d, "warn", NA_integer_, NA_real_,
+        sprintf("%s is mostly after the outcome date (details withheld until the SAP is locked)", d), salt = e)
+      next
+    }
     out[[length(out) + 1L]] <- .sr_dq_finding(
       "post_outcome_date", "leakage", d, "warn", k, k / n,
       sprintf(paste0("%s is after %s in %s of %s rows with both (%s): it is recorded after the outcome, so it cannot be ",

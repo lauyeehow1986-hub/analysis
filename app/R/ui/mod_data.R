@@ -6,8 +6,11 @@
 # mod_data_server(id, project) takes the reactiveVal that mod_project_server() returns and keeps no state
 # of its own beyond the project: every action calls the core, which appends the event, and the new
 # project is written back with project(new). The few other values (the running import's temp files) are
-# transient. Outcome-blind: while sr_blind(project) the viewer drops the columns with the outcome role and
-# the tables list hides the row count of a table whose flow has a hidden row; the core guards do the rest.
+# transient. Outcome-blind: while sr_blind(project) the viewer drops the outcome-family columns
+# (sr_outcome_family_cols, by lineage) and the tables list hides the row count of an outcome-dependent
+# table (the flag persisted on its recipe.applied / cohort.built, followed through derived_from; never
+# re-derived from the current branch) and of a table whose current recipe has a tainted step (one that
+# touches the family, and every step after it); the core guards do the rest.
 #
 # Import runs in a mirai worker (shiny::ExtendedTask). The worker sources the app, opens the project
 # itself, ingests and closes it again; for that the UI session releases its lock before the worker starts
@@ -260,27 +263,28 @@
 # are outcome columns: every column is then hidden (fail closed).
 .SR_DATA_ALL <- "<all columns>"
 
-# TRUE when the row count of `table` must not be shown: its flow (or the flow of the table it was derived
-# from) has a hidden count. Never errors, and fails closed: while blind, a table whose flow cannot be
-# computed (or that is nested too deep to follow) has its count hidden.
-.sr_data_rows_hidden <- function(project, table, depth = 0L) {
+# TRUE when the row count of `table` must not be shown: it is outcome-dependent (sr_outcome_dependent, by
+# the persisted flag and the lineage), or its flow has a hidden count (a tainted step of its current
+# recipe, the same .sr_rc_taint() the recipe counts use). Never errors, and fails closed: while blind, a
+# table whose dependence or flow cannot be computed has its count hidden.
+.sr_data_rows_hidden <- function(project, table) {
   if (!sr_blind(project)) return(FALSE)
-  if (depth > 5L) return(TRUE)
-  fl <- tryCatch(sr_flow(project, table), error = function(e) NULL)
-  if (!is.data.frame(fl)) return(TRUE)
-  if (nrow(fl) &&
-      (anyNA(fl$n_before) || anyNA(fl$n_after) || any(endsWith(as.character(fl$label), SR_FLOW_HIDDEN)))) {
-    return(TRUE)
-  }
-  src <- as.character(unlist(project$state$tables[[table]]$derived_from))
-  any(vapply(src, function(s) !identical(s, table) && .sr_data_rows_hidden(project, s, depth + 1L), NA))
+  tryCatch({
+    hidden <- isTRUE(sr_outcome_dependent(project, table))
+    if (!hidden) {
+      fl <- sr_flow(project, table)
+      hidden <- !is.data.frame(fl) ||
+        (nrow(fl) > 0L && (anyNA(fl$n_before) || anyNA(fl$n_after) || any(endsWith(as.character(fl$label), SR_FLOW_HIDDEN))))
+    }
+    hidden
+  }, error = function(e) TRUE)
 }
 
-# The columns of `table` the viewer must not show: the outcome-role columns while blind; .SR_DATA_ALL when
-# they cannot be determined.
+# The columns of `table` the viewer must not show: the outcome-family columns (by lineage) while blind;
+# .SR_DATA_ALL when they cannot be determined.
 .sr_data_hidden_cols <- function(project, table) {
   if (!sr_blind(project)) return(character())
-  tryCatch(as.character(sr_role_cols(project, table, "outcome")), error = function(e) .SR_DATA_ALL)
+  tryCatch(as.character(sr_outcome_family_cols(project, table)), error = function(e) .SR_DATA_ALL)
 }
 
 # TRUE when `hidden` (from .sr_data_hidden_cols() or .sr_data_outcome_names()) hides anything.
@@ -291,15 +295,15 @@
   if (.SR_DATA_ALL %in% hidden) character() else setdiff(cols, hidden)
 }
 
-# The names of the outcome columns of every table of the project (a file about to be imported may be
-# another file of any of them, or a re-import of one): while blind, nothing from the raw file with such a
-# name may be shown. Character(0) when not blind or nothing is an outcome; .SR_DATA_ALL when it cannot be
-# determined.
+# The names of the outcome-family columns of every table of the project (a file about to be imported may
+# be another file of any of them, or a re-import of one): while blind, nothing from the raw file with such
+# a name may be shown. Character(0) when not blind or nothing is in the family; .SR_DATA_ALL when it cannot
+# be determined.
 .sr_data_outcome_names <- function(project) {
   if (is.null(project) || !sr_blind(project)) return(character())
   tryCatch({
     tabs <- union(sr_store_tables(project), names(project$state$tables))
-    unique(unlist(lapply(tabs, function(t) as.character(sr_role_cols(project, t, "outcome")))))
+    unique(unlist(lapply(tabs, function(t) as.character(sr_outcome_family_cols(project, t)))))
   }, error = function(e) .SR_DATA_ALL)
 }
 

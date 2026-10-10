@@ -202,14 +202,29 @@ Looking at how the outcome relates to the other columns before the analysis plan
 the easiest ways to bend an analysis towards a wanted answer. So until the statistical analysis
 plan (SAP) is locked, StatRouter is outcome-blind:
 
+- The rule covers the whole **outcome family**: the columns with the role outcome, event,
+  event_date, censor_date, time or offset. A table made from another one (a cleaned table, a join,
+  a cohort) inherits the family of its sources, by column name, so a role set on the source later
+  still reaches it.
 - The outcome column gets only completeness and plausibility marginals: its type, number and share
   missing, minimum, maximum, distinct count and most frequent values. Its mean, standard deviation
-  and quantiles are not even computed.
-- No output may cross the outcome with another column. Cross-tabulations, odds ratios, risk ratios,
-  hazard ratios, AUCs and by-outcome differences are refused by a structural check before anything
-  is shown.
+  and quantiles are not even computed. Every family column keeps its own missingness and
+  plausibility checks.
+- No output may cross a family column with another column. The data viewer and the sample the
+  checks use leave the family columns out; a missingness pattern or a missingness-by-covariate
+  check never involves one. Cross-tabulations, odds ratios, risk ratios, hazard ratios, AUCs and
+  by-outcome differences are refused by a structural check before anything is shown.
 - Leakage and separation findings, while blind, name the column and nothing else. The AUC, the
-  level, the direction and the counts appear only after the SAP is locked.
+  level, the direction and the counts appear only after the SAP is locked. A date that is mostly
+  after the event date, and a pair of dates out of order where one is a family date, are flags of
+  the same kind: the later column is named, with no count.
+- A recipe step that touches a family column (its column, or any column of its filter) shows no
+  counts in the recipe or the flow, and neither does any step after it. A cleaned table made by
+  such a recipe, a cohort with such a step, and anything derived from either is
+  **outcome-dependent**: its row count, its column counts, the counts of its DQ findings and the
+  counts of a diff against it are hidden until the SAP is locked. This stays so when the branch
+  that made it is switched or undone. Run the DQ checks again after the lock to see the counts.
+- A check that fails while blind records only its name, not its error message.
 - The text of every suggested reason is built from the check, the column and the counts only, never
   from an example value or an outcome statistic.
 

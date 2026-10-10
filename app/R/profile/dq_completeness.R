@@ -9,11 +9,12 @@
 # check fire. p_affected is a share of ALL rows. Counts come from SQL over the full table; only the
 # robust range of missing_codes, the patterns and the SMDs use the reproducible sample.
 #
-# Outcome-blind: while sr_blind(), the sample has no outcome column, so no pattern or SMD can involve
-# one. The two uses of an outcome column are marginal: missing_col (its own p_missing) and
-# missing_dependence for an outcome with >= 5% missing, which reads ONLY is.na(outcome) from the sample
-# file and never a value. missing_row leaves a blind outcome out of the field count; missing_codes
-# skips it (its robust range would need the outcome's values).
+# Outcome-blind: while sr_blind(), the sample has no outcome-family column (outcome, event, event_date,
+# censor_date, time, offset; see sr_outcome_family_cols), so no missingness pattern or SMD can involve
+# one. A family column keeps its own marginal: missing_col (its own p_missing). missing_dependence skips a
+# family column as the target (whether death_date is missing, by covariate, is an outcome-by-covariate
+# statistic); missing_row leaves a blind family column out of the field count; missing_codes skips it
+# (its robust range would need its values).
 
 SR_DQ_MISSING_COL_INFO <- 0.05
 SR_DQ_MISSING_COL_WARN <- 0.30
@@ -30,10 +31,11 @@ SR_DQ_SMD_INFO <- 0.2
 SR_DQ_SMD_WARN <- 0.5
 SR_DQ_SMD_CAP <- 10
 
-# Outcome columns that may not be looked into beyond their own marginals (empty once the SAP is locked).
+# Outcome-family columns that may not be looked into beyond their own marginals (empty once the SAP is
+# locked).
 .sr_dq_blind_outcome <- function(ctx) {
   if (!isTRUE(ctx$blind)) return(character())
-  sr_role_cols(ctx$project, ctx$table, "outcome")
+  sr_outcome_family_cols(ctx$project, ctx$table)
 }
 
 .sr_dq_pct <- function(x) sprintf("%.1f%%", 100 * x)
@@ -283,6 +285,7 @@ SR_DQ_SMD_CAP <- 10
     p <- pc$p_missing[i]
     if (is.na(p) || p < SR_DQ_DEP_MIN_P) next
     col <- pc$column[i]
+    if (col %in% .sr_dq_blind_outcome(ctx)) next
     fr <- .sr_dq_miss_frame(ctx, col)
     if (min(sum(fr$m), sum(!fr$m)) < SR_DQ_DEP_MIN_GROUP) next
     cov <- fr$cov[, setdiff(names(fr$cov), skip_cov), drop = FALSE]

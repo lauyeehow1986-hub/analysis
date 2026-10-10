@@ -10,7 +10,12 @@
 # n_missing, p_missing, min, max, n_distinct and top_values only (completeness and plausibility
 # marginals). Their mean, sd, quantiles and string / parse statistics are not even computed; they stay
 # NA. The cache records which columns were redacted (`redacted_cols`), so a cache made before the roles
-# were set, or before the SAP was locked, is never reused across that change.
+# were set, or before the SAP was locked, is never reused across that change. While blind, the profile of
+# an outcome-dependent table (sr_outcome_dependent: a clean table whose recipe touched the outcome family,
+# a cohort with an outcome-dependent step, or anything derived from one) has no counts: its row count,
+# every n, n_missing and p_missing, and the counts of its top values are NA (the cache keeps them; only
+# the returned value is redacted). The DQ checks use the unredacted profile internally and withhold their
+# own counts (dq.R).
 #
 # The reproducible sample is DuckDB `USING SAMPLE reservoir(n ROWS) REPEATABLE (seed)`. REPEATABLE is
 # deterministic only on a single thread, and the application connection is configuration-locked (its
@@ -135,9 +140,11 @@ SR_PROFILE_TOP_N <- 10L
 #' the returned columns only, so the row order cannot reveal the dropped outcome). Reads the sample file
 #' for this seed made by sr_profile_table(); when there is none, makes one with the default
 #' sample size (100000 rows, or the whole table when it is smaller).
-#' While sr_blind(project) the outcome-role columns are dropped from the returned frame (there is no
-#' override). The sample parquet on disk keeps every column: it is an internal artefact and must not be
-#' shown or exported to anyone before the SAP is locked; always go through sr_sample().
+#' While sr_blind(project) the outcome-family columns (sr_outcome_family_cols(): outcome, event,
+#' event_date, censor_date, time and offset, by lineage) are dropped from the returned frame (there is no
+#' override), so nothing computed over the sample can cross one with another column. The sample parquet on
+#' disk keeps every column: it is an internal artefact and must not be shown or exported to anyone before
+#' the SAP is locked; always go through sr_sample().
 sr_sample <- function(project, table, seed = 1L) {
   seed <- .sr_prof_check_seed(seed)
   m <- sr_store_manifest(project, table)
@@ -147,7 +154,7 @@ sr_sample <- function(project, table, seed = 1L) {
   con <- sr_duck(project)
   cols <- vapply(m$schema, function(s) s$name, "")
   keep <- cols
-  if (sr_blind(project)) keep <- setdiff(cols, sr_role_cols(project, table, "outcome"))
+  if (sr_blind(project)) keep <- setdiff(cols, sr_outcome_family_cols(project, table))
   if (!length(keep)) stop("table '", table, "' has no column that may be shown before the SAP is locked", call. = FALSE)
   # ORDER BY the returned columns only while blind: ordering by a dropped outcome column would leak its
   # strata through the row order. Rows tied on every kept column look identical, so the result is still
@@ -298,7 +305,34 @@ sr_sample <- function(project, table, seed = 1L) {
 #'  - while sr_blind(project), the outcome-role columns keep only type, n, n_missing, p_missing, min, max,
 #'    n_distinct and top_values; the other fields are NA.
 #'  - `sample_file` is the reproducible reservoir sample (min(sample_n, rows) rows) for `seed`.
+#'  - while sr_blind(project) and sr_outcome_dependent(project, table), `rows`, every n, n_missing and
+#'    p_missing, and the n of every top value are NA (see the header).
 sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, seed = 1L) {
+  out <- .sr_profile_table(project, table, sample_n, seed)
+  if (sr_blind(project) && sr_outcome_dependent(project, table)) out <- .sr_prof_withhold(out)
+  out
+}
+
+# The counts of a profile withheld (an outcome-dependent table while blind; see the header).
+.sr_prof_withhold <- function(prof) {
+  prof$rows <- NA_real_
+  cols <- prof$columns
+  if (nrow(cols)) {
+    for (k in intersect(c("n", "n_missing", "p_missing"), names(cols))) cols[[k]] <- rep(NA_real_, nrow(cols))
+    if ("top_values" %in% names(cols)) {
+      cols$top_values <- lapply(cols$top_values, function(tv) {
+        if (is.data.frame(tv) && "n" %in% names(tv)) tv$n <- rep(NA_real_, nrow(tv))
+        tv
+      })
+    }
+  }
+  prof$columns <- cols
+  prof
+}
+
+# sr_profile_table() without the outcome-dependent redaction: for the DQ checks only, which withhold their
+# own counts.
+.sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, seed = 1L) {
   if (!.sr_whole_number(sample_n, 1)) stop("sample_n must be a whole number >= 1", call. = FALSE)
   seed <- .sr_prof_check_seed(seed)
   m <- sr_store_manifest(project, table)

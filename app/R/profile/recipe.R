@@ -34,6 +34,14 @@
 # s<n>, unique across the project (a step copied into another branch keeps its id). The checks that
 # need the roles (protected columns, outcome-dependent exclusion) run when the recipe is compiled, so a
 # role set after a step was recorded is still honoured.
+#
+# Outcome-blind (one taint rule, .sr_rc_taint): while blind, a step is tainted when its col, or any column
+# of its where, is in the outcome family of the table (sr_outcome_family_cols: by lineage, so a family
+# column of the table a derived table came from counts), and every later step is tainted too, because its
+# counts descend from the tainted one; on an outcome-dependent table every step is tainted. The counts of a
+# tainted step are NA in sr_recipe_counts(), and sr_flow() and the Data tab hide them through the same
+# rule. sr_recipe_apply() persists `outcome_dependent` (any step touches the family, or the source is
+# dependent) on `recipe.applied`, so the clean table stays hidden whatever branch is current later.
 
 SR_RECIPE_OPS <- c("set_value", "recode", "convert_unit", "set_missing", "drop_cases", "drop_var", "rename", "cast")
 SR_RECIPE_CAST_TYPES <- c("INTEGER", "BIGINT", "DOUBLE", "VARCHAR", "DATE", "TIMESTAMP", "BOOLEAN")
@@ -643,7 +651,8 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
   store_hash <- sr_store_hash(manifest)
   payload <- list(
     into = into, table = table, branch = cur$branch, sql = cur$sql, recipe_hash = .sr_sha256(cur$sql),
-    steps = cur$steps, store_hash = store_hash,
+    steps = cur$steps, store_hash = store_hash, outcome_dependent = any(.sr_rc_dep(project, table, cur$steps)),
+    name_map = .sr_rc_name_map(table, cur$steps),
     store = list(dir = paste0("data/store/", into), rows = rows, ncol = length(schema), schema = schema,
                  parts = parts))
   out <- tryCatch(sr_project_append(project, "recipe.applied", payload), error = function(e) {
@@ -651,6 +660,55 @@ sr_recipe_apply <- function(project, table, into = paste0(table, "_clean")) {
     stop(e)
   })
   .sr_rc_carry(out, table, into, cur$steps)
+}
+
+# Per step: TRUE when the step reads or writes an outcome-family column (its col, or a column of its
+# where). A rename of a family column makes the new name a family column for the later steps.
+.sr_rc_steps_touch <- function(steps, fam) {
+  fam <- as.character(unlist(fam, use.names = FALSE))
+  out <- logical(length(steps))
+  for (i in seq_along(steps)) {
+    st <- steps[[i]]
+    a <- st$args
+    col <- as.character(unlist(a[["col"]], use.names = FALSE))
+    used <- c(col, .sr_rc_where_cols(a[["where"]]))
+    out[i] <- any(used %in% fam)
+    if (identical(as.character(unlist(st$op)), "rename") && length(col) && col[1L] %in% fam) {
+      fam <- c(fam, as.character(unlist(a[["to"]], use.names = FALSE)))
+    }
+  }
+  out
+}
+
+# Per step of `steps` over `table`: TRUE when its rows or cells depend on the outcome (the step or an
+# earlier one touches the family, or the table itself is outcome-dependent). Fails closed: every step is
+# dependent when the lineage cannot be followed.
+.sr_rc_dep <- function(project, table, steps) {
+  n <- length(steps)
+  if (!n) return(logical())
+  fam <- tryCatch(sr_outcome_family_cols(project, table), error = function(e) NULL)
+  base <- tryCatch(sr_outcome_dependent(project, table), error = function(e) TRUE)
+  if (is.null(fam) || isTRUE(base)) return(rep(TRUE, n))
+  cumsum(.sr_rc_steps_touch(steps, fam)) > 0L
+}
+
+#' The outcome-blind taint of the recipe steps `steps` over `table` (see the header): while blind, TRUE for
+#' a step whose counts are an outcome statistic. sr_recipe_counts(), sr_flow() and the Data tab use it.
+.sr_rc_taint <- function(project, table, steps) {
+  sr_blind(project) & .sr_rc_dep(project, table, steps)
+}
+
+# The renames of `steps` as name-map entries list(from = table, col = <original>, to = <final name>).
+.sr_rc_name_map <- function(table, steps) {
+  cur <- character()
+  for (st in steps) {
+    if (!identical(st$op, "rename")) next
+    col <- st$args[["col"]]
+    to <- st$args[["to"]]
+    k <- match(col, cur)
+    if (is.na(k)) cur[[col]] <- to else cur[k] <- to
+  }
+  lapply(names(cur), function(o) list(from = table, col = o, to = unname(cur[[o]])))
 }
 
 # Apply the renames and drops of `steps`, in order, to a vector named by columns (roles) or by variables:
@@ -700,6 +758,9 @@ sr_reducer_register("recipe.applied", function(state, event) {
   t$recipe_sql <- p$sql
   t$recipe_hash <- p$recipe_hash
   t$recipe_branch <- p$branch
+  t$recipe_steps <- p$steps
+  t$outcome_dependent <- isTRUE(p$outcome_dependent)
+  t$name_map <- p$name_map
   tabs[[into]] <- t
   state$tables <- tabs
   state
@@ -710,7 +771,8 @@ sr_reducer_register("recipe.applied", function(state, event) {
 #' Per active step of the current branch over `table`: rows before and after, the cells it changed
 #' (value ops: cells whose value differs afterwards; cast: cells that converted; drop_cases, drop_var and
 #' rename: 0) and, for cast only, the non-NULL cells that became NULL (`new_nulls`; NA for other ops).
-#' Computed by DuckDB over the store view; feeds the flow diagram.
+#' Computed by DuckDB over the store view; feeds the flow diagram. While blind, a tainted step (see
+#' .sr_rc_taint: it, or an earlier step, touches the outcome family) has NA for every count.
 #' @return data.frame(step_id, rows_before, rows_after, cells_changed, new_nulls), one row per step.
 sr_recipe_counts <- function(project, table) {
   cur <- .sr_rc_current(project, table)
@@ -732,10 +794,13 @@ sr_recipe_counts <- function(project, table) {
   }
   d <- sr_duck_query(con, paste0(cur$chain, "\nSELECT ", paste(sel, collapse = ", ")))
   g <- function(k) as.numeric(d[[k]][1L])
-  data.frame(step_id = vapply(cur$layers, function(L) L$id, ""),
-             rows_before = vapply(seq_len(n), function(i) g(sprintf("r%d", i - 1L)), numeric(1)),
-             rows_after = vapply(seq_len(n), function(i) g(sprintf("r%d", i)), numeric(1)),
-             cells_changed = vapply(seq_len(n), function(i) g(sprintf("c%d", i)), numeric(1)),
-             new_nulls = vapply(seq_len(n), function(i) g(sprintf("n%d", i)), numeric(1)),
-             stringsAsFactors = FALSE)
+  out <- data.frame(step_id = vapply(cur$layers, function(L) L$id, ""),
+                    rows_before = vapply(seq_len(n), function(i) g(sprintf("r%d", i - 1L)), numeric(1)),
+                    rows_after = vapply(seq_len(n), function(i) g(sprintf("r%d", i)), numeric(1)),
+                    cells_changed = vapply(seq_len(n), function(i) g(sprintf("c%d", i)), numeric(1)),
+                    new_nulls = vapply(seq_len(n), function(i) g(sprintf("n%d", i)), numeric(1)),
+                    stringsAsFactors = FALSE)
+  taint <- .sr_rc_taint(project, table, cur$steps)
+  for (k in c("rows_before", "rows_after", "cells_changed", "new_nulls")) out[[k]][taint] <- NA_real_
+  out
 }

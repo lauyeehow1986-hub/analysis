@@ -23,12 +23,18 @@
 # returns exactly what sr_dq_run() saw: the findings are normalised through their own JSON form, so
 # the two are identical().
 #
-# Outcome-blind rule: a check sees ctx$sample, which sr_sample() already strips of the outcome columns
-# while blind. The exceptions read the outcome of the SAME sample rows through .sr_dq_sample_col()
-# (dq_completeness.R), inside the check function, and never let a value out: missing_dependence for an
-# outcome column with >= 5% missing reads is.na(outcome) only; leakage and separation (dq_leakage.R) read
-# the binary outcome to flag a column, and while blind report the column name only (no AUC, level, count
-# or direction). Every finding set passes .sr_assert_blind() before it is stored.
+# Outcome-blind rule: a check sees ctx$sample, which sr_sample() already strips of the outcome-family
+# columns (SR_OUTCOME_FAMILY_ROLES, by lineage) while blind, so no pattern or statistic over the sample can
+# cross one with another column. The exceptions read a family column of the SAME sample rows through
+# .sr_dq_sample_col() (dq_completeness.R), inside the check function, and never let a value out: leakage
+# and separation (dq_leakage.R) read the binary outcome to flag a column, and while blind report the column
+# name only (no AUC, level, count or direction). Every finding set passes .sr_assert_blind() with the family
+# as the outcome columns before it is stored. A check that fails while blind stores only its name: its
+# error message could quote a value. On an outcome-dependent table (sr_outcome_dependent: a clean table
+# whose recipe touched the family, a cohort with an outcome-dependent step, anything derived from one) the
+# counts are an outcome statistic while blind: every finding keeps its check, column, severity, where and
+# examples, but n_affected and p_affected are NA, the message is a generic one, and the count fields of
+# its detail are NA. Run the checks again after the SAP is locked for the counts.
 
 SR_DQ_DOMAINS <- c("conformance", "completeness", "plausibility", "uniqueness", "structure", "leakage")
 SR_DQ_SEVERITIES <- c("info", "warn", "block")
@@ -257,7 +263,7 @@ sr_dq_checks <- function() {
 # ---- the context ------------------------------------------------------------------------------------
 
 .sr_dq_context <- function(project, table) {
-  profile <- sr_profile_table(project, table)
+  profile <- .sr_profile_table(project, table)
   view <- sr_store_view(project, table)
   list(project = project, con = sr_duck(project), table = table, view = view, profile = profile,
        dict = sr_dict_get(project, table), roles = sr_roles(project, table), blind = sr_blind(project),
@@ -308,8 +314,12 @@ sr_dq_checks <- function() {
     if (ctx$blind) .sr_assert_blind(f, outcome_cols, other_cols)
     f
   }, error = function(e) {
-    .sr_dq_finding("check_error", entry$domain, "*", "info", 0L, 0,
-                   sprintf("check '%s' failed: %s", entry$check, conditionMessage(e)),
+    msg <- if (isTRUE(ctx$blind)) {
+      sprintf("check '%s' failed; details withheld until the SAP is locked", entry$check)
+    } else {
+      sprintf("check '%s' failed: %s", entry$check, conditionMessage(e))
+    }
+    .sr_dq_finding("check_error", entry$domain, "*", "info", 0L, 0, msg,
                    detail = list(error = data.frame(column = "*", check = entry$check, stringsAsFactors = FALSE)),
                    salt = entry$check)
   })
@@ -336,13 +346,13 @@ sr_dq_run <- function(project, table, checks = NULL) {
     checks <- known[known %in% checks]
   }
   ctx <- .sr_dq_context(project, table)
-  role_cols <- names(ctx$roles)
-  outcome_cols <- sr_role_cols(project, table, "outcome")
-  other_cols <- setdiff(role_cols, outcome_cols)
+  outcome_cols <- sr_outcome_family_cols(project, table)
+  other_cols <- setdiff(union(ctx$profile$columns$column, names(ctx$roles)), outcome_cols)
   parts <- lapply(checks, function(ch) {
     .sr_dq_run_one(get(ch, envir = .sr_dq_checks, inherits = FALSE), ctx, outcome_cols, other_cols)
   })
   findings <- .sr_dq_normalise(.sr_dq_bind(parts))
+  if (ctx$blind && sr_outcome_dependent(project, table)) findings <- .sr_dq_normalise(.sr_dq_withhold(findings))
   if (ctx$blind) .sr_assert_blind(findings, outcome_cols, other_cols)
 
   run_id <- .sr_dq_run_id()
@@ -362,6 +372,28 @@ sr_dq_run <- function(project, table, checks = NULL) {
       unlink(file)   # the event is the commit: no event, no file
       stop(e)
     })
+}
+
+# The detail fields that are counts or shares of rows.
+.sr_dq_count_field_re <- "^(n|p|k|groups|extra_rows|mean_rows|min_rows|max_rows|observed|freq_ratio)$|^(n|p)_"
+
+# The findings of an outcome-dependent table while blind: the counts withheld (see the header).
+.sr_dq_withhold <- function(f) {
+  if (!nrow(f)) return(f)
+  f$n_affected <- rep(NA_integer_, nrow(f))
+  f$p_affected <- rep(NA_real_, nrow(f))
+  f$message <- sprintf("%s: %s finding (counts withheld until the SAP is locked: this table depends on the outcome)",
+                       ifelse(f$column == "*", "the table", f$column), f$check)
+  f$detail <- lapply(f$detail, function(d) {
+    lapply(d, function(x) {
+      if (!is.data.frame(x)) return(x)
+      for (k in names(x)[grepl(.sr_dq_count_field_re, names(x))]) {
+        if (is.numeric(x[[k]])) x[[k]] <- rep(NA_real_, nrow(x))
+      }
+      x
+    })
+  })
+  f
 }
 
 #' The findings of the latest DQ run of `table`, as sr_dq_run() saw them. The file is checked against

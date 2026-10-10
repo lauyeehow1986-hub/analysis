@@ -24,7 +24,10 @@
 #
 # Outcome-blind rule: a reason is built from the check, the column and the counts of the finding, never
 # from an example value, a level, an AUC or any statistic that involves the outcome. While
-# sr_blind(project) the suggestion frame passes .sr_assert_blind() before it is returned.
+# sr_blind(project) the suggestion frame passes .sr_assert_blind() with the outcome family
+# (sr_outcome_family_cols) as the outcome columns before it is returned. A finding whose counts are
+# withheld (an outcome-dependent table while blind) reads "some rows". The readiness panel hides the row
+# count of an outcome-dependent table while blind.
 
 SR_ACTIONS <- c("recheck", "fix", "drop_cases", "drop_var", "set_missing_impute", "keep_sensitivity")
 
@@ -72,7 +75,7 @@ SR_ACTIONS <- c("recheck", "fix", "drop_cases", "drop_var", "set_missing_impute"
   sentence <- switch(check,
     unit_mix = {
       u <- d$units
-      if (is.null(u) || !nrow(u)) {
+      if (is.null(u) || !nrow(u) || is.na(f$n_affected)) {
         sprintf("%s holds %s that fit another unit; convert them with the factor of the plausibility template", what, rows)
       } else {
         sprintf("%s holds %s value(s) that fit %s rather than %s, so convert them with the %s factor of the plausibility template",
@@ -91,7 +94,7 @@ SR_ACTIONS <- c("recheck", "fix", "drop_cases", "drop_var", "set_missing_impute"
     date_order = sprintf("%s is out of order against the date it must follow in %s; recheck the dates against the source", what, rows),
     dup_rows = {
       dp <- d$duplicates
-      if (is.null(dp) || !nrow(dp)) {
+      if (is.null(dp) || !nrow(dp) || anyNA(c(dp$extra_rows[1L], dp$groups[1L]))) {
         sprintf("%s has %s that repeat an earlier row; keep the first occurrence of each", what, rows)
       } else {
         sprintf("%s has %s extra copy(ies) of rows in %s group(s); keep the first occurrence of each",
@@ -229,7 +232,7 @@ sr_suggest <- function(project, table) {
   f <- sr_dq_findings(project, table)
   f <- f[f$severity != "info", , drop = FALSE]
   roles <- sr_roles(project, table)
-  outcome_cols <- sr_role_cols(project, table, "outcome")
+  outcome_cols <- sr_outcome_family_cols(project, table)
   n <- nrow(f)
   one <- lapply(seq_len(n), function(i) .sr_sg_one(project, table, f[i, , drop = FALSE], roles, outcome_cols))
   out <- data.frame(finding_id = as.character(f$id), check = as.character(f$check), column = as.character(f$column),
@@ -291,7 +294,7 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
   hit <- .sr_sg_locate(project, finding_id, table)
   table <- hit$table
   f <- hit$finding
-  sug <- .sr_sg_one(project, table, f, sr_roles(project, table), sr_role_cols(project, table, "outcome"))
+  sug <- .sr_sg_one(project, table, f, sr_roles(project, table), sr_outcome_family_cols(project, table))
   override <- !identical(action, sug$action)
   if (override && !nzchar(reason)) {
     stop("overriding the suggested action '", sug$action, "' with '", action, "' needs a reason", call. = FALSE)
@@ -424,7 +427,7 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
   if (!length(tok)) return(invisible())
   cols <- .sr_roles_schema(project, table)$name
   tok <- ifelse(tolower(tok) %in% tolower(cols), cols[match(tolower(tok), tolower(cols))], tok)   # column names match in any case
-  oc <- sr_role_cols(project, table, "outcome")
+  oc <- sr_outcome_family_cols(project, table)
   x <- stats::setNames(as.data.frame(matrix(NA, 1L, length(tok))), tok)
   .sr_assert_blind(x, oc, setdiff(cols, oc))
   invisible()
@@ -513,6 +516,9 @@ sr_readiness <- function(project, table) {
 
   if (is.null(e) || is.null(e$store)) {
     add("ingest complete", "block", sprintf("table '%s' has not been imported", table))
+  } else if (sr_blind(project) && sr_outcome_dependent(project, table)) {
+    add("ingest complete", "ok", sprintf("%d columns in the store (the row count is hidden until the SAP is locked)",
+                                         as.integer(e$store$ncol)))
   } else {
     add("ingest complete", "ok", sprintf("%s rows, %d columns in the store", format(e$store$rows, big.mark = ",", scientific = FALSE),
                                          as.integer(e$store$ncol)))

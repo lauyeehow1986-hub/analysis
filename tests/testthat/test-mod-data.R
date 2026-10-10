@@ -557,7 +557,7 @@ test_that("while row counts are hidden the viewer is one page and paging is refu
 test_that("an error in a blind check hides the columns and the count instead of showing them", {
   rv <- .md_rv(roles = TRUE)
   csv <- .md_csv(shiny::isolate(rv()), n = 100L, name = "closed.csv")
-  .md_stub_global("sr_role_cols", function(...) stop("boom", call. = FALSE))
+  .md_stub_global("sr_outcome_family_cols", function(...) stop("boom", call. = FALSE))
   shiny::testServer(mod_data_server, args = list(project = rv), {
     session$setInputs(table = "cardiac", view_size = 25, view_page = 1, path = csv)
     expect_false(grepl("patient_id", output$viewer, fixed = TRUE))

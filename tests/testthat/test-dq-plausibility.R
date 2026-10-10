@@ -364,6 +364,14 @@ test_that("date_order pairs by role, then by name; equal dates are in order; bir
     discharge_date = as.character(as.Date("2020-01-01") + 0:4),         # equal to admission: in order
     stringsAsFactors = FALSE)
   p <- .pl_small(df, roles = c(op_start = "time_zero", died = "event_date", censor = "censor_date"))
+  # while blind a pair with an outcome-family date (died, censor) is a flag on the later column only
+  fb <- .pl_run(p, "small", "date_order")
+  fam <- fb[fb$column %in% c("died", "censor"), , drop = FALSE]
+  expect_setequal(fam$column, c("died", "censor"))
+  expect_true(all(is.na(fam$n_affected)) && all(is.na(fam$p_affected)))
+  expect_true(all(grepl("withheld until the SAP is locked", fam$message, fixed = TRUE)))
+  expect_true(all(lengths(fam$detail) == 0L) && all(lengths(fam$examples) == 0L))
+  p$state$sap <- list(locked = TRUE)
   f <- .pl_run(p, "small", "date_order")
   key <- .pl_pair_keys(f)
   expect_setequal(key, c("op_start died", "op_start censor", "dob op_start", "dob died", "dob censor",
@@ -430,7 +438,7 @@ test_that("a blind run of the plausibility checks passes the gate and gives the 
   expect_identical(f$n_affected, f0$n_affected)
 })
 
-test_that("while blind an outcome column gets a range check but no date_order or outlier", {
+test_that("while blind an outcome column gets a range check, no outlier, and a date_order flag only", {
   set.seed(8)
   df <- data.frame(
     glucose = c(round(stats::rnorm(298, 6, 1), 1), 80, 90),                     # the outcome, two impossible values
@@ -446,10 +454,14 @@ test_that("while blind an outcome column gets a range check but no date_order or
   expect_identical(nrow(.pl_find(f, "outlier", "glucose")), 0L)
   # a date_order pair is an ordinary relation, so it is reported when neither column is the outcome ...
   expect_true(any(f$check == "date_order"))
-  # ... and is skipped when one of them is
+  # ... and is a flag only (the later column, no count, example or detail) when one of them is
   p2 <- .pl_small(df, table = "small2", roles = c(outcome_date = "outcome", admit = "time_zero"))
   f2 <- .pl_run(p2, "small2", .pl_checks)
-  expect_identical(nrow(f2[f2$check == "date_order", ]), 0L)
+  d2 <- f2[f2$check == "date_order", , drop = FALSE]
+  expect_identical(d2$column, "outcome_date")
+  expect_true(is.na(d2$n_affected) && is.na(d2$p_affected))
+  expect_false(grepl("admit", d2$message, fixed = TRUE))
+  expect_identical(lengths(d2$detail), 0L)
   expect_identical(nrow(f2[f2$check == "check_error", ]), 0L)
 })
 

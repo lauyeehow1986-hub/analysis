@@ -17,11 +17,15 @@
 # written to <path>.tmp and renamed, so a re-export on the same day replaces it atomically. The path must be
 # inside the project folder; the event holds it relative to the project root, with the SHA-256 of the file.
 #
-# Outcome-blind rule: while sr_blind(project), a value of an outcome-role column is never written, unless the
-# finding is on the outcome column itself and its domain is completeness or plausibility. A filter that reads
-# the outcome column (it would tell which records have which outcome) collapses the finding to one row, unless
-# that same exception holds. The whole sheet passes .sr_assert_blind(), and each question passes the same
-# text screen as a decision reason (.sr_sg_assert_text).
+# Outcome-blind rule: while sr_blind(project), a value of an outcome-family column (sr_outcome_family_cols:
+# outcome, event, event_date, censor_date, time, offset, by lineage) is never written, unless the finding is
+# on that column itself and its domain is completeness or plausibility. A filter that reads a family column
+# (it would tell which records have which outcome) collapses the finding to one row, unless that same
+# exception holds. On an outcome-dependent table (sr_outcome_dependent) every finding collapses to one row:
+# the records it selects, and how many there are, are counts of a table the outcome shaped. The whole sheet
+# passes .sr_assert_blind() with the family as the outcome columns, and each question passes the same text
+# screen as a decision reason (.sr_sg_assert_text). The row number used as record_id never orders by a
+# family column.
 #
 # The re-import. <table>_r<k> is the next free version number (1 + the highest existing); the original and
 # earlier versions stay readable by their own names, and `state$tables[[table]]$active` records the latest.
@@ -34,7 +38,13 @@
 # repeated key is compared row by row, and an exact repeat is not a difference); the surviving rows are
 # paired on the key and their order within it and joined with a FULL OUTER JOIN, and a cell differs when
 # IS DISTINCT FROM says so. A column whose type changed is compared natively within its family and as text across families. added / removed count distinct
-# keys present in only one table. Every count is a DuckDB aggregate; no row is pulled into R.
+# keys present in only one table. Every count is a DuckDB aggregate; no row is pulled into R. While blind,
+# a diff with an outcome-dependent side gives no counts (every count is NA; the schema changes and the key
+# are kept): the difference between a table and its outcome-shaped version is an outcome statistic.
+#
+# Outcome-blind audit of this file: the sheet and the diff are the only places that count rows or cross
+# columns. Both go through the family (never the outcome role alone) and the outcome-dependent flag, as
+# above. The re-import ingests a raw source, which is never outcome-dependent.
 
 SR_QUERY_MAX_ROWS <- 50000L
 SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", "question", "corrected_value", "comment")
@@ -106,7 +116,7 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
     # The row number must not encode the outcome: the order never reads an outcome-role column (blind or
     # not, so the numbers do not change at the lock). With only outcome columns the order is left to the
     # engine (OVER ()), which cannot be a function of the outcome values.
-    ocols <- sr_role_cols(project, table, "outcome")
+    ocols <- sr_outcome_family_cols(project, table)
     ord <- setdiff(cols, ocols)
     over <- if (length(ord)) paste0("ORDER BY ", paste(q(ord), collapse = ", ")) else ""
     base <- sprintf("SELECT sr_t.*, row_number() OVER (%s) AS sr_qy_rid FROM %s AS sr_t", over, q(table))
@@ -116,14 +126,15 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
 }
 
 # The rows of finding row `f` (a one-row findings frame): list(total, record_id, current_value), the vectors
-# holding at most `limit` rows in order of record_id.
-.sr_qy_finding_rows <- function(ctx, f, blind, outcome_cols, limit) {
+# holding at most `limit` rows in order of record_id. `dependent` (blind and the table is outcome-dependent)
+# collapses the finding to one row.
+.sr_qy_finding_rows <- function(ctx, f, blind, outcome_cols, limit, dependent = FALSE) {
   col <- f$column
   w <- f$where[[1L]]
   is_out <- col %in% outcome_cols
   allowed_self <- is_out && f$domain %in% c("completeness", "plausibility")
   show <- .sr_qy_show_value(blind, is_out, f$domain) && col %in% ctx$cols
-  if (is.null(w) || .sr_qy_hides_rows(w, outcome_cols, blind, allowed_self)) {
+  if (is.null(w) || isTRUE(dependent) || .sr_qy_hides_rows(w, outcome_cols, blind, allowed_self)) {
     return(list(total = 1, record_id = NA_character_, current_value = NA_character_))
   }
   pred <- sr_where_sql(ctx$con, w, ctx$cols, ctx$types)
@@ -189,7 +200,8 @@ sr_query_sheet <- function(project, table, finding_ids = NULL,
     }
   }
   blind <- sr_blind(project)
-  outcome_cols <- sr_role_cols(project, table, "outcome")
+  outcome_cols <- sr_outcome_family_cols(project, table)
+  dependent <- blind && sr_outcome_dependent(project, table)
   ctx <- .sr_qy_context(project, table)
 
   parts <- list()
@@ -197,7 +209,7 @@ sr_query_sheet <- function(project, table, finding_ids = NULL,
   written <- 0
   for (id in finding_ids) {
     fr <- f[f$id == id, , drop = FALSE]
-    r <- .sr_qy_finding_rows(ctx, fr, blind, outcome_cols, max(0, SR_QUERY_MAX_ROWS - written))
+    r <- .sr_qy_finding_rows(ctx, fr, blind, outcome_cols, max(0, SR_QUERY_MAX_ROWS - written), dependent)
     total <- total + r$total
     n <- length(r$record_id)
     written <- written + n
@@ -272,6 +284,8 @@ sr_reducer_register("query.exported", function(state, event) {
 #'   which are neither matched nor counted in added / removed). A row appearing as an extra copy under an
 #'   existing key shows only in old_rows / new_rows and duplicate_keys. A column whose type changed is compared
 #'   natively within its family (numbers as DOUBLE, dates and timestamps as TIMESTAMP), as text across families.
+#'   While sr_blind(project), when `old` or `new` is outcome-dependent, every count (added, removed,
+#'   changed_rows, the n of changed_cells, old_rows, new_rows, duplicate_keys, null_keys) is NA.
 sr_table_diff <- function(project, old, new, key = NULL) {
   .sr_store_check_table(old)
   .sr_store_check_table(new)
@@ -346,13 +360,26 @@ sr_table_diff <- function(project, old, new, key = NULL) {
   cc <- cc[order(-cc$n, cc$column, method = "radix"), , drop = FALSE]
   rownames(cc) <- NULL
   tc <- data.frame(column = tchg, old_type = unname(spec$ls[tchg]), new_type = unname(spec$rs[tchg]), stringsAsFactors = FALSE)
-  list(added = num(r, "added"), removed = num(r, "removed"), changed_rows = num(c2, "changed_rows"),
-       changed_cells = cc,
-       schema_changes = list(added = setdiff(names(spec$rs), names(spec$ls)), removed = setdiff(names(spec$ls), names(spec$rs)),
-                             type_changed = tc),
-       key = key, old_rows = num(r, "old_rows"), new_rows = num(r, "new_rows"),
-       duplicate_keys = list(old = num(r, "old_dups"), new = num(r, "new_dups")),
-       null_keys = list(old = num(r, "old_nulls"), new = num(r, "new_nulls")))
+  out <- list(added = num(r, "added"), removed = num(r, "removed"), changed_rows = num(c2, "changed_rows"),
+              changed_cells = cc,
+              schema_changes = list(added = setdiff(names(spec$rs), names(spec$ls)), removed = setdiff(names(spec$ls), names(spec$rs)),
+                                    type_changed = tc),
+              key = key, old_rows = num(r, "old_rows"), new_rows = num(r, "new_rows"),
+              duplicate_keys = list(old = num(r, "old_dups"), new = num(r, "new_dups")),
+              null_keys = list(old = num(r, "old_nulls"), new = num(r, "new_nulls")))
+  if (sr_blind(project) && (sr_outcome_dependent(project, old) || sr_outcome_dependent(project, new))) {
+    out <- .sr_qy_diff_withhold(out)
+  }
+  out
+}
+
+# A diff with its counts withheld (an outcome-dependent side while blind; see the header).
+.sr_qy_diff_withhold <- function(d) {
+  for (k in c("added", "removed", "changed_rows", "old_rows", "new_rows")) d[[k]] <- NA_real_
+  d$changed_cells$n <- rep(NA_real_, nrow(d$changed_cells))
+  d$duplicate_keys <- list(old = NA_real_, new = NA_real_)
+  d$null_keys <- list(old = NA_real_, new = NA_real_)
+  d
 }
 
 # ---- the re-import ----------------------------------------------------------------------------------

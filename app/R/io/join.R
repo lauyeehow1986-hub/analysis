@@ -14,6 +14,12 @@
 #
 # The event carries the SELECT over the store VIEW names (never file paths), so the project stays
 # relocatable: re-running it after sr_store_view() of both inputs reproduces the table.
+#
+# Roles: `join.created` gives the new table the roles of both sides (when either has any): the left
+# table's roles, the key columns as id, and the right table's roles of its non-key columns under their
+# output names (a right outcome becomes event when the left already has an outcome: one outcome per
+# table). It also records a name map (a renamed right column, a right key) so the outcome family of
+# the joined table follows a role set on either input later (sr_outcome_family_cols, by lineage).
 
 .sr_join_types <- c("left", "inner", "full")
 
@@ -119,7 +125,7 @@ sr_join_check <- function(project, left, right, by) {
 # COALESCE of both sides so right-only rows keep theirs); right key columns are dropped; a right
 # column whose name is already taken (case-insensitively, as DuckDB compares names) becomes
 # <name>_<right table>, then <name>_<right table>_2, ... Returns list(cols = output names, sql = the
-# SELECT, ending in a total ORDER BY).
+# SELECT, ending in a total ORDER BY, right = the output name of each right non-key column, named by it).
 .sr_join_select <- function(con, spec, type) {
   q <- function(x) .sr_join_q(con, x)
   used <- tolower(names(spec$ls))
@@ -150,7 +156,7 @@ sr_join_check <- function(project, left, right, by) {
   # rows that tie are identical, so the bytes of the result, and its store hash, do not depend on
   # thread scheduling. A key-only order would leave right rows that share a key unordered.
   out <- c(spec$lk, setdiff(names(spec$ls), spec$lk), outs)
-  list(cols = out,
+  list(cols = out, right = stats::setNames(outs, setdiff(names(spec$rs), spec$rk)),
        sql = paste0("SELECT ", paste(exprs, collapse = ", "), " FROM ", q(spec$left), " AS sr_l ", kw, " ",
                     q(spec$right), " AS sr_r ON ", on, " ORDER BY ", paste(q(out), collapse = ", ")))
 }
@@ -235,13 +241,45 @@ sr_join <- function(project, left, right, by, type = c("left", "inner", "full"),
   con <- sr_duck(project)
   sel <- .sr_join_select(con, spec, type)
   sql <- sel$sql
+  roles <- .sr_join_roles(project, spec, sel$right)
   w <- .sr_derived_write(project, into, sql, sel$cols, "the join")
 
   payload <- list(
     into = into, left = spec$left, right = spec$right,
     by = as.list(stats::setNames(spec$rk, spec$lk)), type = type, report = report, sql = sql,
-    store_hash = w$store_hash, store = w$store)
+    store_hash = w$store_hash, store = w$store, name_map = .sr_join_name_map(spec, sel$right))
+  if (length(roles)) payload$roles <- list(columns = as.list(names(roles)), roles = as.list(unname(roles)))
   .sr_derived_append(project, into, "join.created", payload)
+}
+
+# The roles of a join result (see the header), as a named character vector; empty when neither side has
+# any role. `right` maps each right non-key column to its output name.
+.sr_join_roles <- function(project, spec, right) {
+  lr <- sr_roles(project, spec$left)
+  rr <- sr_roles(project, spec$right)
+  if (!length(lr) && !length(rr)) return(stats::setNames(character(), character()))
+  out <- lr[!(names(lr) %in% spec$lk)]
+  out[spec$lk] <- "id"
+  rr <- rr[names(rr) %in% names(right)]
+  if (length(rr)) {
+    names(rr) <- unname(right[names(rr)])
+    if (any(out == "outcome")) rr[rr == "outcome"] <- "event"
+    out <- c(out, rr)
+  }
+  out[!duplicated(names(out))]
+}
+
+# The name map of a join: list(from = right, col, to) for each right column whose output name differs
+# (a renamed non-key column, and a right key that the left key name replaces).
+.sr_join_name_map <- function(spec, right) {
+  out <- list()
+  for (nm in names(right)) {
+    if (!identical(nm, unname(right[[nm]]))) out[[length(out) + 1L]] <- list(from = spec$right, col = nm, to = unname(right[[nm]]))
+  }
+  for (i in seq_along(spec$rk)) {
+    if (!identical(spec$rk[i], spec$lk[i])) out[[length(out) + 1L]] <- list(from = spec$right, col = spec$rk[i], to = spec$lk[i])
+  }
+  out
 }
 
 # `join.created` records the join and adds the result as a table (format "join", no source file: it
@@ -263,7 +301,14 @@ sr_reducer_register("join.created", function(state, event) {
   t$store <- p$store
   t$store_hash <- p$store_hash
   t$derived_from <- list(p$left, p$right)
+  t$name_map <- p$name_map
   tabs[[into]] <- t
   state$tables <- tabs
+  if (!is.null(p$roles)) {
+    roles <- state$roles %||% list()
+    roles[[into]] <- stats::setNames(as.character(unlist(p$roles$roles, use.names = FALSE)),
+                                     as.character(unlist(p$roles$columns, use.names = FALSE)))
+    state$roles <- roles
+  }
   state
 })

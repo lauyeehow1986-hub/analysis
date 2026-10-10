@@ -297,13 +297,19 @@ test_that("leakage candidates exclude the id, event and time roles, and need a b
   expect_identical(nrow(f3), 0L)
 })
 
-test_that("post_outcome_date flags a date mostly after the event date, allowed while blind", {
+test_that("post_outcome_date flags a date mostly after the event date: a flag while blind, counted unblinded", {
   n <- 100
   ev <- as.Date("2020-01-01") + seq_len(n)
   df <- data.frame(ev_date = ev, before = ev - 5, after = ev + 5, y = rep(0:1, 50))
   df$after[1:20] <- NA
   roles <- c(ev_date = "event_date", y = "outcome")
-  f <- .st_one(.st_small(df, roles = roles), "small", "post_outcome_date")
+  ps <- .st_small(df, roles = roles)
+  fb <- .st_one(ps, "small", "post_outcome_date")
+  expect_identical(fb$column, "after")
+  expect_true(is.na(fb$n_affected) && is.na(fb$p_affected))
+  expect_match(fb$message, "withheld until the SAP is locked", fixed = TRUE)
+  expect_false(grepl("ev_date", fb$message, fixed = TRUE))
+  f <- .st_one(.st_unblind(ps), "small", "post_outcome_date")
   expect_identical(f$column, "after")
   expect_identical(f$severity, "warn")
   expect_identical(f$domain, "leakage")

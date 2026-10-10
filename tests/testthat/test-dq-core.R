@@ -101,10 +101,15 @@ test_that("a check that throws becomes one check_error finding and the run conti
   expect_identical(nrow(ce), 2L)
   expect_true(all(ce$severity == "info"))
   expect_match(ce$message[1L], "boom")
-  expect_match(ce$message[1L], "kaboom")
+  # while blind the error text is withheld (it could quote a value); once the SAP is locked it is shown
+  expect_false(any(grepl("kaboom", ce$message, fixed = TRUE)))
+  expect_true(all(grepl("withheld until the SAP is locked", ce$message, fixed = TRUE)))
   expect_identical(length(unique(ce$id)), 2L)     # two failing checks, two ids
   expect_gt(nrow(.dq_find(f, "missing_col")), 0L)  # the other checks still ran
   expect_true("boom" %in% p$state$dq$cardiac$checks)
+  p$state$sap <- list(locked = TRUE)
+  ce2 <- .dq_find(sr_dq_findings(sr_dq_run(p, "cardiac", checks = c("boom", "boom2")), "cardiac"), "check_error")
+  expect_match(ce2$message[1L], "kaboom")
 })
 
 test_that("a check that returns a malformed frame is reported as check_error", {
@@ -438,10 +443,11 @@ test_that("a check whose output would cross the outcome becomes check_error whil
   p <- sr_dq_run(p, "cardiac", checks = "leaky")
   f <- sr_dq_findings(p, "cardiac")
   expect_identical(f$check, "check_error")
-  expect_match(f$message, "outcome-blind gate")
+  expect_match(f$message, "check 'leaky' failed; details withheld until the SAP is locked", fixed = TRUE)
+  expect_false(grepl("by_outcome", f$message, fixed = TRUE))
 })
 
-test_that("missing_dependence for an outcome with >= 5% missing uses only is.na(outcome), never its values", {
+test_that("missing_dependence skips an outcome target while blind; unblinded it uses only is.na(outcome)", {
   set.seed(4)
   n <- 1200L
   x <- stats::rnorm(n)
@@ -454,12 +460,15 @@ test_that("missing_dependence for an outcome with >= 5% missing uses only is.na(
   }
   y_a <- stats::rbinom(n, 1L, 0.3)
   y_b <- stats::rbinom(n, 1L, stats::plogis(2 * z + x))           # other values, correlated with z and x
-  run <- function(df, table) {
+  run <- function(df, table, blind = FALSE) {
     p <- .dq_small(df, table)
     p <- sr_roles_set(p, table, c(y = "outcome", x = "covariate", z = "covariate"))
+    if (!blind) p$state$sap <- list(locked = TRUE)
     p <- sr_dq_run(p, table, checks = "missing_dependence")
     sr_dq_findings(p, table)
   }
+  # while blind, whether the outcome is missing by covariate is an outcome-by-covariate statistic: skipped
+  expect_identical(nrow(run(mk(y_a), "yblind", blind = TRUE)), 0L)
   fa <- run(mk(y_a), "ya")
   fb <- run(mk(y_b), "yb")
   expect_identical(fa$column, "y")

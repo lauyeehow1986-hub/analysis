@@ -8,10 +8,24 @@
 # Outcome-blind rule: until the SAP is locked (sr_blind()), no pre-lock output may carry a statistic that
 # involves the outcome column and any other column. .sr_assert_blind() is the structural check that the
 # tests of every pre-lock output run.
+#
+# The outcome FAMILY (SR_OUTCOME_FAMILY_ROLES) is what the gate protects: the outcome itself and every
+# column that encodes it or its timing (event, event_date, censor_date, time, and offset, the follow-up
+# length, which on real cohorts is nearly as informative as the outcome itself). time_zero, exposure_date,
+# weight, cluster, id and covariate are not in it. The family of a table is the union over its lineage:
+# its own family-role columns, the family columns of every table it was derived from (state$tables[[t]]
+# $derived_from, followed recursively, matched by column name) and the columns its name map (a rename in a
+# recipe, a right-side column a join renamed, a cohort feature) derives from a family column. So a role set
+# on a source after a recipe, join or cohort was made from it reaches the derived table at once.
+# A table is outcome-dependent (its row counts are an outcome statistic while blind) when its event set
+# the persisted flag `outcome_dependent`, when its persisted recipe steps or cohort spec touch the family
+# of the tables they read (re-checked against the current roles), or when any table it was derived from is.
 
 SR_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "exposure_date", "event_date",
               "censor_date", "time", "event", "offset", "weight", "covariate", "ignore")
 SR_PROTECTED_ROLES <- c("outcome", "exposure", "id", "cluster", "time_zero", "time", "event")
+SR_OUTCOME_FAMILY_ROLES <- c("outcome", "event", "event_date", "censor_date", "time", "offset")
+.SR_LINEAGE_MAX <- 20L
 
 # Column-name patterns (matched case-insensitively on the name or the dictionary label) that suggest a role;
 # sr_roles_suggest() and the DQ checks cluster_detect / offset_detect share them.
@@ -197,6 +211,72 @@ sr_reducer_register("roles.set", function(state, event) {
   state$roles <- roles
   state
 })
+
+# ---- the outcome family and lineage -----------------------------------------------------------------
+
+# The name map of a table record (list(list(from, col, to), ...): column `to` of the table is derived from
+# column `col` of table `from`) as a data.frame(from, col, to).
+.sr_name_map <- function(t) {
+  nm <- t$name_map
+  if (!length(nm)) return(data.frame(from = character(), col = character(), to = character(), stringsAsFactors = FALSE))
+  g <- function(k) vapply(nm, function(e) as.character(unlist(e[[k]]))[1L], "")
+  data.frame(from = g("from"), col = g("col"), to = g("to"), stringsAsFactors = FALSE)
+}
+
+# The tables `table` was derived from (itself excluded).
+.sr_parents <- function(state, table) {
+  setdiff(unique(as.character(unlist(state$tables[[table]]$derived_from, use.names = FALSE))), table)
+}
+
+# The outcome-family column names of `table` in `state`, over its lineage (see the header). Errors when
+# the lineage is deeper than .SR_LINEAGE_MAX (a cycle).
+.sr_family_names <- function(state, table, depth = 0L) {
+  if (depth > .SR_LINEAGE_MAX) stop("the lineage of table '", table, "' is too deep (a cycle?)", call. = FALSE)
+  r <- state$roles[[table]]
+  out <- if (is.null(r)) character() else names(r)[r %in% SR_OUTCOME_FAMILY_ROLES]
+  nm <- .sr_name_map(state$tables[[table]])
+  for (pa in .sr_parents(state, table)) {
+    pf <- .sr_family_names(state, pa, depth + 1L)
+    out <- c(out, pf, nm$to[nm$from == pa & nm$col %in% pf])
+  }
+  unique(as.character(out))
+}
+
+#' The outcome-family columns of `table`: the columns with a role in SR_OUTCOME_FAMILY_ROLES, in the table
+#' itself or (by name, or through its name map) in any table it was derived from. While blind, these are
+#' hidden and never crossed with another column. Errors when the lineage cannot be followed.
+sr_outcome_family_cols <- function(project, table) {
+  .sr_store_check_table(table)
+  .sr_family_names(project$state, table)
+}
+
+# TRUE when the persisted recipe steps of a recipe table, or the cohort spec of a cohort table, touch the
+# current outcome family of the tables they read; or the table's event flagged it; or a parent is
+# dependent. Fails closed (TRUE) when the lineage is too deep.
+.sr_table_dependent <- function(state, table, depth = 0L) {
+  if (depth > .SR_LINEAGE_MAX) return(TRUE)
+  t <- state$tables[[table]]
+  if (is.null(t)) return(FALSE)
+  if (isTRUE(t$outcome_dependent)) return(TRUE)
+  par <- .sr_parents(state, table)
+  if (identical(t$format, "recipe") && length(t$recipe_steps) && length(par)) {
+    fam <- tryCatch(.sr_family_names(state, par[1L]), error = function(e) NULL)
+    if (is.null(fam) || any(.sr_rc_steps_touch(t$recipe_steps, fam))) return(TRUE)
+  }
+  if (identical(t$format, "cohort") && !is.null(state$cohorts[[table]]$spec)) {
+    dep <- tryCatch(.sr_cohort_spec_dep(state, state$cohorts[[table]]$spec), error = function(e) TRUE)
+    if (any(dep)) return(TRUE)
+  }
+  for (pa in par) if (.sr_table_dependent(state, pa, depth + 1L)) return(TRUE)
+  FALSE
+}
+
+#' TRUE when the rows of `table` depend on the outcome (see the header): while blind, its row counts are
+#' then an outcome statistic and are not shown.
+sr_outcome_dependent <- function(project, table) {
+  .sr_store_check_table(table)
+  .sr_table_dependent(project$state, table)
+}
 
 # ---- the outcome-blind gate -------------------------------------------------------------------------
 

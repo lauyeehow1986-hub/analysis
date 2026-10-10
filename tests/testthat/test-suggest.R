@@ -586,7 +586,9 @@ test_that("a coercion fix says the cast turns unparsable cells into NULL and whe
 })
 
 test_that("a protected column that reaches warn through sr_suggest (collinear) is kept, never dropped", {
-  roles <- c(.sg_roles, bmi_copy = "time")
+  # a protected role outside the outcome family (a family column is not in the blind sample, so it never
+  # reaches the collinear check)
+  roles <- c(.sg_roles, bmi_copy = "time_zero")
   p <- .sg_ready(roles)
   s <- sr_suggest(p, "cardiac")
   r <- .sg_row(s, "collinear", "bmi_copy")
