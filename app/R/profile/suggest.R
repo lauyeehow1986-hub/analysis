@@ -313,8 +313,9 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
         prev$step_id %in% vapply(sr_recipe_steps(project), function(s) as.character(s$id), "")) {
     stale <- prev$step_id
   }
+  adding <- FALSE
+  supplied <- !is.null(step)
   if (takes_step) {
-    supplied <- !is.null(step)
     if (supplied) {
       if (!is.list(step) || is.null(names(step))) stop("step must be list(op, args, reason)", call. = FALSE)
       step$reason <- if (is.character(step$reason) && length(step$reason) == 1L && !is.na(step$reason) &&
@@ -331,28 +332,79 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
         step_id <- as.character(old[[length(old)]]$id)
         detail <- sprintf("recipe step %s (%s) is already in the recipe", step_id, step$op)
       } else {
-        # the step of an earlier decision must go first if it stays active: check that the rest still
-        # compiles without it before anything is recorded
-        if (!is.null(stale)) .sr_sg_check_without(project, table, sr_recipe_steps(project), stale)
-        project <- sr_recipe_add(project, table, step)
-        step_id <- as.character(sr_recipe_steps(project)[[length(sr_recipe_steps(project))]]$id)
-        detail <- sprintf("recipe step %s (%s) added", step_id, step$op)
-        if (step$op == "cast") {
-          detail <- paste0(detail, "; TRY_CAST turns the cells that do not parse into NULL (sr_recipe_counts reports them as new_nulls)")
-        }
+        adding <- TRUE
       }
     }
   }
   # the step an earlier decision for this finding added is out of date unless this decision reuses it
-  if (!is.null(stale) && !identical(stale, step_id)) {
-    project <- sr_recipe_undo(project, stale)
-    undone <- stale
-    detail <- sprintf("%s; the recipe step %s of the earlier decision was undone", detail, stale)
+  drop <- if (!is.null(stale) && !identical(stale, step_id)) stale else NULL
+  # every refusal comes before the first write: the end state (the recipe without the superseded step
+  # and with the new one) must compile, so a refused decision records nothing
+  if (!is.null(drop) || adding) .sr_sg_validate_end(project, table, drop, if (adding) step)
+  if (!is.null(drop)) {
+    project <- sr_recipe_undo(project, drop)
+    undone <- drop
+  }
+  if (adding) {
+    project <- sr_recipe_add(project, table, step)
+    step_id <- as.character(sr_recipe_steps(project)[[length(sr_recipe_steps(project))]]$id)
+    detail <- sprintf("recipe step %s (%s) added", step_id, step$op)
+    if (step$op == "cast") {
+      detail <- paste0(detail, "; TRY_CAST turns the cells that do not parse into NULL (sr_recipe_counts reports them as new_nulls)")
+    }
+  }
+  if (!is.null(drop)) {
+    detail <- sprintf("%s; the recipe step %s of the earlier decision was undone", detail, drop)
+  } else if (!is.null(prev) && is.character(prev$step_id) && length(prev$step_id) == 1L && !is.na(prev$step_id) &&
+              is.null(stale) && !identical(prev$step_id, step_id)) {
+    br <- .sr_sg_other_branch(project, prev$step_id)
+    if (!is.null(br)) {
+      detail <- sprintf("%s; the recipe step %s of the earlier decision is on branch '%s', not the current branch, so it was not undone",
+                        detail, prev$step_id, br)
+    }
   }
   sr_project_append(project, "action.decided", list(
     finding_id = finding_id, table = table, check = f$check, column = f$column, severity = f$severity,
     action = action, suggested_action = sug$action, override = override, reason = reason,
     step_id = step_id, undone_step_id = undone, detail = detail))
+}
+
+# The name of another branch on which the step `id` is still active, or NULL.
+.sr_sg_other_branch <- function(project, id) {
+  rec <- .sr_rc_state(project$state)
+  for (b in setdiff(names(rec$branches), rec$current)) {
+    if (id %in% vapply(.sr_rc_active(rec$branches[[b]]), function(s) as.character(s$id), "")) return(b)
+  }
+  NULL
+}
+
+# Errors unless the end state of a decision works: the active steps of the current branch without the
+# step `drop` (NULL: none) and with the new `step` (NULL: none) must compile, and the branch must take
+# the table. Reads and compiles only; nothing is recorded.
+.sr_sg_validate_end <- function(project, table, drop, step) {
+  rec <- .sr_rc_state(project$state)
+  br <- rec$branches[[rec$current]]
+  act <- .sr_rc_active(br)
+  ids <- vapply(act, function(s) as.character(s$id), "")
+  keep <- if (is.null(drop)) act else act[ids != drop]
+  if (!is.null(step) && !is.null(br$table) && !identical(br$table, table) && length(keep)) {
+    stop("the current branch '", rec$current, "' is bound to table '", br$table, "', not '", table,
+         "'; check out or create another branch for it", call. = FALSE)
+  }
+  if (!is.null(drop) && length(keep) && !identical(drop, ids[length(ids)])) {
+    tryCatch(.sr_rc_compile(project, br$table, keep), error = function(e) {
+      stop("cannot replace step ", drop, " of the earlier decision: the steps after it no longer work without it (",
+           conditionMessage(e), ")", call. = FALSE)
+    })
+  }
+  if (!is.null(step)) {
+    st <- .sr_rc_norm_step(step, rec)
+    tryCatch(.sr_rc_compile(project, table, c(keep, list(st))), error = function(e) {
+      stop(if (is.null(drop)) "" else paste0("cannot replace step ", drop, " of the earlier decision: "),
+           conditionMessage(e), call. = FALSE)
+    })
+  }
+  invisible()
 }
 
 # While blind, the text of a decision (a typed reason, the reason of a supplied step) must not carry an
@@ -361,7 +413,7 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
 # naming the outcome column together with another column trip it (the same crossing rule as the gate).
 .sr_sg_assert_text <- function(project, table, text) {
   if (is.null(text) || length(text) != 1L || is.na(text) || !nzchar(text) || !sr_blind(project)) return(invisible())
-  stat <- regmatches(text, regexpr("(?i)\\b(auc|c-?statistic|c-?index|(odds|hazard|risk) ratio|relative risk|crosstab)\\b",
+  stat <- regmatches(text, regexpr("(?i)\\b(auc|auroc|c-?statistic|c-?index|area under|(odds|hazard|risk) ratio|relative risk|p[- ]?values?|crosstab)\\b",
                                    text, perl = TRUE))
   if (length(stat)) {
     stop(sprintf("outcome-blind gate: the text mentions an outcome statistic ('%s') and may not be recorded before the SAP is locked",
@@ -370,20 +422,11 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
   tok <- unique(strsplit(text, "[^A-Za-z0-9_.]+")[[1L]])
   tok <- tok[nzchar(tok) & !(tolower(tok) %in% .sr_blind_names)]   # plain words such as "or" and "effect" are prose, the phrases above are the statistics
   if (!length(tok)) return(invisible())
+  cols <- .sr_roles_schema(project, table)$name
+  tok <- ifelse(tolower(tok) %in% tolower(cols), cols[match(tolower(tok), tolower(cols))], tok)   # column names match in any case
   oc <- sr_role_cols(project, table, "outcome")
   x <- stats::setNames(as.data.frame(matrix(NA, 1L, length(tok))), tok)
-  .sr_assert_blind(x, oc, setdiff(.sr_roles_schema(project, table)$name, oc))
-  invisible()
-}
-
-# Errors unless the active steps `act` still compile for `table` without the step `id`.
-.sr_sg_check_without <- function(project, table, act, id) {
-  ids <- vapply(act, function(s) as.character(s$id), "")
-  if (!(id %in% ids)) return(invisible())
-  tryCatch(.sr_rc_compile(project, table, act[ids != id]), error = function(e) {
-    stop("cannot replace step ", id, " of the earlier decision: the steps after it no longer work without it (",
-         conditionMessage(e), ")", call. = FALSE)
-  })
+  .sr_assert_blind(x, oc, setdiff(cols, oc))
   invisible()
 }
 

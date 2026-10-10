@@ -603,3 +603,70 @@ test_that("a protected column that reaches warn through sr_suggest (collinear) i
   expect_error(sr_action_decide(p, r$finding_id, "drop_var", reason = "x"), "protected")
   expect_identical(.sg_n_events(p), n0)
 })
+
+# ---- a refused decision writes nothing --------------------------------------------------------------
+
+test_that("a new step that depends on the superseded one is refused before any event is written", {
+  p <- .sg_ready()
+  co <- .sg_row(sr_suggest(p, "cardiac"), "coercion", "creatinine_umol")$finding_id
+  p <- sr_action_decide(p, co, "fix", reason = "the unparsable values are free-text notes")
+  expect_identical(sr_recipe_steps(p)[[1L]]$op, "cast")
+  conv <- list(op = "convert_unit", args = list(col = "creatinine_umol", where = list(col = "creatinine_umol", op = "not_na"),
+                                                factor = 0.0113, offset = 0))
+  n0 <- .sg_n_events(p)
+  steps0 <- sr_recipe_steps(p)
+  expect_error(sr_action_decide(p, co, "fix", reason = "convert as well", step = conv), "numeric")
+  # nothing was recorded: the log, the recipe and the decision are as before, in memory and on disk
+  expect_identical(.sg_n_events(p), n0)
+  expect_identical(sr_recipe_steps(p), steps0)
+  dir <- p$paths$dir
+  sr_duck_close(p)
+  sr_project_close(p)
+  q <- sr_project_open(dir)
+  withr::defer(sr_duck_close(q))
+  withr::defer(sr_project_close(q))
+  expect_identical(.sg_n_events(q), n0)
+  expect_identical(q$state$recipe, p$state$recipe)
+  expect_identical(q$state$actions, p$state$actions)
+  expect_identical(sr_recipe_steps(q)[[1L]]$id, steps0[[1L]]$id)
+})
+
+test_that("a superseding step that fails to compile on its own leaves the earlier decision and step in place", {
+  p <- .sg_ready()
+  id <- .sg_row(sr_suggest(p, "cardiac"), "unit_mix", "weight_kg")$finding_id
+  p <- sr_action_decide(p, id, "fix")
+  n0 <- .sg_n_events(p)
+  bad <- list(op = "set_missing", args = list(col = "no_such_col", where = NULL))
+  expect_error(sr_action_decide(p, id, "fix", reason = "x", step = bad), "unknown column")
+  expect_identical(.sg_n_events(p), n0)
+  expect_length(sr_recipe_steps(p), 1L)
+})
+
+# ---- the text screen and the other-branch note ------------------------------------------------------
+
+test_that("the text screen matches the outcome column in any case and knows AUROC, area under and p-value", {
+  p <- .sg_ready()
+  id <- .sg_row(sr_suggest(p, "cardiac"), "heaping", "sbp")$finding_id
+  n0 <- .sg_n_events(p)
+  for (txt in c("Mortality_30D and sbp differ", "AUROC 0.9 for sbp", "the area under the curve was 0.8",
+                "p-value 0.01 for the heaping", "p value 0.01 for the heaping")) {
+    expect_error(sr_action_decide(p, id, "recheck", reason = txt), "outcome-blind")
+  }
+  expect_identical(.sg_n_events(p), n0)
+})
+
+test_that("a superseded step that sits on another branch is not undone, and the detail says so", {
+  p <- .sg_ready()
+  id <- .sg_row(sr_suggest(p, "cardiac"), "unit_mix", "weight_kg")$finding_id
+  p <- sr_action_decide(p, id, "fix")
+  sid <- sr_recipe_steps(p)[[1L]]$id
+  p <- sr_recipe_branch(p, "alt")
+  p <- sr_recipe_checkout(p, "alt")
+  p <- sr_recipe_undo(p)
+  p <- sr_action_decide(p, id, "recheck", reason = "look again")
+  a <- p$state$actions[[id]]
+  expect_true(is.na(a$undone_step_id))
+  expect_match(a$detail, sid, fixed = TRUE)
+  expect_match(a$detail, "not the current branch")
+  expect_length(sr_recipe_steps(p, "main"), 1L)
+})
