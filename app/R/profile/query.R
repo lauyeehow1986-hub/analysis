@@ -33,7 +33,7 @@
 # The diff. Rows are compared on the columns both tables have, with EXCEPT ALL in both directions (so a
 # repeated key is compared row by row, and an exact repeat is not a difference); the surviving rows are
 # paired on the key and their order within it and joined with a FULL OUTER JOIN, and a cell differs when
-# IS DISTINCT FROM says so. A column whose type changed is compared as text. added / removed count distinct
+# IS DISTINCT FROM says so. A column whose type changed is compared natively within its family and as text across families. added / removed count distinct
 # keys present in only one table. Every count is a DuckDB aggregate; no row is pulled into R.
 
 SR_QUERY_MAX_ROWS <- 50000L
@@ -103,8 +103,13 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
     base <- sprintf("SELECT * FROM %s", q(table))
     rid <- q(id[1L])
   } else {
-    base <- sprintf("SELECT sr_t.*, row_number() OVER (ORDER BY %s) AS sr_qy_rid FROM %s AS sr_t",
-                    paste(q(cols), collapse = ", "), q(table))
+    # The row number must not encode the outcome: the order never reads an outcome-role column (blind or
+    # not, so the numbers do not change at the lock). With only outcome columns the order is left to the
+    # engine (OVER ()), which cannot be a function of the outcome values.
+    ocols <- sr_role_cols(project, table, "outcome")
+    ord <- setdiff(cols, ocols)
+    over <- if (length(ord)) paste0("ORDER BY ", paste(q(ord), collapse = ", ")) else ""
+    base <- sprintf("SELECT sr_t.*, row_number() OVER (%s) AS sr_qy_rid FROM %s AS sr_t", over, q(table))
     rid <- "sr_qy_rid"
   }
   list(con = con, cols = cols, types = types, q = q, base = base, rid = rid)
@@ -263,7 +268,10 @@ sr_reducer_register("query.exported", function(state, event) {
 #' @return list(added, removed, changed_rows, changed_cells = data.frame(column, n) for the columns with at
 #'   least one changed cell, most first; schema_changes = list(added, removed, type_changed =
 #'   data.frame(column, old_type, new_type)); key; old_rows, new_rows; duplicate_keys = list(old, new), the
-#'   number of key values on more than one row).
+#'   number of key values on more than one row; null_keys = list(old, new), the number of rows with a NULL key,
+#'   which are neither matched nor counted in added / removed). A row appearing as an extra copy under an
+#'   existing key shows only in old_rows / new_rows and duplicate_keys. A column whose type changed is compared
+#'   natively within its family (numbers as DOUBLE, dates and timestamps as TIMESTAMP), as text across families.
 sr_table_diff <- function(project, old, new, key = NULL) {
   .sr_store_check_table(old)
   .sr_store_check_table(new)
@@ -284,7 +292,19 @@ sr_table_diff <- function(project, old, new, key = NULL) {
   common <- intersect(names(spec$ls), names(spec$rs))
   tchg <- common[toupper(spec$ls[common]) != toupper(spec$rs[common])]
   nonkey <- setdiff(common, key)
-  sel <- paste(ifelse(common %in% tchg, sprintf("CAST(%s AS VARCHAR) AS %s", q(common), q(common)), q(common)),
+  # A changed type is compared natively within a family (numbers as DOUBLE, dates and timestamps as
+  # TIMESTAMP, so 60 and 60.0 are equal) and as text across families.
+  fam <- function(t) {
+    f <- .sr_join_family(t)
+    if (grepl("^(DATE|TIMESTAMP)", f)) "TIME" else f
+  }
+  cast_to <- vapply(common, function(cn) {
+    if (!(cn %in% tchg)) return(NA_character_)
+    fo <- fam(spec$ls[[cn]])
+    fn <- fam(spec$rs[[cn]])
+    if (!identical(fo, fn)) "VARCHAR" else if (identical(fo, "NUMBER")) "DOUBLE" else if (identical(fo, "TIME")) "TIMESTAMP" else NA_character_
+  }, "")
+  sel <- paste(ifelse(is.na(cast_to), q(common), sprintf("CAST(%s AS %s) AS %s", q(common), cast_to, q(common))),
                collapse = ", ")
   ord <- paste(q(common), collapse = ", ")
   kc <- q(key)
@@ -295,12 +315,16 @@ sr_table_diff <- function(project, old, new, key = NULL) {
     sprintf("(SELECT count(*) FROM (SELECT DISTINCT %s FROM %s WHERE %s) AS sr_a WHERE NOT EXISTS (SELECT 1 FROM %s AS sr_b WHERE %s))",
             keys, x, not_na, y, eq("sr_b", "sr_a"))
   }
+  nulls <- function(x) {
+    sprintf("(SELECT count(*) FROM %s WHERE %s)", x, paste(paste(kc, "IS NULL"), collapse = " OR "))
+  }
   dups <- function(x) {
     sprintf("(SELECT count(*) FROM (SELECT %s FROM %s WHERE %s GROUP BY %s HAVING count(*) > 1) AS sr_d)", keys, x, not_na, keys)
   }
   r <- sr_duck_query(con, paste0(
     "SELECT (SELECT count(*) FROM ", O, ") AS old_rows, (SELECT count(*) FROM ", N, ") AS new_rows, ",
-    only_in(N, O), " AS added, ", only_in(O, N), " AS removed, ", dups(O), " AS old_dups, ", dups(N), " AS new_dups"))
+    only_in(N, O), " AS added, ", only_in(O, N), " AS removed, ", dups(O), " AS old_dups, ", dups(N), " AS new_dups, ",
+    nulls(O), " AS old_nulls, ", nulls(N), " AS new_nulls"))
   num <- function(d, k) as.numeric(d[[k]][1L])
 
   both <- "sr_od.sr_rn IS NOT NULL AND sr_nd.sr_rn IS NOT NULL"
@@ -327,7 +351,8 @@ sr_table_diff <- function(project, old, new, key = NULL) {
        schema_changes = list(added = setdiff(names(spec$rs), names(spec$ls)), removed = setdiff(names(spec$ls), names(spec$rs)),
                              type_changed = tc),
        key = key, old_rows = num(r, "old_rows"), new_rows = num(r, "new_rows"),
-       duplicate_keys = list(old = num(r, "old_dups"), new = num(r, "new_dups")))
+       duplicate_keys = list(old = num(r, "old_dups"), new = num(r, "new_dups")),
+       null_keys = list(old = num(r, "old_nulls"), new = num(r, "new_nulls")))
 }
 
 # ---- the re-import ----------------------------------------------------------------------------------
@@ -337,7 +362,7 @@ sr_table_diff <- function(project, old, new, key = NULL) {
   list(added = d$added, removed = d$removed, changed_rows = d$changed_rows, changed_cells = d$changed_cells,
        schema_changes = list(added = as.list(d$schema_changes$added), removed = as.list(d$schema_changes$removed),
                              type_changed = d$schema_changes$type_changed),
-       old_rows = d$old_rows, new_rows = d$new_rows, duplicate_keys = d$duplicate_keys)
+       old_rows = d$old_rows, new_rows = d$new_rows, duplicate_keys = d$duplicate_keys, null_keys = d$null_keys)
 }
 
 #' Ingest a corrected source of `table` as the next version `<table>_r<k>`, diff it against the version that
@@ -369,18 +394,23 @@ sr_reimport <- function(project, table, path, key = NULL, ...) {
   .sr_store_check_table(new)
 
   project <- sr_ingest(project, path, table = new, ...)
-  diff <- sr_table_diff(project, old, new, key)
-
-  roles <- sr_roles(project, old)
-  keep <- names(roles) %in% .sr_roles_schema(project, new)$name
-  if (any(keep)) project <- sr_roles_set(project, new, roles[keep])
-  d <- sr_dict_get(project, old)
-  if (!is.null(d)) project <- sr_dict_set(project, new, d, "reimport")
-
-  sr_project_append(project, "data.reimported", c(
-    list(table = table, old = old, new = new, version = k, key = as.list(key),
-         roles_dropped = as.list(names(roles)[!keep]), store_hash = project$state$tables[[new]]$store_hash),
-    list(diff = .sr_qy_diff_payload(diff))))
+  # From here the corrected table is in the store; if a later step fails it stays there unused, so the
+  # error names it.
+  tryCatch({
+    diff <- sr_table_diff(project, old, new, key)
+    roles <- sr_roles(project, old)
+    keep <- names(roles) %in% .sr_roles_schema(project, new)$name
+    if (any(keep)) project <- sr_roles_set(project, new, roles[keep])
+    d <- sr_dict_get(project, old)
+    if (!is.null(d)) project <- sr_dict_set(project, new, d, "reimport")
+    sr_project_append(project, "data.reimported", c(
+      list(table = table, old = old, new = new, version = k, key = as.list(key),
+           roles_dropped = as.list(names(roles)[!keep]), store_hash = project$state$tables[[new]]$store_hash),
+      list(diff = .sr_qy_diff_payload(diff))))
+  }, error = function(e) {
+    stop("re-import of '", table, "' failed after '", new, "' was ingested (", conditionMessage(e), "); '", new,
+         "' is not the active version and can be ignored", call. = FALSE)
+  })
 }
 
 # `data.reimported` makes the new table the active version of `table` and keeps the diff by version.

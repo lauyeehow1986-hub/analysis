@@ -116,7 +116,7 @@ test_that("a finding without a filter gives one row with no record and no value"
   expect_identical(d$check, "date_order")
 })
 
-test_that("a table without an id role numbers the records by an explicit order", {
+test_that("a table without an id role numbers the records by an explicit order that ignores the outcome", {
   p <- .qy_ready()
   p <- sr_roles_set(p, "cardiac", c(mortality_30d = "outcome"))
   p <- .qy_recheck(p, "range", "age")
@@ -124,14 +124,51 @@ test_that("a table without an id role numbers the records by an explicit order",
   expect_identical(nrow(d), 3L)
   expect_true(all(grepl("^[0-9]+$", d$record_id)))
   expect_identical(d$record_id, as.character(sort(as.integer(d$record_id))))
-  # the number is the position in the table sorted by every column
+  # the number is the position in the table sorted by every column except the outcome
   sr_store_view(p, "cardiac")
   con <- sr_duck(p)
-  cols <- vapply(sr_store_manifest(p, "cardiac")$schema, function(s) s$name, "")
+  cols <- setdiff(vapply(sr_store_manifest(p, "cardiac")$schema, function(s) s$name, ""), "mortality_30d")
   q <- paste0("SELECT row_number() OVER (ORDER BY ", paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", "),
               ") AS rn, age FROM cardiac")
   all <- sr_duck_query(con, paste0("SELECT rn FROM (", q, ") AS t WHERE age > 110 ORDER BY rn"))
   expect_identical(as.integer(d$record_id), as.integer(all$rn))
+})
+
+test_that("two tables that differ only in the outcome get identical record ids (no id role)", {
+  p <- .qy_project()
+  n <- 300L
+  set.seed(11)
+  df <- data.frame(died = rbinom(n, 1L, 0.3), seq = seq_len(n), age = sample(30:80, n, TRUE))
+  df$age[sample(n, 40L)] <- NA
+  p <- .qy_ing(p, df, "t1")
+  df2 <- df
+  df2$died <- 1L - df$died
+  p <- .qy_ing(p, df2, "t2")
+  ids <- list()
+  for (tb in c("t1", "t2")) {
+    p <- sr_roles_set(p, tb, c(died = "outcome"))
+    p <- sr_dq_run(p, tb)
+    f <- sr_dq_findings(p, tb)
+    mc <- f[f$check == "missing_col" & f$column == "age", , drop = FALSE]
+    expect_identical(nrow(mc), 1L)
+    p <- sr_action_decide(p, mc$id, "recheck", reason = "recheck against the source", table = tb)
+    ids[[tb]] <- .qy_read(sr_query_sheet(p, tb))$record_id
+  }
+  expect_identical(length(ids$t1), 40L)
+  expect_identical(ids$t1, ids$t2)
+  # and they are the positions of the missing ages in the table ordered by seq, age
+  expect_identical(ids$t1, as.character(sort(which(is.na(df$age)))))
+})
+
+test_that("a table whose only column is the outcome still gets record ids, without ordering by it", {
+  p <- .qy_project()
+  df <- data.frame(died = c(rep(NA, 30L), rep(0L, 70L)))
+  p <- .qy_ing(p, df, "solo")
+  p <- sr_roles_set(p, "solo", c(died = "outcome"))
+  ctx <- .sr_qy_context(p, "solo")
+  expect_false(grepl("ORDER BY", ctx$base, fixed = TRUE))
+  rid <- sr_duck_query(ctx$con, paste0("SELECT sr_qy_rid FROM (", ctx$base, ") AS t ORDER BY 1"))$sr_qy_rid
+  expect_identical(as.integer(rid), 1:100)
 })
 
 test_that("a re-export on the same day replaces the file atomically and records both exports", {
@@ -386,4 +423,134 @@ test_that("a re-import needs a key, and refuses before ingesting anything", {
   ro <- p
   ro$readonly <- TRUE
   expect_error(sr_reimport(ro, "t0", csv, key = "pid"), "read-only")
+})
+
+test_that("an integer column re-imported as double counts only the cells that were corrected", {
+  p <- .qy_project()
+  old <- data.frame(pid = sprintf("P%02d", 1:10), age = seq(50L, 59L), stringsAsFactors = FALSE)
+  new <- old
+  new$age <- as.numeric(new$age)
+  new$age[c(2, 5, 7)] <- c(60.5, 61.5, 62.5)       # three corrected cells; the rest is the same number as a double
+  p <- .qy_ing(p, old, "v0")
+  p <- .qy_ing(p, new, "v1")
+  tp <- function(t) vapply(sr_store_manifest(p, t)$schema, function(s) s$type, "")[2L]
+  expect_false(identical(toupper(tp("v0")), toupper(tp("v1"))))
+  df <- sr_table_diff(p, "v0", "v1", key = "pid")
+  expect_identical(df$changed_rows, 3)
+  expect_identical(df$changed_cells$column, "age")
+  expect_identical(df$changed_cells$n, 3)
+  expect_identical(df$schema_changes$type_changed$column, "age")
+  # a table identical but for the type has no changed row at all
+  new2 <- old
+  new2$age <- as.numeric(new2$age) + c(0, rep(0, 9))
+  new2$age[1L] <- 50.25
+  new2$age[1L] <- 50
+  new2$extra <- c(0.5, rep(1, 9))
+  p <- .qy_ing(p, new2, "v2")
+  d2 <- sr_table_diff(p, "v0", "v2", key = "pid")
+  expect_identical(d2$changed_rows, 0)
+  expect_identical(nrow(d2$changed_cells), 0L)
+})
+
+test_that("rows with a NULL key are counted, not matched", {
+  p <- .qy_project()
+  old <- data.frame(pid = c("A", "B", "C", NA, NA), v = 1:5, stringsAsFactors = FALSE)
+  new <- data.frame(pid = c("A", "B", "C", NA, NA, NA), v = c(1L, 2L, 3L, 4L, 9L, 6L), stringsAsFactors = FALSE)
+  p <- .qy_ing(p, old, "k0")
+  p <- .qy_ing(p, new, "k1")
+  df <- sr_table_diff(p, "k0", "k1", key = "pid")
+  expect_identical(df$null_keys, list(old = 2, new = 3))
+  expect_identical(df$added, 0)
+  expect_identical(df$removed, 0)
+  expect_identical(df$changed_rows, 0)
+})
+
+test_that("a re-import that fails after ingesting names the unused version", {
+  p <- .qy_project()
+  df <- data.frame(pid = c("A", "B"), b = c("x", "y"), stringsAsFactors = FALSE)
+  p <- .qy_ing(p, df, "t0")
+  csv <- file.path(dirname(p$paths$dir), "t0_fixed.csv")
+  .fx_write_csv(data.frame(pid = c("A", "B"), b = c(1L, 2L)), csv)     # b becomes numeric: it cannot be the key
+  err <- tryCatch(sr_reimport(p, "t0", csv, key = "b"), error = function(e) conditionMessage(e))
+  expect_match(err, "t0_r1", fixed = TRUE)
+  expect_match(err, "not the active version", fixed = TRUE)
+  expect_match(err, "different types", fixed = TRUE)
+  expect_null(p$state$tables$t0$active)
+})
+
+# Replace sr_dq_findings (global) for the rest of the test by a version that appends `extra(f)` rows.
+.qy_with_findings <- function(extra, env = parent.frame()) {
+  orig <- get("sr_dq_findings", envir = globalenv())
+  assign("sr_dq_findings", function(project, table, ...) {
+    f <- orig(project, table, ...)
+    rbind(f, extra(f))
+  }, envir = globalenv())
+  withr::defer(assign("sr_dq_findings", orig, envir = globalenv()), envir = env)
+  invisible(NULL)
+}
+
+.qy_tiny_outcome <- function(env = parent.frame()) {
+  p <- .qy_project(env)
+  n <- 400L
+  set.seed(7)
+  df <- data.frame(pid = sprintf("P%04d", seq_len(n)), age = sample(30:80, n, TRUE), died = rbinom(n, 1L, 0.2),
+                   stringsAsFactors = FALSE)
+  df$died[1:5] <- -99L
+  df$age[1:5] <- 200L
+  p <- .qy_ing(p, df, "tiny")
+  p <- sr_roles_set(p, "tiny", c(pid = "id", died = "outcome"))
+  list(p = sr_dq_run(p, "tiny"), df = df)
+}
+
+test_that("through sr_query_sheet, a filter that reads the outcome collapses the finding to one row", {
+  x <- .qy_tiny_outcome()
+  expect_true(sr_blind(x$p))
+  .qy_with_findings(function(f) {
+    r <- f[f$check == "missing_col", , drop = FALSE][1L, , drop = FALSE]
+    r$id <- "fake-outcome-filter"
+    r$check <- "range"
+    r$domain <- "plausibility"
+    r$column <- "age"
+    r$where <- list(.sr_where_leaf("died", "==", 1))
+    r
+  })
+  p <- sr_action_decide(x$p, "fake-outcome-filter", "recheck", reason = "recheck against the source", table = "tiny")
+  r <- sr_query_sheet(p, "tiny")
+  d <- .qy_read(r)
+  expect_identical(nrow(d), 1L)
+  expect_true(is.na(d$record_id))
+  expect_true(is.na(d$current_value))
+  expect_identical(d$column, "age")
+})
+
+test_that("through sr_query_sheet, a plausibility finding on the outcome itself shows its value", {
+  x <- .qy_tiny_outcome()
+  .qy_with_findings(function(f) {
+    r <- f[f$check == "missing_col", , drop = FALSE][1L, , drop = FALSE]
+    r$id <- "fake-outcome-self"
+    r$check <- "range"
+    r$domain <- "plausibility"
+    r$column <- "died"
+    r$where <- list(.sr_where_leaf("died", "==", -99))
+    r
+  })
+  p <- sr_action_decide(x$p, "fake-outcome-self", "recheck", reason = "recheck against the source", table = "tiny")
+  d <- .qy_read(sr_query_sheet(p, "tiny"))
+  expect_identical(nrow(d), 5L)
+  expect_identical(unique(d$current_value), "-99")
+  expect_identical(d$record_id, x$df$pid[1:5])
+  # the same finding under another domain does not show the outcome value
+  .qy_with_findings(function(f) {
+    r <- f[f$check == "missing_col", , drop = FALSE][1L, , drop = FALSE]
+    r$id <- "fake-outcome-conf"
+    r$check <- "dict_levels"
+    r$domain <- "conformance"
+    r$column <- "died"
+    r$where <- list(.sr_where_leaf("died", "==", -99))
+    r
+  })
+  p2 <- sr_action_decide(x$p, "fake-outcome-conf", "recheck", reason = "recheck against the source", table = "tiny")
+  d2 <- .qy_read(sr_query_sheet(p2, "tiny", finding_ids = "fake-outcome-conf",
+                                path = file.path(p2$paths$dir, "out", "queries", "conf.xlsx")))
+  expect_true(all(is.na(d2$current_value)))
 })
