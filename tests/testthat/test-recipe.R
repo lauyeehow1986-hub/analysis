@@ -564,3 +564,27 @@ test_that("the role map follows renames and drops of the recipe steps", {
   out <- .sr_rc_carry_names(c(a = "covariate", c = "covariate", d = "id"), steps)
   expect_identical(out, c(b = "covariate", d = "id"))
 })
+
+test_that("sr_recipe_undo(step_id) undoes that active step; the rest must still compile; replay matches", {
+  p <- .rc_cardiac()
+  p <- sr_recipe_add(p, "cardiac", list(op = "cast", args = list(col = "creatinine_umol", type = "DOUBLE"), reason = "numbers"))
+  p <- sr_recipe_add(p, "cardiac", list(op = "convert_unit", args = list(col = "creatinine_umol",
+                       where = list(col = "creatinine_umol", op = "not_na"), factor = 0.0113, offset = 0), reason = "mg/dL"))
+  n0 <- length(sr_events_read(p$paths$events))
+  # the second step needs the cast: undoing the first alone is refused and records nothing
+  expect_error(sr_recipe_undo(p, "s1"), "cannot undo")
+  expect_error(sr_recipe_undo(p, "s9"), "not an active step")
+  expect_identical(length(sr_events_read(p$paths$events)), n0)
+  p <- sr_recipe_undo(p, "s2")
+  expect_identical(vapply(sr_recipe_steps(p), function(s) s$id, ""), "s1")
+  p <- sr_recipe_add(p, "cardiac", list(op = "set_missing", args = list(col = "sbp", where = list(col = "sbp", op = "==", value = -99))))
+  p <- sr_recipe_undo(p, "s1")
+  expect_identical(vapply(sr_recipe_steps(p), function(s) s$id, ""), "s3")
+  dir <- p$paths$dir
+  sr_duck_close(p)
+  sr_project_close(p)
+  q <- sr_project_open(dir)
+  withr::defer(sr_duck_close(q))
+  withr::defer(sr_project_close(q))
+  expect_identical(vapply(sr_recipe_steps(q), function(s) s$id, ""), "s3")
+})

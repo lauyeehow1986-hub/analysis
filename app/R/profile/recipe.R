@@ -3,7 +3,7 @@
 #
 #   sr_where_sql(con, where, cols, types)   the filter DSL (the `where` of a DQ finding) -> a SQL predicate
 #   sr_recipe_add(project, table, step)     append `recipe.step` (the step is validated first)
-#   sr_recipe_undo(project)                 append `recipe.undo`: the last active step of the branch is marked
+#   sr_recipe_undo(project, step_id)        append `recipe.undo`: the last active step (or step_id) of the branch is marked
 #   sr_recipe_branch(project, name, from_step)   append `recipe.branch`: copy the active steps (no switch)
 #   sr_recipe_checkout(project, name)       append `recipe.checkout`
 #   sr_recipe_steps(project, branch)        the active steps of a branch
@@ -484,12 +484,29 @@ sr_recipe_add <- function(project, table, step) {
 }
 
 #' Undo the last active step of the current branch (`recipe.undo`): it is marked undone, not deleted.
-sr_recipe_undo <- function(project) {
+#' With `step_id`, undo that active step instead (the event names it, so a replay undoes the same step);
+#' the steps after it must still compile without it, else nothing is recorded.
+sr_recipe_undo <- function(project, step_id = NULL) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
   rec <- .sr_rc_state(project$state)
-  act <- .sr_rc_active(rec$branches[[rec$current]])
+  br <- rec$branches[[rec$current]]
+  act <- .sr_rc_active(br)
   if (!length(act)) stop("nothing to undo on branch '", rec$current, "'", call. = FALSE)
-  sr_project_append(project, "recipe.undo", list(branch = rec$current, step_id = act[[length(act)]]$id))
+  ids <- vapply(act, function(s) as.character(s$id), "")
+  target <- ids[length(ids)]
+  if (!is.null(step_id)) {
+    if (!is.character(step_id) || length(step_id) != 1L || is.na(step_id) || !(step_id %in% ids)) {
+      stop("'", paste(format(step_id), collapse = ","), "' is not an active step of branch '", rec$current, "'", call. = FALSE)
+    }
+    target <- step_id
+    if (target != ids[length(ids)]) {
+      tryCatch(.sr_rc_compile(project, br$table, act[ids != target]), error = function(e) {
+        stop("cannot undo step ", target, ": the steps after it no longer work without it (", conditionMessage(e), ")",
+             call. = FALSE)
+      })
+    }
+  }
+  sr_project_append(project, "recipe.undo", list(branch = rec$current, step_id = target))
 }
 
 .sr_rc_branch_re <- "^[A-Za-z][A-Za-z0-9_-]{0,39}$"
@@ -541,7 +558,14 @@ sr_reducer_register("recipe.undo", function(state, event) {
   br <- rec$branches[[rec$current]]
   open <- which(!vapply(br$steps, function(s) isTRUE(s$undone), NA))
   if (length(open)) {
-    br$steps[[open[length(open)]]]$undone <- TRUE
+    # the event names the step it undid (older events always name the last active one)
+    sid <- event$payload$step_id
+    k <- length(open)
+    if (is.character(sid) && length(sid) == 1L && !is.na(sid)) {
+      m <- match(sid, vapply(br$steps[open], function(s) as.character(s$id), ""))
+      if (!is.na(m)) k <- m
+    }
+    br$steps[[open[k]]]$undone <- TRUE
     if (length(open) == 1L) br["table"] <- list(NULL)       # no active step left: the branch is unbound
   }
   rec$branches[[rec$current]] <- br

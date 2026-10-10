@@ -17,6 +17,10 @@
 # of the column). A decision that has no step (dup_rows, missing_col: no recipe op can express them) is
 # still recorded, with step_id NA and a detail that says the step is pending, and it counts as decided.
 # state$actions[[finding_id]] holds the latest decision; the event log keeps them all.
+# A later decision for a finding supersedes the earlier one: if the step the earlier decision added is
+# still active and the new decision does not reuse it (same op), it is undone through `recipe.undo` (by
+# step id) and its id is recorded as undone_step_id in the new `action.decided`, so the decision record and
+# the recipe never disagree. While blind, the typed reasons pass the outcome-blind text screen.
 #
 # Outcome-blind rule: a reason is built from the check, the column and the counts of the finding, never
 # from an example value, a level, an AUC or any statistic that involves the outcome. While
@@ -296,9 +300,19 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
   if (!is.null(step) && !takes_step) {
     stop("a step goes with ", paste(.sr_sg_step_actions, collapse = ", "), ", not with '", action, "'", call. = FALSE)
   }
+  .sr_sg_assert_text(project, table, reason)
+  if (is.list(step)) .sr_sg_assert_text(project, table, step$reason)
   step_reason <- if (nzchar(reason)) reason else sug$reason
   step_id <- NA_character_
+  undone <- NA_character_
   detail <- "no recipe step is needed"
+  # the step the earlier decision for this finding added, if it is still active
+  prev <- project$state$actions[[finding_id]]
+  stale <- NULL
+  if (!is.null(prev) && is.character(prev$step_id) && length(prev$step_id) == 1L && !is.na(prev$step_id) &&
+        prev$step_id %in% vapply(sr_recipe_steps(project), function(s) as.character(s$id), "")) {
+    stale <- prev$step_id
+  }
   if (takes_step) {
     supplied <- !is.null(step)
     if (supplied) {
@@ -317,16 +331,60 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
         step_id <- as.character(old[[length(old)]]$id)
         detail <- sprintf("recipe step %s (%s) is already in the recipe", step_id, step$op)
       } else {
+        # the step of an earlier decision must go first if it stays active: check that the rest still
+        # compiles without it before anything is recorded
+        if (!is.null(stale)) .sr_sg_check_without(project, table, sr_recipe_steps(project), stale)
         project <- sr_recipe_add(project, table, step)
         step_id <- as.character(sr_recipe_steps(project)[[length(sr_recipe_steps(project))]]$id)
         detail <- sprintf("recipe step %s (%s) added", step_id, step$op)
+        if (step$op == "cast") {
+          detail <- paste0(detail, "; TRY_CAST turns the cells that do not parse into NULL (sr_recipe_counts reports them as new_nulls)")
+        }
       }
     }
+  }
+  # the step an earlier decision for this finding added is out of date unless this decision reuses it
+  if (!is.null(stale) && !identical(stale, step_id)) {
+    project <- sr_recipe_undo(project, stale)
+    undone <- stale
+    detail <- sprintf("%s; the recipe step %s of the earlier decision was undone", detail, stale)
   }
   sr_project_append(project, "action.decided", list(
     finding_id = finding_id, table = table, check = f$check, column = f$column, severity = f$severity,
     action = action, suggested_action = sug$action, override = override, reason = reason,
-    step_id = step_id, detail = detail))
+    step_id = step_id, undone_step_id = undone, detail = detail))
+}
+
+# While blind, the text of a decision (a typed reason, the reason of a supplied step) must not carry an
+# outcome statistic or cross the outcome column with another column, as a generated reason never does.
+# Errors with the gate message; free prose is fine, so only a statistic phrase or the words of the text
+# naming the outcome column together with another column trip it (the same crossing rule as the gate).
+.sr_sg_assert_text <- function(project, table, text) {
+  if (is.null(text) || length(text) != 1L || is.na(text) || !nzchar(text) || !sr_blind(project)) return(invisible())
+  stat <- regmatches(text, regexpr("(?i)\\b(auc|c-?statistic|c-?index|(odds|hazard|risk) ratio|relative risk|crosstab)\\b",
+                                   text, perl = TRUE))
+  if (length(stat)) {
+    stop(sprintf("outcome-blind gate: the text mentions an outcome statistic ('%s') and may not be recorded before the SAP is locked",
+                 stat), call. = FALSE)
+  }
+  tok <- unique(strsplit(text, "[^A-Za-z0-9_.]+")[[1L]])
+  tok <- tok[nzchar(tok) & !(tolower(tok) %in% .sr_blind_names)]   # plain words such as "or" and "effect" are prose, the phrases above are the statistics
+  if (!length(tok)) return(invisible())
+  oc <- sr_role_cols(project, table, "outcome")
+  x <- stats::setNames(as.data.frame(matrix(NA, 1L, length(tok))), tok)
+  .sr_assert_blind(x, oc, setdiff(.sr_roles_schema(project, table)$name, oc))
+  invisible()
+}
+
+# Errors unless the active steps `act` still compile for `table` without the step `id`.
+.sr_sg_check_without <- function(project, table, act, id) {
+  ids <- vapply(act, function(s) as.character(s$id), "")
+  if (!(id %in% ids)) return(invisible())
+  tryCatch(.sr_rc_compile(project, table, act[ids != id]), error = function(e) {
+    stop("cannot replace step ", id, " of the earlier decision: the steps after it no longer work without it (",
+         conditionMessage(e), ")", call. = FALSE)
+  })
+  invisible()
 }
 
 # `action.decided` keeps the latest decision of each finding; the event log keeps them all.
@@ -335,6 +393,7 @@ sr_reducer_register("action.decided", function(state, event) {
   fid <- p$finding_id
   if (!is.character(fid) || length(fid) != 1L || is.na(fid) || !nzchar(fid)) stop("action.decided needs a finding_id", call. = FALSE)
   p$step_id <- if (is.null(p$step_id) || is.na(p$step_id)) NA_character_ else as.character(p$step_id)
+  p$undone_step_id <- if (is.null(p$undone_step_id) || is.na(p$undone_step_id)) NA_character_ else as.character(p$undone_step_id)
   act <- state$actions %||% list()
   act[[fid]] <- p
   state$actions <- act
