@@ -937,7 +937,7 @@ mod_data_server <- function(id, project) {
       shown <- s[from:to, , drop = FALSE]
       rows <- lapply(seq_len(nrow(shown)), function(i) {
         id <- shown$finding_id[i]
-        done <- p$state$actions[[id]]
+        done <- sr_action(p, id, tbl())
         sev <- as.character(shown$severity[i] %||% "")
         click <- sprintf("Shiny.setInputValue(%s, {id: %s, nonce: Math.random()}, {priority: 'event'})",
                          jsonlite::toJSON(ns("decide"), auto_unbox = TRUE), jsonlite::toJSON(id, auto_unbox = TRUE))

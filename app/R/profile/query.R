@@ -180,9 +180,8 @@ sr_query_sheet <- function(project, table, finding_ids = NULL,
   if (is.null(rel)) stop("path must be inside the project folder (", project$paths$dir, ")", call. = FALSE)
   f <- sr_dq_findings(project, table)
   if (is.null(finding_ids)) {
-    act <- project$state$actions %||% list()
     rc <- vapply(f$id, function(i) {
-      a <- act[[i]]
+      a <- sr_action(project, i, table)
       !is.null(a) && identical(a$table, table) && identical(a$action, "recheck")
     }, NA)
     finding_ids <- f$id[rc]

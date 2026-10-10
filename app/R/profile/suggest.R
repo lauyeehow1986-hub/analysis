@@ -16,11 +16,15 @@
 # user passed, else the one the finding implies (the proposed step; a cast for a coercion fix; a drop_var
 # of the column). A decision that has no step (dup_rows, missing_col: no recipe op can express them) is
 # still recorded, with step_id NA and a detail that says the step is pending, and it counts as decided.
-# state$actions[[finding_id]] holds the latest decision; the event log keeps them all.
-# A later decision for a finding supersedes the earlier one: if the step the earlier decision added is
-# still active and the new decision does not reuse it (same op), it is undone through `recipe.undo` (by
-# step id) and its id is recorded as undone_step_id in the new `action.decided`, so the decision record and
-# the recipe never disagree. While blind, the typed reasons pass the outcome-blind text screen.
+# state$actions holds the latest decision per table and finding, keyed "<table>:<finding_id>" (read it with
+# sr_action()); the event log keeps them all. A finding id is a hash of the check, the column and the
+# filter, so the same id occurs on a table and its re-imported version: a decision is always about one
+# table and never reads or changes another table's decision or step.
+# A later decision for a finding on the same table supersedes the earlier one: if the step the earlier
+# decision added is still active on the current branch, that branch is bound to the same table, and the
+# new decision does not reuse it (same op), it is undone through `recipe.undo` (by step id) and its id is
+# recorded as undone_step_id in the new `action.decided`, so the decision record and the recipe never
+# disagree. While blind, the typed reasons pass the outcome-blind text screen.
 #
 # Outcome-blind rule: a reason is built from the check, the column and the counts of the finding, never
 # from an example value, a level, an AUC or any statistic that involves the outcome. While
@@ -30,6 +34,37 @@
 # count of an outcome-dependent table while blind.
 
 SR_ACTIONS <- c("recheck", "fix", "drop_cases", "drop_var", "set_missing_impute", "keep_sensitivity")
+
+# The key of a decision in state$actions: "<table>:<finding_id>" (the finding id alone for an event that
+# names no table).
+.sr_action_key <- function(table, finding_id) {
+  if (is.character(table) && length(table) == 1L && !is.na(table) && nzchar(table)) paste0(table, ":", finding_id) else finding_id
+}
+
+#' The latest decision for `finding_id` on `table` (the action.decided payload), or NULL when there is
+#' none. With table NULL, the one decision for that finding on any table; an error when it was decided on
+#' more than one table.
+sr_action <- function(project, finding_id, table = NULL) {
+  act <- project$state$actions %||% list()
+  if (!is.null(table)) return(act[[.sr_action_key(table, finding_id)]] %||% act[[finding_id]] %||% NULL)
+  hits <- Filter(function(a) identical(as.character(a$finding_id), finding_id), act)
+  if (!length(hits)) return(NULL)
+  tabs <- unique(vapply(hits, function(a) as.character(a$table %||% ""), ""))
+  if (length(tabs) > 1L) {
+    stop("finding_id '", finding_id, "' was decided on more than one table (", paste(tabs, collapse = ", "), "); pass table",
+         call. = FALSE)
+  }
+  hits[[1L]]
+}
+
+# The active steps of the current recipe branch when it is bound to `table`, else none: the only steps a
+# decision on `table` may reuse or undo.
+.sr_sg_table_steps <- function(project, table) {
+  rec <- .sr_rc_state(project$state)
+  br <- rec$branches[[rec$current]]
+  if (is.null(br) || !identical(br$table, table)) return(list())
+  .sr_rc_active(br)
+}
 
 # The actions that take a recipe step.
 .sr_sg_step_actions <- c("fix", "drop_cases", "drop_var", "set_missing_impute")
@@ -309,11 +344,13 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
   step_id <- NA_character_
   undone <- NA_character_
   detail <- "no recipe step is needed"
-  # the step the earlier decision for this finding added, if it is still active
-  prev <- project$state$actions[[finding_id]]
+  # the step the earlier decision for this finding on this table added, if it is still active on the
+  # current branch of this table
+  prev <- sr_action(project, finding_id, table)
+  tsteps <- .sr_sg_table_steps(project, table)
   stale <- NULL
   if (!is.null(prev) && is.character(prev$step_id) && length(prev$step_id) == 1L && !is.na(prev$step_id) &&
-        prev$step_id %in% vapply(sr_recipe_steps(project), function(s) as.character(s$id), "")) {
+        prev$step_id %in% vapply(tsteps, function(s) as.character(s$id), "")) {
     stale <- prev$step_id
   }
   adding <- FALSE
@@ -330,7 +367,7 @@ sr_action_decide <- function(project, finding_id, action, reason = NULL, step = 
       detail <- sprintf("step pending: no recipe step expresses '%s' for a %s finding; add one with sr_recipe_add", action, f$check)
     } else {
       step$finding_id <- finding_id
-      old <- Filter(function(s) identical(s$finding_id, finding_id) && identical(s$op, step$op), sr_recipe_steps(project))
+      old <- Filter(function(s) identical(s$finding_id, finding_id) && identical(s$op, step$op), tsteps)
       if (!supplied && length(old)) {
         step_id <- as.character(old[[length(old)]]$id)
         detail <- sprintf("recipe step %s (%s) is already in the recipe", step_id, step$op)
@@ -441,7 +478,7 @@ sr_reducer_register("action.decided", function(state, event) {
   p$step_id <- if (is.null(p$step_id) || is.na(p$step_id)) NA_character_ else as.character(p$step_id)
   p$undone_step_id <- if (is.null(p$undone_step_id) || is.na(p$undone_step_id)) NA_character_ else as.character(p$undone_step_id)
   act <- state$actions %||% list()
-  act[[fid]] <- p
+  act[[.sr_action_key(p$table, fid)]] <- p
   state$actions <- act
   state
 })
@@ -490,9 +527,8 @@ sr_reducer_register("action.decided", function(state, event) {
   fail <- if (sev == "block") "block" else "warn"
   if (is.null(f)) return(list(status = fail, detail = why))
   ids <- f$id[f$severity == sev]
-  act <- project$state$actions %||% list()
   decided <- vapply(ids, function(i) {
-    a <- act[[i]]
+    a <- sr_action(project, i, table)
     !is.null(a) && identical(a$table, table)
   }, NA)
   un <- sum(!decided)

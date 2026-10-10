@@ -200,7 +200,7 @@ test_that("deciding fix on a unit_mix finding adds a recipe step with the findin
   expect_length(steps, 1L)
   expect_identical(steps[[1L]]$op, "convert_unit")
   expect_identical(steps[[1L]]$finding_id, r$finding_id)
-  a <- p$state$actions[[r$finding_id]]
+  a <- sr_action(p, r$finding_id)
   expect_identical(a$action, "fix")
   expect_identical(a$step_id, steps[[1L]]$id)
   expect_identical(a$table, "cardiac")
@@ -223,7 +223,7 @@ test_that("a decision matching the suggestion needs no reason; an override needs
   expect_error(sr_action_decide(p, nz$finding_id, "keep_sensitivity", reason = NA_character_), "reason")
   expect_identical(.sg_n_events(p), n0)    # nothing was recorded by the refused calls
   q <- sr_action_decide(p, nz$finding_id, "keep_sensitivity", reason = "constant by design of the study")
-  a <- q$state$actions[[nz$finding_id]]
+  a <- sr_action(q, nz$finding_id)
   expect_true(isTRUE(a$override))
   expect_identical(a$suggested_action, "drop_var")
   expect_identical(a$reason, "constant by design of the study")
@@ -247,18 +247,18 @@ test_that("a decision with no proposed or supplied step is recorded with step_id
   s <- sr_suggest(p, "cardiac")
   d <- .sg_row(s, "dup_rows", "*")
   p <- sr_action_decide(p, d$finding_id, "drop_cases")
-  a <- p$state$actions[[d$finding_id]]
+  a <- sr_action(p, d$finding_id)
   expect_true(is.na(a$step_id))
   expect_match(a$detail, "pending")
   expect_length(sr_recipe_steps(p), 0L)
   m <- .sg_row(s, "missing_col", "death_date")
   p <- sr_action_decide(p, m$finding_id, "set_missing_impute")
-  expect_true(is.na(p$state$actions[[m$finding_id]]$step_id))
-  expect_match(p$state$actions[[m$finding_id]]$detail, "pending")
+  expect_true(is.na(sr_action(p, m$finding_id)$step_id))
+  expect_match(sr_action(p, m$finding_id)$detail, "pending")
   # recheck and keep_sensitivity take no step: not pending
   k <- .sg_row(s, "heaping", "sbp")
   p <- sr_action_decide(p, k$finding_id, "keep_sensitivity")
-  expect_false(grepl("pending", p$state$actions[[k$finding_id]]$detail))
+  expect_false(grepl("pending", sr_action(p, k$finding_id)$detail))
 })
 
 test_that("a later decision for the same finding replaces the earlier one in state; the log keeps both", {
@@ -267,7 +267,7 @@ test_that("a later decision for the same finding replaces the earlier one in sta
   id <- .sg_row(s, "heaping", "sbp")$finding_id
   p <- sr_action_decide(p, id, "keep_sensitivity")
   p <- sr_action_decide(p, id, "recheck", reason = "ask the clinic about the sbp device")
-  expect_identical(p$state$actions[[id]]$action, "recheck")
+  expect_identical(sr_action(p, id)$action, "recheck")
   expect_length(p$state$actions, 1L)
   ev <- Filter(function(e) identical(e$type, "action.decided"), sr_events_read(p$paths$events))
   expect_identical(vapply(ev, function(e) e$payload$action, ""), c("keep_sensitivity", "recheck"))
@@ -282,7 +282,7 @@ test_that("overriding coercion to fix adds a cast step; a drop_var decision drop
   expect_identical(st$op, "cast")
   expect_identical(st$args, list(col = "creatinine_umol", type = "DOUBLE"))
   expect_identical(st$finding_id, co$finding_id)
-  expect_identical(p$state$actions[[co$finding_id]]$step_id, st$id)
+  expect_identical(sr_action(p, co$finding_id)$step_id, st$id)
   nz <- .sg_row(s, "nzv", "const_flag")
   p <- sr_action_decide(p, nz$finding_id, "drop_var")
   st2 <- sr_recipe_steps(p)[[2L]]
@@ -312,7 +312,7 @@ test_that("a supplied step is added with the finding_id forced and the decision 
   st <- sr_recipe_steps(p)[[1L]]
   expect_identical(st$finding_id, ra$finding_id)
   expect_identical(st$reason, "age above 120 is a typing error")
-  expect_identical(p$state$actions[[ra$finding_id]]$step_id, st$id)
+  expect_identical(sr_action(p, ra$finding_id)$step_id, st$id)
   # a step goes with a step-taking action only
   expect_error(sr_action_decide(p, ra$finding_id, "recheck", step = step), "step")
   # a step the recipe refuses is not recorded
@@ -328,7 +328,7 @@ test_that("deciding the same auto-proposed fix twice does not stack a second ste
   p <- sr_action_decide(p, id, "fix")
   p <- sr_action_decide(p, id, "fix")
   expect_length(sr_recipe_steps(p), 1L)
-  expect_identical(p$state$actions[[id]]$step_id, sr_recipe_steps(p)[[1L]]$id)
+  expect_identical(sr_action(p, id)$step_id, sr_recipe_steps(p)[[1L]]$id)
 })
 
 test_that("decisions survive a reopen and replay identically", {
@@ -480,7 +480,7 @@ test_that("fix then recheck undoes the convert_unit step: the recipe SQL no long
   p <- sr_action_decide(p, id, "recheck", reason = "the lb readings need a second look at the source")
   expect_length(sr_recipe_steps(p), 0L)
   expect_false(grepl("sr_l1", sr_recipe_sql(p, "cardiac"), fixed = TRUE))
-  a <- p$state$actions[[id]]
+  a <- sr_action(p, id)
   expect_identical(a$action, "recheck")
   expect_true(is.na(a$step_id))
   expect_identical(a$undone_step_id, sid)
@@ -502,7 +502,7 @@ test_that("a step already undone by hand is not undone again", {
   p <- sr_action_decide(p, id, "keep_sensitivity", reason = "kept as recorded")
   n1 <- length(Filter(function(e) identical(e$type, "recipe.undo"), sr_events_read(p$paths$events)))
   expect_identical(n1, n0)
-  expect_true(is.na(p$state$actions[[id]]$undone_step_id))
+  expect_true(is.na(sr_action(p, id)$undone_step_id))
 })
 
 test_that("fix -> recheck -> fix leaves exactly one active step; a repeat of the same fix still reuses it", {
@@ -515,11 +515,11 @@ test_that("fix -> recheck -> fix leaves exactly one active step; a repeat of the
   st <- sr_recipe_steps(p)
   expect_length(st, 1L)
   expect_false(identical(st[[1L]]$id, s1))
-  expect_identical(p$state$actions[[id]]$step_id, st[[1L]]$id)
-  expect_true(is.na(p$state$actions[[id]]$undone_step_id))
+  expect_identical(sr_action(p, id)$step_id, st[[1L]]$id)
+  expect_true(is.na(sr_action(p, id)$undone_step_id))
   p <- sr_action_decide(p, id, "fix")
   expect_length(sr_recipe_steps(p), 1L)
-  expect_identical(p$state$actions[[id]]$step_id, st[[1L]]$id)
+  expect_identical(sr_action(p, id)$step_id, st[[1L]]$id)
 })
 
 test_that("undoing a middle step keeps the later one; a replacement step supersedes the earlier one; replay matches", {
@@ -529,7 +529,7 @@ test_that("undoing a middle step keeps the later one; a replacement step superse
   g <- .sg_row(s, "unit_mix", "glucose_mmol")$finding_id
   p <- sr_action_decide(p, w, "fix")
   p <- sr_action_decide(p, g, "fix")
-  gid <- p$state$actions[[g]]$step_id
+  gid <- sr_action(p, g)$step_id
   p <- sr_action_decide(p, w, "keep_sensitivity", reason = "kept as recorded")
   expect_identical(vapply(sr_recipe_steps(p), function(x) x$id, ""), gid)
   # a user step for the same finding replaces the earlier step instead of stacking
@@ -538,7 +538,7 @@ test_that("undoing a middle step keeps the later one; a replacement step superse
   act <- sr_recipe_steps(p)
   expect_length(act, 1L)
   expect_identical(act[[1L]]$op, "set_missing")
-  expect_identical(p$state$actions[[g]]$undone_step_id, gid)
+  expect_identical(sr_action(p, g)$undone_step_id, gid)
   dir <- p$paths$dir
   sr_duck_close(p)
   sr_project_close(p)
@@ -567,7 +567,7 @@ test_that("while blind, a typed reason that carries an outcome statistic or cros
   expect_identical(.sg_n_events(p), n0)
   # plain prose, with the common words "or" and "effect", and the outcome column alone, are fine
   p <- sr_action_decide(p, id, "recheck", reason = "ask the clinic or the device vendor; mortality_30d is the study outcome")
-  expect_identical(p$state$actions[[id]]$action, "recheck")
+  expect_identical(sr_action(p, id)$action, "recheck")
 })
 
 # ---- the cast detail and the protected-column end-to-end case ---------------------------------------
@@ -576,13 +576,13 @@ test_that("a coercion fix says the cast turns unparsable cells into NULL and whe
   p <- .sg_ready()
   co <- .sg_row(sr_suggest(p, "cardiac"), "coercion", "creatinine_umol")
   p <- sr_action_decide(p, co$finding_id, "fix", reason = "the unparsable values are free-text notes")
-  d <- p$state$actions[[co$finding_id]]$detail
+  d <- sr_action(p, co$finding_id)$detail
   expect_match(d, "TRY_CAST", fixed = TRUE)
   expect_match(d, "NULL", fixed = TRUE)
   expect_match(d, "new_nulls", fixed = TRUE)
   # ... and the count is really there
   cn <- sr_recipe_counts(p, "cardiac")
-  expect_gt(cn$new_nulls[cn$step_id == p$state$actions[[co$finding_id]]$step_id], 0)
+  expect_gt(cn$new_nulls[cn$step_id == sr_action(p, co$finding_id)$step_id], 0)
 })
 
 test_that("a protected column that reaches warn through sr_suggest (collinear) is kept, never dropped", {
@@ -666,9 +666,53 @@ test_that("a superseded step that sits on another branch is not undone, and the 
   p <- sr_recipe_checkout(p, "alt")
   p <- sr_recipe_undo(p)
   p <- sr_action_decide(p, id, "recheck", reason = "look again")
-  a <- p$state$actions[[id]]
+  a <- sr_action(p, id)
   expect_true(is.na(a$undone_step_id))
   expect_match(a$detail, sid, fixed = TRUE)
   expect_match(a$detail, "not the current branch")
   expect_length(sr_recipe_steps(p, "main"), 1L)
+})
+
+# ---- decisions are scoped by table (I5) --------------------------------------------------------------
+
+test_that("a decision on a re-imported table never touches the decision or the recipe step of another table", {
+  p <- .sg_ready()
+  s <- sr_suggest(p, "cardiac")
+  i <- which(vapply(s$proposed_step, function(x) !is.null(x), NA))[1L]
+  fid <- s$finding_id[i]
+  p <- sr_action_decide(p, fid, s$action[i])
+  s1 <- sr_recipe_steps(p)[[1L]]$id
+  csv <- file.path(dirname(p$paths$dir), "cardiac.csv")
+  p <- sr_reimport(p, "cardiac", csv, key = "patient_id")
+  p <- sr_dq_run(p, "cardiac_r1")
+  expect_true(fid %in% sr_dq_findings(p, "cardiac_r1")$id)            # the same finding id on both tables
+  p <- sr_action_decide(p, fid, "recheck", reason = "ask the clinic", table = "cardiac_r1")
+  # the step of the cardiac decision is still in the recipe, and both decisions are kept
+  expect_identical(vapply(sr_recipe_steps(p), function(st) st$id, ""), s1)
+  expect_identical(sr_action(p, fid, "cardiac")$action, s$action[i])
+  expect_identical(sr_action(p, fid, "cardiac")$step_id, s1)
+  a1 <- sr_action(p, fid, "cardiac_r1")
+  expect_identical(a1$action, "recheck")
+  expect_true(is.na(a1$undone_step_id))
+  expect_false(grepl("undone", a1$detail, fixed = TRUE))
+  # with no table, an id decided on two tables is ambiguous
+  expect_error(sr_action(p, fid), "more than one table")
+  dir <- p$paths$dir
+  sr_duck_close(p)
+  sr_project_close(p)
+  q <- sr_project_open(dir)
+  withr::defer(sr_duck_close(q))
+  withr::defer(sr_project_close(q))
+  expect_identical(q$state$actions, p$state$actions)
+  expect_identical(q$state$recipe, p$state$recipe)
+})
+
+test_that("old action.decided events (keyed by finding id) replay under their table", {
+  red <- get("action.decided", envir = .sr_reducers, inherits = FALSE)
+  st <- red(list(), list(type = "action.decided",
+                         payload = list(finding_id = "abc123", table = "t1", action = "recheck", step_id = NULL)))
+  expect_identical(names(st$actions), "t1:abc123")
+  expect_identical(sr_action(list(state = st), "abc123", "t1")$action, "recheck")
+  expect_identical(sr_action(list(state = st), "abc123")$action, "recheck")
+  expect_null(sr_action(list(state = st), "abc123", "t2"))
 })

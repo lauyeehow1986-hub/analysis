@@ -167,7 +167,7 @@ test_that("deciding a range finding as recheck appends action.decided", {
     expect_match(as.character(output$suggestions_ui$html), id, fixed = TRUE)
     do.call(session$setInputs, .md_decide(id, "recheck", "ask the site to check the source record"))
     expect_equal(utils::tail(.md_types(rv()), 1L), "action.decided")
-    expect_equal(rv()$state$actions[[id]]$action, "recheck")
+    expect_equal(sr_action(rv(), id)$action, "recheck")
   })
 })
 
