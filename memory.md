@@ -10,12 +10,15 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | Repo initialised and pushed to github.com/lauyeehow1986-hub/analysis (public) |
 | 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
 | 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. final-review fixes (I1 torn/failed audit writes, I2 parse_json only, I3 events/audit cross-check on open, M1 atomic rewrites). 2295 tests pass, `LINT OK` |
+| 2026-10-10 | P1b data layer done (branch `p1b-data`, Tasks 1-23): DuckDB ingest to a Parquet store (chunked, resumable, external mode, pre-flight), dictionaries (CSV, REDCap CSV / ODM), join and cohort builder, profiling, the DQ check library (6 domains), Data Action Suggestor, recipe, readiness panel and the Data tab; `docs/data.md` user guide; `tools/scale_test.R`. Full suite 6558 pass, 0 fail, 2 skip (no fst package, no sas7bdat fixture), `LINT OK (41 files)`. Scale smoke 2M x 20 on the laptop and with `--profile=locked16`: PASS (peak RSS 1.07 GB / 0.83 GB) |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
 2. Execute P0 spike on the laptop, then the user runs `run_spike.bat` on the locked PC; record the go/no-go.
+   - **User hand-off (locked16 PC):** run the FULL scale test (`Rscript tools/scale_test.R 20000000 60 <dir on the data drive> --profile=locked16`, about 8 GB CSV, needs the free space the pre-flight reports) next to the P0 Task 8 hand-off (run `sr_spike.zip` on the locked PC). Paste the printed report back; expect `PASS` (peak RSS under 8 GB = DuckDB cap 6 + 2). Only a 2M x 20 smoke has been run (on the laptop).
 3. ~~Execute P1a in a worktree (branch `p1a-foundation`)~~ done 2026-10-03; review and merge the branch.
-4. Next: write the plans for P1b (data: import/DuckDB/profiling/DQ/suggestor), P1c (analysis routes) and P1d (router + writer + freeze + UI), then execute them in that order.
+4. ~~P1b data layer~~ done 2026-10-10 (branch `p1b-data`); review and merge the branch.
+5. **Next: write the P1c plan** (analysis routes), then the P1d plan (router + writer + freeze + UI), and execute them in that order.
 
 ## Decisions (with the user)
 | Topic | Decision |
@@ -90,6 +93,29 @@ design; this file holds *what has happened* and *what we learned*.
   torn-tail repair on both logs is the mitigation (spec says fsync).
 - **TLS on the dev laptop:** AVG Web-Shield can intercept HTTPS (MITM), and `uv` needs
   `--system-certs`.
+- **DuckDB is locked down at connect time (air-gap).** Probe on 2026-10-04: duckdb 1.4.3 bundles
+  `parquet` and `core_functions` but **not `json`**. `httpfs` sits installed in the dev laptop's user
+  cache, and `INSTALL` / `LOAD` still succeed after `lock_configuration`. So every connection opens
+  with `SET extension_directory` pointing at an empty `data/tmp/duckdb_ext` folder (owned by the
+  project), sets `autoinstall_known_extensions=false`, `autoload_known_extensions=false` and
+  `allow_community_extensions=false`, then sets `lock_configuration=true`. All app SQL goes through
+  `sr_duck_exec` / `sr_duck_query`, which refuse any statement starting with `INSTALL`, `FORCE INSTALL`,
+  `LOAD`, `SET`, `RESET`, `PRAGMA` or `ATTACH` (except the connection's own setup) and any string
+  literal matching `'[A-Za-z][A-Za-z0-9+.-]*://`. Never read JSON with DuckDB `read_json` (use
+  `jsonlite::stream_in` on a `file()` connection) and never use DuckDB's sqlite extension (use RSQLite).
+  Paths are never URLs: `sr_sniff` refuses `^[A-Za-z][A-Za-z0-9+.-]*://` before any read.
+- **Locked connection = no `SET threads`:** the reproducible sample (`REPEATABLE`) is deterministic only
+  on one thread, so it runs on its own short-lived single-threaded connection with the same lockdown.
+- **gz ingest is single-pass:** a gzip stream cannot be entered in the middle, so a `.gz` source is read
+  in one pass and is not resumable (bz2 / xz / zip are staged to `source.csv` first, then read normally).
+- **Quoted newlines force single-pass:** a CSV with line breaks inside quoted fields cannot be cut at a
+  record boundary without reading from the start, so it is read in one pass and is not resumable.
+- **Measuring RSS of a process blocked in DuckDB:** a `later::later()` poll cannot fire while R is inside
+  a DuckDB call, so `tools/scale_test.R` samples the parent from a separate `callr::r_bg` watcher via
+  `ps::ps_memory_info()` and cross-checks with the OS peak working set (`peak_wset`).
+- **Claude Code Bash tool and big heredocs:** a very large single heredoc can be rejected with
+  "unexpected EOF while looking for matching quote". Write files in small `cat >> file <<'EOF'` chunks
+  and keep commands such as `grep -P` out of the same call.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted
