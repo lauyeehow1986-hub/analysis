@@ -75,15 +75,23 @@ SR_PROFILE_TOP_N <- 10L
 
 # ---- the reproducible sample ------------------------------------------------------------------------
 
-# A fresh in-memory connection with the same lockdown as sr_duck() and ONE thread. Closed by the caller.
+# A fresh in-memory connection with the same lockdown as sr_duck(), ONE thread, its own spill directory
+# (<data>/tmp/sample) and half the application connection's memory limit, so the two never share spill
+# files or double the budget. Closed by the caller.
 .sr_prof_single_con <- function(project) {
   sr_duck(project)   # makes sure the project-owned directories exist
   caps <- sr_profile_caps(project$meta$profile)
   caps$duckdb_threads <- 1L
+  caps$duckdb_memory_gb <- caps$duckdb_memory_gb / 2
+  dirs <- .sr_duck_dirs(project)
+  dirs$tmp <- file.path(dirs$tmp, "sample")
+  if (!dir.exists(dirs$tmp) && !isTRUE(dir.create(dirs$tmp, recursive = TRUE, showWarnings = FALSE))) {
+    stop("cannot create DuckDB directory: ", dirs$tmp, call. = FALSE)
+  }
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   ok <- FALSE
   on.exit(if (!ok) try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE), add = TRUE)
-  .sr_duck_setup(con, .sr_duck_dirs(project), caps)
+  .sr_duck_setup(con, dirs, caps)
   ok <- TRUE
   con
 }
@@ -126,6 +134,9 @@ SR_PROFILE_TOP_N <- 10L
 #' The reproducible sample of a store table as a data.frame (rows ordered by every column). Reads the
 #' sample file for this seed made by sr_profile_table(); when there is none, makes one with the default
 #' sample size (100000 rows, or the whole table when it is smaller).
+#' While sr_blind(project) the outcome-role columns are dropped from the returned frame (there is no
+#' override). The sample parquet on disk keeps every column: it is an internal artefact and must not be
+#' shown or exported to anyone before the SAP is locked; always go through sr_sample().
 sr_sample <- function(project, table, seed = 1L) {
   seed <- .sr_prof_check_seed(seed)
   m <- sr_store_manifest(project, table)
@@ -134,7 +145,12 @@ sr_sample <- function(project, table, seed = 1L) {
   if (!file.exists(file)) file <- .sr_prof_ensure_sample(project, table, m, hash, SR_PROFILE_SAMPLE_N, seed)
   con <- sr_duck(project)
   cols <- vapply(m$schema, function(s) s$name, "")
-  sr_duck_query(con, sprintf("SELECT * FROM read_parquet(%s) ORDER BY %s", DBI::dbQuoteString(con, file),
+  keep <- cols
+  if (sr_blind(project)) keep <- setdiff(cols, sr_role_cols(project, table, "outcome"))
+  if (!length(keep)) stop("table '", table, "' has no column that may be shown before the SAP is locked", call. = FALSE)
+  # ORDER BY every stored column (the dropped ones too) so the row order does not depend on the filter
+  sr_duck_query(con, sprintf("SELECT %s FROM read_parquet(%s) ORDER BY %s",
+                             paste(DBI::dbQuoteIdentifier(con, keep), collapse = ", "), DBI::dbQuoteString(con, file),
                              paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", ")))
 }
 
@@ -170,7 +186,7 @@ sr_sample <- function(project, table, seed = 1L) {
       add(sprintf("stddev_samp(%s)", d), a("sd"))
       for (nm in names(SR_PROFILE_QUANTILES)) {
         fn <- if (exact) "quantile_cont" else "approx_quantile"
-        add(sprintf("%s(%s, %s)", fn, d, format(SR_PROFILE_QUANTILES[[nm]])), a(nm))
+        add(sprintf("%s(%s, %s)", fn, d, sprintf("%.2f", SR_PROFILE_QUANTILES[[nm]])), a(nm))
       }
     } else if (.sr_prof_is_varchar(types[i])) {
       add(sprintf("avg(length(%s))", q), a("nchar"))
@@ -283,6 +299,14 @@ sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, see
   seed <- .sr_prof_check_seed(seed)
   m <- sr_store_manifest(project, table)
   hash <- sr_store_hash(m)
+  pc <- .sr_prof_columns(project, table, m, hash)
+  sample_file <- .sr_prof_ensure_sample(project, table, m, hash, sample_n, seed)
+  list(columns = pc$columns, sample_file = sample_file, store_hash = hash, exact = pc$exact, rows = m$rows)
+}
+
+# The column frame of a table, from the cache when it is valid and computed (and cached) otherwise; no
+# sample is touched. Returns list(columns, exact). `m` is the table's manifest and `hash` its store hash.
+.sr_prof_columns <- function(project, table, m, hash) {
   schema <- data.frame(name = vapply(m$schema, function(s) s$name, ""),
                        type = vapply(m$schema, function(s) s$type, ""), stringsAsFactors = FALSE)
   redacted <- character()
@@ -302,8 +326,7 @@ sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, see
     # a cached one return identical values
     cols <- .sr_prof_from_json(.sr_parse_json(.sr_json(doc)))
   }
-  sample_file <- .sr_prof_ensure_sample(project, table, m, hash, sample_n, seed)
-  list(columns = cols, sample_file = sample_file, store_hash = hash, exact = exact, rows = m$rows)
+  list(columns = cols, exact = exact)
 }
 
 # ---- memory estimate --------------------------------------------------------------------------------
@@ -319,7 +342,8 @@ sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, see
 
 #' Estimate whether an analysis of `cols` fits in memory and choose a route if it does not.
 #' data bytes = rows * sum(bytes per column); model matrix = rows * p * 8 where `p` defaults to the number of
-#' columns plus (distinct levels - 1) for each VARCHAR column; need = data + 3 * model matrix. It fits when
+#' columns in `cols` (the outcome included, when it is listed) plus (distinct levels - 1) for each VARCHAR
+#' column; pass `p` to override that. GB means 1024^3 bytes throughout. need = data + 3 * model matrix. It fits when
 #' need <= 0.8 * the profile's RAM budget. When it does not: glm / lm -> "bigglm", cox -> "bam", ml ->
 #' "subsample". `override_rows` replaces the stored row count (tests). Returns list(need_gb, budget_gb,
 #' fits, route, reason, rows, p); the caller logs the decision.
@@ -338,14 +362,14 @@ sr_mem_estimate <- function(project, table, cols, method = c("glm", "lm", "cox",
       !(is.numeric(override_rows) && length(override_rows) == 1L && is.finite(override_rows) && override_rows >= 0)) {
     stop("override_rows must be a single non-negative number", call. = FALSE)
   }
-  prof <- sr_profile_table(project, table)
-  cp <- prof$columns
+  m <- sr_store_manifest(project, table)
+  cp <- .sr_prof_columns(project, table, m, sr_store_hash(m))$columns   # no sample is written
   unknown <- setdiff(cols, cp$column)
   if (length(unknown)) {
     stop("unknown column(s) for table '", table, "': ", paste(unknown, collapse = ", "), call. = FALSE)
   }
   cp <- cp[match(cols, cp$column), , drop = FALSE]
-  rows <- if (is.null(override_rows)) prof$rows else override_rows
+  rows <- if (is.null(override_rows)) m$rows else override_rows
   nchar <- ifelse(is.na(cp$mean_nchar), 16, cp$mean_nchar)   # a redacted outcome has no mean_nchar
   bytes <- vapply(seq_len(nrow(cp)), function(i) .sr_mem_bytes(cp$type[i], nchar[i]), numeric(1))
   cat_levels <- ifelse(vapply(cp$type, .sr_prof_is_varchar, logical(1)), pmax(cp$n_distinct, 1, na.rm = TRUE) - 1, 0)

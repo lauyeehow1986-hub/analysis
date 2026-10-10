@@ -155,8 +155,26 @@ test_that("a cache made before an outcome role was set is not reused while blind
 test_that("the cache is recomputed when the exact-vs-approximate decision changes", {
   p <- .pf_cardiac()
   expect_true(sr_profile_table(p, "cardiac")$exact)
+  cache <- list.files(file.path(p$paths$dir, "data", "profile"), full.names = TRUE)
+  expect_true(.sr_read_json_file(cache)$exact)
   withr::local_options(sr.profile_exact_max = 100)
+  seen <- character()
+  orig <- get("sr_duck_query", envir = globalenv())
+  assign("sr_duck_query", function(con, sql) {
+    seen <<- c(seen, sql)
+    orig(con, sql)
+  }, envir = globalenv())
+  withr::defer(assign("sr_duck_query", orig, envir = globalenv()))
   expect_false(sr_profile_table(p, "cardiac")$exact)
+  # a stale exact cache would have been reused: no approximate query would run and the file would say TRUE
+  expect_true(any(grepl("approx_quantile", seen, fixed = TRUE)))
+  expect_false(.sr_read_json_file(cache)$exact)
+  # and back again: the approximate cache is not reused for an exact request
+  withr::local_options(sr.profile_exact_max = 1e6)
+  seen <- character()
+  expect_true(sr_profile_table(p, "cardiac")$exact)
+  expect_true(any(grepl("quantile_cont", seen, fixed = TRUE)))
+  expect_true(.sr_read_json_file(cache)$exact)
 })
 
 test_that("a damaged cache file is recomputed", {
@@ -389,4 +407,105 @@ test_that("the estimate works for a blind outcome column", {
   e <- sr_mem_estimate(p, "cardiac", c("mortality_30d", "age", "statin"), "glm")
   expect_true(e$fits)
   expect_no_error(.sr_assert_blind(e, "mortality_30d", other_cols = "statin"))
+})
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+
+test_that("while blind, sr_sample drops the outcome column and passes the blind gate", {
+  p <- .pf_cardiac()
+  p <- sr_roles_set(p, "cardiac", c(mortality_30d = "outcome", statin = "exposure"))
+  expect_true(sr_blind(p))
+  sr_profile_table(p, "cardiac", sample_n = 300L)
+  s <- sr_sample(p, "cardiac")
+  expect_false("mortality_30d" %in% names(s))
+  expect_true(all(c("statin", "age", "patient_id") %in% names(s)))
+  expect_equal(nrow(s), 300L)
+  expect_no_error(.sr_assert_blind(s, "mortality_30d", other_cols = "statin"))
+  # a sample made on demand (no file yet) is filtered too
+  s2 <- sr_sample(p, "cardiac", seed = 9L)
+  expect_false("mortality_30d" %in% names(s2))
+})
+
+test_that("once the SAP is locked sr_sample returns the outcome column", {
+  p <- .pf_cardiac()
+  p <- sr_roles_set(p, "cardiac", c(mortality_30d = "outcome", statin = "exposure"))
+  expect_false("mortality_30d" %in% names(sr_sample(p, "cardiac")))
+  sr_reducer_register("sap.locked", function(state, event) {
+    state$sap$locked <- TRUE
+    state
+  })
+  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
+  p <- sr_project_append(p, "sap.locked", list())
+  expect_false(sr_blind(p))
+  s <- sr_sample(p, "cardiac")
+  expect_true("mortality_30d" %in% names(s))
+  expect_identical(names(s), vapply(sr_store_manifest(p, "cardiac")$schema, function(x) x$name, ""))
+})
+
+test_that("the sample connection is single-threaded, locked, and has its own spill dir and half the memory", {
+  p <- .pf_cardiac()
+  main <- sr_duck(p)
+  one <- .sr_prof_single_con(p)
+  withr::defer(DBI::dbDisconnect(one, shutdown = TRUE))
+  get1 <- function(con, name) DBI::dbGetQuery(con, sprintf("SELECT current_setting('%s') AS v", name))$v
+  expect_equal(as.integer(get1(one, "threads")), 1L)
+  expect_true(as.logical(get1(one, "lock_configuration")))
+  expect_false(as.logical(get1(one, "autoinstall_known_extensions")))
+  expect_false(as.logical(get1(one, "autoload_known_extensions")))
+  expect_false(as.logical(get1(one, "allow_community_extensions")))
+  tmp <- normalizePath(get1(one, "temp_directory"), winslash = "/", mustWork = FALSE)
+  data <- normalizePath(file.path(p$paths$dir, "data"), winslash = "/", mustWork = FALSE)
+  expect_identical(tmp, file.path(data, "tmp", "sample"))
+  expect_true(dir.exists(tmp))
+  expect_false(identical(tmp, normalizePath(get1(main, "temp_directory"), winslash = "/", mustWork = FALSE)))
+  # memory: half of the application connection's limit (both printed by DuckDB as "<x> GiB")
+  gib <- function(s) as.numeric(sub("[[:space:]]*GiB$", "", s))
+  expect_match(get1(one, "memory_limit"), "GiB$")
+  expect_equal(gib(get1(one, "memory_limit")), gib(get1(main, "memory_limit")) / 2, tolerance = 0.02)
+  expect_equal(as.integer(get1(main, "threads")), sr_profile_caps(p$meta$profile)$duckdb_threads)
+  # the lock holds
+  expect_error(DBI::dbExecute(one, "SET threads = 4"), "locked")
+})
+
+test_that("the sample connection is closed after a sample, and after a failure", {
+  p <- .pf_cardiac()
+  handles <- list()
+  orig <- get(".sr_prof_single_con", envir = globalenv())
+  assign(".sr_prof_single_con", function(project) {
+    con <- orig(project)
+    handles[[length(handles) + 1L]] <<- con
+    con
+  }, envir = globalenv())
+  withr::defer(assign(".sr_prof_single_con", orig, envir = globalenv()))
+  sr_profile_table(p, "cardiac", sample_n = 300L)
+  expect_length(handles, 1L)
+  expect_false(DBI::dbIsValid(handles[[1L]]))
+  # a failure inside the sample (a part file has gone) still closes it
+  m <- sr_store_manifest(p, "cardiac")
+  hash <- sr_store_hash(m)
+  unlink(.sr_prof_sample_path(p, "cardiac", hash, 5L))
+  part <- file.path(sr_store_dir(p, "cardiac"), m$parts[[1L]]$file)
+  file.rename(part, paste0(part, ".away"))
+  withr::defer(file.rename(paste0(part, ".away"), part))
+  expect_error(.sr_prof_ensure_sample(p, "cardiac", m, hash, 300L, 5L), "missing part")
+  expect_length(handles, 2L)
+  expect_false(DBI::dbIsValid(handles[[2L]]))
+  expect_length(list.files(file.path(p$paths$dir, "data", "sample"), pattern = "[.]tmp$"), 0L)
+})
+
+test_that("sr_mem_estimate has no side effect on the sample directory", {
+  p <- .pf_cardiac()
+  e <- sr_mem_estimate(p, "cardiac", c("age", "site"), "glm")
+  expect_true(e$fits)
+  expect_false(dir.exists(file.path(p$paths$dir, "data", "sample")))
+  expect_length(list.files(file.path(p$paths$dir, "data", "profile")), 1L)
+})
+
+test_that("quantile levels do not depend on options(OutDec)", {
+  p <- .pf_cardiac()
+  withr::local_options(OutDec = ",")
+  src <- sr_sample_cardiac(n = 2000L)$data
+  r <- .pf_row(sr_profile_table(p, "cardiac")$columns, "age")
+  expect_equal(r$q01, unname(stats::quantile(src$age, 0.01, type = 7)), tolerance = 1e-9)
+  expect_equal(r$q99, unname(stats::quantile(src$age, 0.99, type = 7)), tolerance = 1e-9)
 })
