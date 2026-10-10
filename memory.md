@@ -91,6 +91,17 @@ design; this file holds *what has happened* and *what we learned*.
 - **TLS on the dev laptop:** AVG Web-Shield can intercept HTTPS (MITM), and `uv` needs
   `--system-certs`.
 
+## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
+- **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted
+  `weight_kg` pounds, seeds fired / 20, before -> after: n=2000 4 -> 10; n=50000 0 -> 20; n=500000 0 -> 20
+  (n=5000 seeds 1-5: 2 of 5 -> 5 of 5). Clean-twin firing: 0 false positives at every n; the only warn+ findings
+  on the clean twin are the by-design missing_col / missing_dependence on death_date and statin_start_date.
+  n=2000 recall for weight_kg stays below 1.0: most pounds weights (x2.2) fall inside the kg soft range, so only
+  0-8 of 2000 are detectable, and some seeds have fewer than 3. The window for the share is (0.15%, 0.16%]:
+  3 of 2000 must stay silent (Task 14 test), 8 of 5000 must fire. The planted glucose 60s now also raise a
+  unit_mix finding (as mg/dL) at n=2000, next to outlier.
+- Grid run in full: 20 seeds x n in {2000, 50000, 500000}, recall 1.0 for every other planted row.
+
 ## Reuse sources
 - **structured_deidentification:** `project.R`, `hashchain.R`, `engine_py.R`, `run_engine.py`,
   `sdc*.R`, `report.R`, `tools/*.ps1`.

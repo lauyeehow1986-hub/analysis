@@ -24,7 +24,7 @@
 # date_order and immortal_time never pair the outcome with another column. Every `detail` is a data.frame
 # with a `column` field.
 
-SR_DQ_UNIT_MIX_MIN_SHARE <- 0.003
+SR_DQ_UNIT_MIX_MIN_SHARE <- 0.00155
 SR_DQ_UNIT_MIX_MIN_N <- 3L
 SR_DQ_HEAP_MIN_N <- 200L
 SR_DQ_HEAP_MIN_DISTINCT <- 20L

@@ -174,8 +174,10 @@ test_that("unit_mix finds the pounds in weight_kg and the mg/dL in creatinine_um
   d <- sr_sample_cardiac(n = 2000L)$data
   clean <- sr_sample_cardiac(n = 2000L, defects = FALSE)$data
   f <- .pl_run(p, "cardiac", "unit_mix")
-  # the five glucose values of 60 would also read as 60 mg/dL, but 5/2000 is below the 0.3% share: outlier reports them
-  expect_setequal(f$column, c("weight_kg", "creatinine_umol"))
+  # the five glucose values of 60 also read as 60 mg/dL (5/2000 is above the 0.155% share): unit_mix reports
+  # them next to outlier, which still flags them
+  expect_setequal(f$column, c("weight_kg", "creatinine_umol", "glucose_mmol"))
+  expect_true("glucose_mmol" %in% .pl_run(p, "cardiac", "outlier")$column)
   expect_true(all(f$severity == "warn" & f$domain == "plausibility"))
   # 40 weights were multiplied by 2.2046; only those above the soft maximum (200) are detectable, the
   # rest sit inside the plausible kg range. The clean twin has no weight above 140.
