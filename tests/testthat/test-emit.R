@@ -181,6 +181,69 @@ test_that(".sr_emit_check: no branch may depend on a diagnostic", {
   expect_true(.sr_emit_check("p <- spec$p; if (p > 3) 1", "diagnostic"))
 })
 
+test_that(".sr_emit_check refuses a forbidden function used as a value (aliases)", {
+  for (code in c("(system)('x')", "f <- system; f('x')", "Negate(system)", "g <- base::system",
+                 "h <- list(run = eval)", "sapply(1:2, FUN = unlink)", "f <- get; f('a')",
+                 "k <- function() library")) {
+    expect_error(.sr_emit_check(code, "analysis"), "forbidden", info = code)
+    expect_error(.sr_emit_check(code, "diagnostic"), "forbidden", info = code)
+  }
+  expect_error(.sr_emit_check("f <- readRDS; f('x')", prologue = FALSE), "readRDS")
+  expect_true(.sr_emit_check("f <- readRDS; f('x')", prologue = TRUE))
+})
+
+test_that("column names like source, get and url still work where they are not values", {
+  ok <- c(
+    "stats::lm(source ~ get + url, data = d)",
+    "stats::lm(log(source) ~ I(q^2) + get, data = d)",
+    "d$source; d$get; d$url; d$q",
+    'd[["source"]]; d[["get"]]',
+    "s@get; s@url",
+    "list(get = 1, url = 2, source = 3)",
+    'x <- c(system = 1, eval = 2); "system"',
+    "d[d$source > 1 & !is.na(d$url), ]",
+    "stats::lm(`source` ~ `get`, data = d)",
+    "f <- function(q, url = 1) q + url; f(1)",
+    "q <- 0.5; stats::qnorm(q)",
+    "get <- 3; get + 1"
+  )
+  for (code in ok) {
+    expect_true(.sr_emit_check(code, "analysis"), info = code)
+    expect_true(.sr_emit_check(code, "diagnostic"), info = code)
+  }
+  # a call inside a formula is still a call
+  expect_error(.sr_emit_check("stats::lm(y ~ I(system('x')), data = d)"), "system")
+})
+
+test_that("a diagnostic cannot gate a branch through a replacement assignment, a subscript or && / ||", {
+  bad <- c(
+    "res <- list(); res$z <- survival::cox.zph(f); if (res$z$table[1,3] < 0.05) 1",
+    "res <- list(); res[['z']] <- survival::cox.zph(f); if (res[['z']]$table[1,3] < 0.05) 1",
+    "res <- list(); res[1] <- list(survival::cox.zph(f)); if (res[[1]]$table[1,3] < 0.05) 1",
+    "res = list(); res$z = survival::cox.zph(f); if (res$z$table[1,3] < 0.05) 1",
+    "z <- survival::cox.zph(f); x[z$table[,3] < .05]",
+    "z <- survival::cox.zph(f); x[[z$table[1,3] < .05]]",
+    "x[survival::cox.zph(f)$table[,3] < .05]",
+    "z <- survival::cox.zph(f); z$table[1,3] < .05 && g()",
+    "z <- survival::cox.zph(f); g() || z$table[1,3] < .05",
+    "stats::shapiro.test(x)$p.value > .05 && g()"
+  )
+  for (code in bad) expect_error(.sr_emit_check(code, "diagnostic"), "diagnostic", info = code)
+  expect_error(.sr_emit_check(bad[1L], "diagnostic"), "branch")
+  expect_error(.sr_emit_check(bad[5L], "diagnostic"), "subscript")
+  # indexing the diagnostic itself, and branching on something else, stay fine
+  ok <- c(
+    "z <- survival::cox.zph(f); out <- z$table[1, 3]",
+    "z <- survival::cox.zph(f); out <- z$table[z$table[, 3] < 0.05, ]",
+    "res <- list(); res$z <- survival::cox.zph(f); out <- res$z$table[1, 3]",
+    "z <- survival::cox.zph(f); res <- list(); res$n <- nrow(d); if (res$n > 3) 1",
+    "z <- survival::cox.zph(f); x[1:3]; if (nrow(d) > 1 && ncol(d) > 1) 2",
+    "p <- spec$p; if (p > 3) 1",
+    "p <- spec$p; x[1:spec$p]"
+  )
+  for (code in ok) expect_true(.sr_emit_check(code, "diagnostic"), info = code)
+})
+
 test_that(".sr_emit_check: prologue-only calls", {
   for (code in c('readRDS("f")', 'readBin("f", "raw", 10L)', 'file.size("f")', 'base::readRDS("f")',
                  "openssl::sha256(raw())")) {

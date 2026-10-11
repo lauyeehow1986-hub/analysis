@@ -5,6 +5,12 @@
 # helpers are inlined with .sr_inline() so the exported analysis.R runs without StatRouter. Before
 # anything runs, .sr_emit_check() walks the parsed code and refuses what the Global Constraints forbid.
 # The diagnostic-call and p-name lists are the ones of core/lint.R, referenced and not restated.
+#
+# Threat model: the checker guards against hostile data text (column names, labels, levels) and
+# against route-author bugs. It is NOT a sandbox against a hostile route author. But every rule it
+# states holds for the obvious aliases: a forbidden function used as a value ((system)('x'),
+# f <- system, Negate(system)), and a branch on a diagnostic hidden behind a replacement assignment
+# (res$z <- cox.zph(f)), a subscript (x[z$table[, 3] < 0.05]) or && / ||.
 
 #' Backtick-quoted name for one non-NA, non-empty string. Round-trips any text, including a name with
 #' a backtick, quote, `);`, newline, backslash or non-ASCII letter, as a single symbol.
@@ -50,13 +56,14 @@
   TRUE
 }
 
+
 # ---- the emitted-code checker ----------------------------------------------------------------
 
 # Namespaces emitted code may call into. openssl is added for the prologue only.
 .sr_emit_pkgs <- c("base", "stats", "utils", "methods", "parallel", "survival", "mice", "sandwich",
                    "splines", "Hmisc", "logistf")
-# Never callable, bare or namespaced. The second block is indirection (look a function up by name,
-# reach into an environment), which would defeat the name checks.
+# Never callable, bare or namespaced, and never usable as a value (alias). The second block is
+# indirection (look a function up by name, reach into an environment), which would defeat the checks.
 .sr_emit_forbidden <- c(
   "system", "system2", "shell", "shell.exec", "Sys.setenv", "Sys.unsetenv", "setwd", "unlink",
   "file.remove", "file.rename", "file.copy", "download.file", "url", "socketConnection", "source",
@@ -72,7 +79,8 @@
 # another route (lapply(x, system), Reduce("system", ...)).
 .sr_emit_hof <- c("lapply", "sapply", "vapply", "Map", "mapply", "Reduce", "Filter", "Position",
                   "Find", "do.call", "outer", "apply", "tapply", "rapply", "eapply", "Vectorize")
-.sr_emit_branch <- c("if", "while", "switch", "ifelse", "if_else", "case_when")
+# Calls whose result depends on a condition: the checks for diagnostic-gated branching apply to them.
+.sr_emit_branch <- c("if", "while", "switch", "ifelse", "if_else", "case_when", "&&", "||")
 
 #' Short text of an expression for an error message.
 .sr_emit_show <- function(e) {
@@ -109,7 +117,15 @@
   c(.sr_lint_diag_calls, .sr_lint_pnames, .sr_lint_pr_strings, "$p")
 }
 
-#' Every `name <- rhs` in the parse trees: list(name, rhs).
+#' The variable a (replacement) assignment target modifies: x for x, x$a, x[[i]], x[i], names(x).
+.sr_emit_root <- function(lhs) {
+  while (is.call(lhs) && length(lhs) >= 2L) lhs <- lhs[[2L]]
+  if (is.character(lhs) && length(lhs) == 1L) lhs <- as.name(lhs)
+  if (is.symbol(lhs)) as.character(lhs) else NA_character_
+}
+
+#' Every `target <- rhs` (also `=` and `<<-`, and replacement forms) in the parse trees:
+#' list(name = root variable of the target, rhs).
 .sr_emit_assigns <- function(exprs) {
   nm <- character()
   rhs <- list()
@@ -117,10 +133,9 @@
     if (!is.call(x)) return(invisible())
     h <- x[[1L]]
     if (is.symbol(h) && as.character(h) %in% c("<-", "=", "<<-") && length(x) == 3L) {
-      lhs <- x[[2L]]
-      if (is.character(lhs) && length(lhs) == 1L) lhs <- as.name(lhs)
-      if (is.symbol(lhs)) {
-        nm <<- c(nm, as.character(lhs))
+      root <- .sr_emit_root(x[[2L]])
+      if (!is.na(root)) {
+        nm <<- c(nm, root)
         rhs[[length(rhs) + 1L]] <<- x[[3L]]
       }
     }
@@ -130,8 +145,29 @@
   list(name = nm, rhs = rhs)
 }
 
+#' Names the code binds itself: assigned variables and function parameters. They are exempt from the
+#' alias rule (a parameter called q is not the function q).
+.sr_emit_bound <- function(exprs) {
+  out <- character()
+  rec <- function(x) {
+    if (!is.call(x)) return(invisible())
+    h <- x[[1L]]
+    if (is.symbol(h)) {
+      hs <- as.character(h)
+      if (hs %in% c("<-", "=", "<<-") && length(x) == 3L && is.symbol(x[[2L]])) {
+        out <<- c(out, as.character(x[[2L]]))
+      }
+      if (hs == "function" && length(x) >= 2L) out <<- c(out, names(x[[2L]]))
+    }
+    for (i in seq_along(x)) if (!identical(x[[i]], quote(expr = ))) rec(x[[i]])
+  }
+  for (e in exprs) rec(e)
+  out
+}
+
 #' Variables whose value derives (through assignments, to a fixpoint) from a diagnostic, so that
-#' `z <- cox.zph(f); if (z$table[1, 3] < 0.05)` is caught as well as the direct form.
+#' `z <- cox.zph(f); if (z$table[1, 3] < 0.05)` is caught as well as the direct form. A replacement
+#' assignment (res$z <- cox.zph(f)) taints the root variable.
 .sr_emit_tainted <- function(exprs) {
   a <- .sr_emit_assigns(exprs)
   diag <- setdiff(.sr_emit_diag_names(), "$p")
@@ -149,10 +185,11 @@
   tainted
 }
 
-#' The condition expressions of a branching call (if / while / switch / ifelse / case_when).
+#' The condition expressions of a branching call (if / while / switch / ifelse / case_when / && / ||).
 .sr_emit_conditions <- function(e) {
   h <- as.character(e[[1L]])
   if (h %in% c("if", "while")) return(list(e[[2L]]))
+  if (h %in% c("&&", "||")) return(as.list(e)[-1L])
   if (length(e) < 2L) return(list())
   if (h == "case_when") {
     return(lapply(as.list(e)[-1L], function(a) {
@@ -167,9 +204,12 @@
 
 #' Check emitted code against the Global Constraints. Stops, naming the offending call, on the
 #' first violation; otherwise returns TRUE invisibly.
+#' A forbidden function name also counts when it appears as a bare symbol used as a value (an alias),
+#' except inside a formula, after `$` / `@`, as an argument name, as a string, or when the code binds
+#' that name itself (a parameter or variable called q or url).
 #' @param code one string of R code
 #' @param kind "analysis" (no diagnostic call or p-name at all) or "diagnostic" (diagnostics may
-#'   run, but no branch condition may depend on one)
+#'   run, but no branch condition, subscript or && / || operand may depend on one)
 #' @param prologue TRUE for the fixed prologue, which may also read the extract (readBin, readRDS,
 #'   file.size) and call openssl
 .sr_emit_check <- function(code, kind = c("analysis", "diagnostic"), prologue = FALSE) {
@@ -183,9 +223,16 @@
   )
   pkgs <- c(.sr_emit_pkgs, if (isTRUE(prologue)) "openssl")
   diag <- .sr_emit_diag_names()
+  diag_subscript <- setdiff(diag, "$p")
   tainted_vars <- if (kind == "diagnostic") .sr_emit_tainted(exprs) else character()
+  bound <- .sr_emit_bound(exprs)
+  barred_values <- c(.sr_emit_forbidden, if (!isTRUE(prologue)) .sr_emit_prologue_only)
   bad <- function(e, why) {
     stop("emitted code rejected: ", why, " in `", .sr_emit_show(e), "`", call. = FALSE)
+  }
+  depends <- function(expr, names) {
+    at <- .sr_emit_atoms(expr)
+    any(at %in% names) || any(at %in% tainted_vars)
   }
 
   # a name used as a function, bare or namespaced
@@ -196,12 +243,19 @@
     }
     if (kind == "analysis" && fn %in% diag) bad(e, sprintf("diagnostic '%s' in analysis code", fn))
   }
+  check_pname <- function(s, e) {
+    if (kind == "analysis" && nzchar(s) && s %in% .sr_lint_pnames) {
+      bad(e, sprintf("p-value name '%s' in analysis code", s))
+    }
+  }
 
-  walk <- function(e) {
+  # fm: inside a formula, where bare symbols are variable names, not values
+  walk <- function(e, fm = FALSE) {
     if (is.symbol(e)) {
       s <- as.character(e)
-      if (kind == "analysis" && nzchar(s) && s %in% .sr_lint_pnames) {
-        bad(e, sprintf("p-value name '%s' in analysis code", s))
+      check_pname(s, e)
+      if (!fm && s %in% barred_values && !(s %in% bound)) {
+        bad(e, sprintf("forbidden function '%s' used as a value", s))
       }
       return(invisible())
     }
@@ -227,10 +281,15 @@
       check_fn(hs, e)
       if (kind == "diagnostic" && hs %in% .sr_emit_branch) {
         for (cond in .sr_emit_conditions(e)) {
-          if (is.null(cond)) next
-          at <- .sr_emit_atoms(cond)
-          if (any(at %in% diag) || any(at %in% tainted_vars)) {
-            bad(e, "a branch condition depends on a diagnostic")
+          if (!is.null(cond) && depends(cond, diag)) bad(e, "a branch condition depends on a diagnostic")
+        }
+      }
+      # x[<diagnostic>] selects by a diagnostic; z$table[1, 3] (indexing the diagnostic itself) does not
+      if (kind == "diagnostic" && hs %in% c("[", "[[") && length(e) >= 3L &&
+          !identical(e[[2L]], quote(expr = )) && !depends(e[[2L]], diag)) {
+        for (i in seq_along(e)[-(1:2)]) {
+          if (!identical(e[[i]], quote(expr = )) && depends(e[[i]], diag_subscript)) {
+            bad(e, "a subscript (a branch condition) depends on a diagnostic")
           }
         }
       }
@@ -259,20 +318,35 @@
     } else if (is.call(h)) {
       head_fn <- if (is.symbol(h[[1L]])) as.character(h[[1L]]) else ""
       if (!(head_fn %in% c("::", ":::", "function", "("))) bad(e, "call through a computed function")
-      walk(h)
+      walk(h, fm)
     } else {
       bad(e, "call through a computed function")
     }
 
     # a function literal: formals defaults, then the body
     if (!is.na(hs) && hs == "function") {
-      fm <- e[[2L]]
-      for (i in seq_along(fm)) if (!identical(fm[[i]], quote(expr = ))) walk(fm[[i]])
-      if (length(e) >= 3L && !identical(e[[3L]], quote(expr = ))) walk(e[[3L]])
+      fml <- e[[2L]]
+      for (i in seq_along(fml)) if (!identical(fml[[i]], quote(expr = ))) walk(fml[[i]], fm)
+      if (length(e) >= 3L && !identical(e[[3L]], quote(expr = ))) walk(e[[3L]], fm)
       return(invisible())
     }
+    child_fm <- fm || identical(hs, "~")
     for (i in seq_along(e)[-1L]) {
-      if (!identical(e[[i]], quote(expr = ))) walk(e[[i]])
+      if (identical(e[[i]], quote(expr = ))) next
+      a <- e[[i]]
+      # the right-hand side of $ and @ is a field name, not a value
+      if (identical(hs, "$") || identical(hs, "@")) {
+        if (i == 3L && is.symbol(a)) {
+          check_pname(as.character(a), a)
+          next
+        }
+      }
+      # an assignment target is a binding, not a value
+      if (!is.na(hs) && hs %in% c("<-", "=", "<<-") && i == 2L && is.symbol(a)) {
+        check_pname(as.character(a), a)
+        next
+      }
+      walk(a, child_fm)
     }
     invisible()
   }
