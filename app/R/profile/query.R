@@ -19,10 +19,12 @@
 #
 # Outcome-blind rule: while sr_blind(project), a value of an outcome-family column (sr_outcome_family_cols:
 # outcome, event, event_date, censor_date, time, offset, by lineage) is never written, unless the finding is
-# on that column itself and its domain is completeness or plausibility. A filter that reads a family column
-# (it would tell which records have which outcome) collapses the finding to one row, unless that same
-# exception holds. On an outcome-dependent table (sr_outcome_dependent) every finding collapses to one row:
-# the records it selects, and how many there are, are counts of a table the outcome shaped. The whole sheet
+# on a column whose own role is exactly `outcome` and its domain is completeness or plausibility. A filter
+# that reads a family column (it would tell which records have which outcome) collapses the finding to one
+# row, unless that same exception holds. The exception is the outcome role only: the records where an
+# event_date, censor_date, time, event or offset column is missing (or implausible) are the survivors or the
+# censored, and intersecting them with another finding's records gives the outcome by that column. On an
+# outcome-dependent table (sr_outcome_dependent) every finding collapses to one row: the records it selects, and how many there are, are counts of a table the outcome shaped. The whole sheet
 # passes .sr_assert_blind() with the family as the outcome columns, and each question passes the same text
 # screen as a decision reason (.sr_sg_assert_text). The row number used as record_id never orders by a
 # family column.
@@ -85,10 +87,18 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
 
 # ---- the outcome-blind rules ------------------------------------------------------------------------
 
-# TRUE when the value of the finding's column may be written: always, except a blind outcome column outside
-# the finding domains that are about the outcome column itself.
-.sr_qy_show_value <- function(blind, is_outcome, domain) {
-  !(isTRUE(blind) && isTRUE(is_outcome)) || domain %in% c("completeness", "plausibility")
+# TRUE when the value of the finding's column may be written: always, except a blind outcome-family column
+# outside the one exception (.sr_qy_allowed_self).
+.sr_qy_show_value <- function(blind, is_outcome, domain, allowed_self = isTRUE(is_outcome) &&
+                                domain %in% c("completeness", "plausibility")) {
+  !(isTRUE(blind) && isTRUE(is_outcome)) || isTRUE(allowed_self)
+}
+
+# TRUE when finding row `f` is the blind exception: a completeness or plausibility finding on a column
+# whose own role is exactly `outcome` (`outcome_role`). Every other family column (event, event_date,
+# censor_date, time, offset) collapses.
+.sr_qy_allowed_self <- function(f, outcome_role) {
+  f$column %in% outcome_role && f$domain %in% c("completeness", "plausibility")
 }
 
 # TRUE when, while blind, the filter reads an outcome column and the finding is not the allowed one on the
@@ -109,6 +119,7 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
   types <- stats::setNames(vapply(m$schema, function(s) s$type, ""), cols)
   q <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
   id <- sr_role_cols(project, table, "id")
+  outcome_role <- sr_role_cols(project, table, "outcome")
   if (length(id)) {
     base <- sprintf("SELECT * FROM %s", q(table))
     rid <- q(id[1L])
@@ -122,7 +133,7 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
     base <- sprintf("SELECT sr_t.*, row_number() OVER (%s) AS sr_qy_rid FROM %s AS sr_t", over, q(table))
     rid <- "sr_qy_rid"
   }
-  list(con = con, cols = cols, types = types, q = q, base = base, rid = rid)
+  list(con = con, cols = cols, types = types, q = q, base = base, rid = rid, outcome_role = outcome_role)
 }
 
 # The rows of finding row `f` (a one-row findings frame): list(total, record_id, current_value), the vectors
@@ -132,8 +143,8 @@ SR_QUERY_COLS <- c("query_id", "record_id", "column", "current_value", "check", 
   col <- f$column
   w <- f$where[[1L]]
   is_out <- col %in% outcome_cols
-  allowed_self <- is_out && f$domain %in% c("completeness", "plausibility")
-  show <- .sr_qy_show_value(blind, is_out, f$domain) && col %in% ctx$cols
+  allowed_self <- is_out && .sr_qy_allowed_self(f, ctx$outcome_role)
+  show <- .sr_qy_show_value(blind, is_out, f$domain, allowed_self) && col %in% ctx$cols
   if (is.null(w) || isTRUE(dependent) || .sr_qy_hides_rows(w, outcome_cols, blind, allowed_self)) {
     return(list(total = 1, record_id = NA_character_, current_value = NA_character_))
   }

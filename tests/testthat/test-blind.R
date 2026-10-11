@@ -280,3 +280,28 @@ test_that("DQ findings stored before the roles were set are re-filtered against 
   expect_identical(.bl_crossing(sr_dq_findings(q2, "cardiac"), fam, cols), character())
   expect_false(any(sr_dq_findings(q2, "cardiac")$check %in% c("missing_pattern", "missing_row")))
 })
+
+test_that("the query sheet lists record ids for the outcome role only, never behind another family column (B)", {
+  p <- .fx_project()
+  withr::defer(sr_duck_close(p))
+  s <- sr_sample_cardiac(n = 2000L, defects = FALSE)$data
+  set.seed(11)
+  s$mortality_30d[sample(nrow(s), 150L)] <- NA
+  p <- .bl_ingest(p, s, "cardiac")
+  p <- .bl_roles(p)
+  p <- sr_dq_run(p, "cardiac")
+  f <- sr_dq_findings(p, "cardiac")
+  i_dd <- f$id[f$check == "missing_col" & f$column == "death_date"]
+  i_mo <- f$id[f$check == "missing_col" & f$column == "mortality_30d"]
+  expect_length(i_dd, 1L)
+  expect_length(i_mo, 1L)
+  sheet <- file.path(p$paths$dir, "q.xlsx")
+  p <- sr_query_sheet(p, "cardiac", finding_ids = c(i_dd, i_mo), path = sheet)
+  d <- as.data.frame(readxl::read_excel(sheet, col_types = "text"), stringsAsFactors = FALSE)
+  dd <- d[d$column == "death_date", , drop = FALSE]
+  expect_identical(nrow(dd), 1L)
+  expect_true(all(is.na(dd$record_id)))
+  mo <- d[d$column == "mortality_30d", , drop = FALSE]
+  expect_identical(nrow(mo), 150L)
+  expect_false(anyNA(mo$record_id))
+})
