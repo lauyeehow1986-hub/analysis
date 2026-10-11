@@ -317,13 +317,7 @@ test_that("once the SAP is locked the outcome row is filled in", {
   p <- sr_roles_set(p, "cardiac", c(mortality_30d = "outcome", statin = "exposure"))
   blind <- sr_profile_table(p, "cardiac")
   expect_true(is.na(.pf_row(blind$columns, "mortality_30d")$mean))
-  expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))   # P1d owns the real one
-  sr_reducer_register("sap.locked", function(state, event) {
-    state$sap$locked <- TRUE
-    state
-  })
-  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
-  p <- sr_project_append(p, "sap.locked", list())
+  p <- .fx_unblind(p)
   expect_false(sr_blind(p))
   open <- sr_profile_table(p, "cardiac")
   src <- sr_sample_cardiac(n = 2000L)$data
@@ -430,12 +424,7 @@ test_that("once the SAP is locked sr_sample returns the outcome column", {
   p <- .pf_cardiac()
   p <- sr_roles_set(p, "cardiac", c(mortality_30d = "outcome", statin = "exposure"))
   expect_false("mortality_30d" %in% names(sr_sample(p, "cardiac")))
-  sr_reducer_register("sap.locked", function(state, event) {
-    state$sap$locked <- TRUE
-    state
-  })
-  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
-  p <- sr_project_append(p, "sap.locked", list())
+  p <- .fx_unblind(p)
   expect_false(sr_blind(p))
   s <- sr_sample(p, "cardiac")
   expect_true("mortality_30d" %in% names(s))
@@ -541,12 +530,7 @@ test_that("a blind sample's row order ignores the dropped outcome column", {
   # deterministic for a seed
   expect_identical(sr_sample(p, "bo", seed = 3L), s)
   # once unblinded the order is by every column, the outcome first
-  sr_reducer_register("sap.locked", function(state, event) {
-    state$sap$locked <- TRUE
-    state
-  })
-  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
-  p <- sr_project_append(p, "sap.locked", list())
+  p <- .fx_unblind(p)
   expect_false(sr_blind(p))
   u <- sr_sample(p, "bo", seed = 3L)
   expect_identical(names(u), c("out", "uid", "grp"))

@@ -40,17 +40,6 @@
   f[f$check == check & (is.null(column) | f$column %in% column), , drop = FALSE]
 }
 
-# A project whose SAP is locked, through a throwaway sap.locked reducer that is removed on exit.
-.st_unblind <- function(p, env = parent.frame()) {
-  expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))   # P1d owns the real one
-  sr_reducer_register("sap.locked", function(state, event) {
-    state$sap$locked <- TRUE
-    state
-  })
-  withr::defer(rm(list = "sap.locked", envir = .sr_reducers), envir = env)
-  sr_project_append(p, "sap.locked", list())
-}
-
 # ---- registration ----------------------------------------------------------------------------------
 
 test_that("the ten checks are registered after the plausibility checks, in a fixed order", {
@@ -169,7 +158,7 @@ test_that("collinear flags bmi / bmi_copy on the sample and keeps the outcome ou
   df <- data.frame(y = y, copy = y * 2 + 1, x = sin(seq_len(200)))
   p2 <- .st_small(df, roles = c(y = "outcome"))
   expect_identical(nrow(.st_one(p2, "small", "collinear")), 0L)
-  p3 <- .st_unblind(p2)
+  p3 <- .fx_unblind(p2)
   f3 <- .st_one(p3, "small", "collinear")
   expect_identical(nrow(f3), 1L)
   expect_identical(f3$column, "copy")
@@ -263,7 +252,7 @@ test_that("separation names the column only while blind", {
 })
 
 test_that("unblinded, leakage carries the AUC and separation lists the levels", {
-  p <- .st_unblind(.st_cardiac())
+  p <- .fx_unblind(.st_cardiac())
   expect_false(sr_blind(p))
   f <- .st_run(p, "cardiac", c("leakage", "separation"))
   lk <- f[f$check == "leakage" & f$column == "lab_status", ]
@@ -309,7 +298,7 @@ test_that("post_outcome_date flags a date mostly after the event date: a flag wh
   expect_true(is.na(fb$n_affected) && is.na(fb$p_affected))
   expect_match(fb$message, "withheld until the SAP is locked", fixed = TRUE)
   expect_false(grepl("ev_date", fb$message, fixed = TRUE))
-  f <- .st_one(.st_unblind(ps), "small", "post_outcome_date")
+  f <- .st_one(.fx_unblind(ps), "small", "post_outcome_date")
   expect_identical(f$column, "after")
   expect_identical(f$severity, "warn")
   expect_identical(f$domain, "leakage")
@@ -354,7 +343,7 @@ test_that("blind leakage and separation never test the exposure roles; unblinded
   f <- .st_run(p, "small", c("leakage", "separation"))
   expect_true(all(c("leakage", "separation") %in% f$check[f$column == "trt_copy"]))   # an ordinary column is tested
   expect_false(any(f$column %in% c("trt", "start")))                                 # the exposure roles are not
-  p2 <- .st_unblind(p)
+  p2 <- .fx_unblind(p)
   f2 <- .st_run(p2, "small", c("leakage", "separation"))
   expect_true(all(c("leakage", "separation") %in% f2$check[f2$column == "trt"]))
   expect_true("leakage" %in% f2$check[f2$column == "start"])
@@ -363,7 +352,7 @@ test_that("blind leakage and separation never test the exposure roles; unblinded
 test_that("a separation finding keeps its id across the SAP lock", {
   p <- .st_cardiac()
   blind <- .st_one(p, "cardiac", "separation")
-  p2 <- .st_unblind(p)
+  p2 <- .fx_unblind(p)
   open <- .st_one(p2, "cardiac", "separation")
   expect_false(is.null(open$where[[which(open$column == "lab_status")]]))             # unblinded carries a where
   expect_identical(open$id[order(open$column)], blind$id[order(blind$column)])
@@ -379,8 +368,4 @@ test_that("collinear needs at least 30 complete pairs", {
   f <- .st_one(.st_small(df), "small", "collinear")
   expect_identical(f$column, "h")
   expect_identical(f$detail[[1L]]$pair$other, "g")
-})
-
-test_that("the throwaway sap.locked reducer is gone after the unblinding tests", {
-  expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))
 })
