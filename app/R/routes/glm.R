@@ -166,6 +166,7 @@
                "stringsAsFactors = FALSE)"),
         ".conv <- TRUE",
         ".sep <- FALSE",
+        ".rab <- FALSE",
         ".aliased <- character()")
     } else {
       c(sprintf("fit <- suppressWarnings(stats::glm(.y ~ %s, data = des, family = %s))", tc$rhs, family),
@@ -180,7 +181,12 @@
         sprintf(".V <- .h_vcov(fit, %s, %s)[.nm, .nm, drop = FALSE]", .sr_lit(se), cluster_arg),
         "tab <- .h_coef_table(.cf[.ok], .V, df = Inf)",
         ".conv <- isTRUE(fit$converged)",
-        ".sep <- any(fit$fitted.values < 1e-08 | fit$fitted.values > 1 - 1e-08)",
+        if (identical(kind, "modpois")) {
+          # separation is a binomial notion; a log-link fit can instead predict risks above 1
+          c(".sep <- FALSE", ".rab <- any(fit$fitted.values > 1)")
+        } else {
+          c(".sep <- any(fit$fitted.values < 1e-08 | fit$fitted.values > 1 - 1e-08)", ".rab <- FALSE")
+        },
         ".aliased <- names(.cf)[!.ok]")
     }
     code <- c(
@@ -205,7 +211,7 @@
              "events = sum(des[[\".y\"]]), df = Inf, se_type = ", .sr_lit(se), ", n_clusters = .ncl, level = 0.95, ",
              "levels = .sr_fixed$levels, penalty = ", .sr_lit(if (firth) "firth" else "none"),
              ", family = ", .sr_lit(if (identical(kind, "modpois")) "poisson" else "binomial"),
-             ", converged = .conv, near_separation = .sep, obs = if (is.null(.obs)) data.frame() else .obs, ",
+             ", converged = .conv, near_separation = .sep, risk_above_one = .rab, obs = if (is.null(.obs)) data.frame() else .obs, ",
              "marginal = ", mg$value, ")")
     )
     paste(code, collapse = "\n")
@@ -310,14 +316,27 @@
     frag$glm_separation <- paste("Fitted probabilities are numerically 0 or 1 for some rows (near-separation):",
                                  "maximum-likelihood estimates and intervals are unreliable; consider the Firth penalised model.")
   }
+  mgv <- value$marginal
+  mg_above <- !is.null(mgv) && !is.null(mgv$rows) && any(c(mgv$rows$p1, mgv$rows$p0) > 1, na.rm = TRUE)
+  if (!odds && (isTRUE(value$risk_above_one) || mg_above)) {
+    frag$glm_risk_above_one <- paste("The log-link model predicts risks above 1 for some rows or for a standardised risk:",
+                                     "the risk ratios are extrapolated beyond the possible range for those covariate values,",
+                                     "so interpret them with caution.")
+  }
   if (!is.null(value$obs) && nrow(value$obs)) {
     ob <- value$obs
     tables$observed_risk <- data.frame(
       `Exposure level` = ob$level, N = sprintf("%d", as.integer(round(ob$n))),
       Events = sprintf("%d", as.integer(round(ob$events))),
       `Risk (95% Wilson CI)` = sr_fmt_ci(ob$est, ob$lo, ob$hi), check.names = FALSE, stringsAsFactors = FALSE)
+    # the crude risk per exposure level, descriptive only (the Wilson interval is not a model interval)
+    effects <- rbind(effects, data.frame(
+      term = paste0("Observed risk (", exposure, " = ", ob$level, ")"), measure = "risk",
+      est = ob$est, lo = ob$lo, hi = ob$hi, p = NA_real_, scale = NA_character_, level = ob$level,
+      mcse = NA_real_, role = "descriptive", conditional = FALSE, ci_method = "wilson",
+      n = ob$n, events = ob$events, stringsAsFactors = FALSE))
+    rownames(effects) <- NULL
   }
-  mgv <- value$marginal
   if (!is.null(mgv) && !is.null(mgv$rows)) {
     mp <- .sr_marg_present(value, exposure, "risk", ci_base)
     effects <- rbind(effects, mp$effects)

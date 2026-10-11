@@ -21,11 +21,12 @@
 #' @param exposure_col name of the exposure column in `data` / `over`
 #' @param levels c(exposed, reference): the two values the exposure is set to
 #' @param V covariance matrix of the estimated coefficients (aliased ones dropped, or NA-filled)
-#' @param over the rows to standardise over (default `data`)
+#' @param over the rows to standardise over (NULL, the default, means `data`)
 #' @return list(p1, p0, rd, rd_se, log_rr, log_rr_se): the standardised means under the exposed and
 #'   reference level, their difference and its SE, and the log ratio and its SE (NA when a mean is
 #'   not positive)
-.sr_h_gcomp <- function(fit, data, exposure_col, levels, V, over = data) {
+.sr_h_gcomp <- function(fit, data, exposure_col, levels, V, over = NULL) {
+  if (is.null(over)) over <- data
   if (!is.character(exposure_col) || length(exposure_col) != 1L || is.na(exposure_col) ||
       !(exposure_col %in% names(data)) || !(exposure_col %in% names(over))) {
     stop("exposure must be the name of a column of the data")
@@ -242,6 +243,7 @@
     } else {
       list(nnt = NA_real_, lo = NA_real_, hi = NA_real_, label = "NNT not available")
     }
+    # NNT stays descriptive: the RD row above carries the inference and the NNT is derived from it
     out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal NNT)"), "NNT", nt$nnt, nt$lo, nt$hi, NA_real_,
                                    NA_character_, g$level, "descriptive", "altman_from_rd")
     tab[[length(tab) + 1L]] <- data.frame(

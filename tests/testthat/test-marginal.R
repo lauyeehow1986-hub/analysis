@@ -90,6 +90,13 @@ test_that(".h_gcomp standardises over `over` when given, and with interactions i
   expect_equal(sw$rd_se, g_all$rd_se, tolerance = 1e-12)
 })
 
+test_that(".h_gcomp with over = NULL standardises over data, like the default", {
+  d <- .mg_df()
+  fit <- stats::glm(y ~ a * x1 + x2, data = d, family = stats::binomial())
+  V <- stats::vcov(fit)
+  expect_identical(.sr_h_gcomp(fit, d, "a", c(1, 0), V, over = NULL), .sr_h_gcomp(fit, d, "a", c(1, 0), V, over = d))
+})
+
 test_that(".h_gcomp sets a factor exposure to each level", {
   d <- .mg_df()
   fit <- stats::glm(y ~ g + x1 + x2, data = d, family = stats::binomial())
