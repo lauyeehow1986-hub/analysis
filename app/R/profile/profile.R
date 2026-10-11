@@ -12,10 +12,13 @@
 # NA. The cache records which columns were redacted (`redacted_cols`), so a cache made before the roles
 # were set, or before the SAP was locked, is never reused across that change. While blind, the profile of
 # an outcome-dependent table (sr_outcome_dependent: a clean table whose recipe touched the outcome family,
-# a cohort with an outcome-dependent step, or anything derived from one) has no counts: its row count,
-# every n, n_missing and p_missing, and the counts of its top values are NA (the cache keeps them; only
-# the returned value is redacted). The DQ checks use the unredacted profile internally and withhold their
-# own counts (dq.R).
+# a cohort with an outcome-dependent step, or anything derived from one) has no statistic at all: any
+# summary of a table the outcome shaped is an outcome statistic (the mean of a covariate over the
+# survivors is that covariate given survival). Its row count and every numeric or text summary of every
+# column (n, n_missing, p_missing, n_distinct, min, max, mean, sd, the quantiles, mean_nchar, the parse
+# shares) are NA, top_values is empty and sample_file is NA; column and type stay (the cache keeps the
+# values; only the returned value is redacted). The DQ checks use the unredacted profile internally and
+# withhold their own numbers (dq.R).
 #
 # The reproducible sample is DuckDB `USING SAMPLE reservoir(n ROWS) REPEATABLE (seed)`. REPEATABLE is
 # deterministic only on a single thread, and the application connection is configuration-locked (its
@@ -305,24 +308,28 @@ sr_sample <- function(project, table, seed = 1L) {
 #'  - while sr_blind(project), the outcome-role columns keep only type, n, n_missing, p_missing, min, max,
 #'    n_distinct and top_values; the other fields are NA.
 #'  - `sample_file` is the reproducible reservoir sample (min(sample_n, rows) rows) for `seed`.
-#'  - while sr_blind(project) and sr_outcome_dependent(project, table), `rows`, every n, n_missing and
-#'    p_missing, and the n of every top value are NA (see the header).
+#'  - while sr_blind(project) and sr_outcome_dependent(project, table), `rows`, `sample_file` and every
+#'    statistic of every column are NA and top_values is empty; only column and type stay (see the header).
 sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, seed = 1L) {
   out <- .sr_profile_table(project, table, sample_n, seed)
   if (sr_blind(project) && sr_outcome_dependent(project, table)) out <- .sr_prof_withhold(out)
   out
 }
 
-# The counts of a profile withheld (an outcome-dependent table while blind; see the header).
+# The statistics of a profile withheld (an outcome-dependent table while blind; see the header): every
+# field but column and type is NA (numeric or text, as it was), top_values is empty, and so are the row
+# count and the sample file.
 .sr_prof_withhold <- function(prof) {
   prof$rows <- NA_real_
+  prof$sample_file <- NA_character_
   cols <- prof$columns
   if (nrow(cols)) {
-    for (k in intersect(c("n", "n_missing", "p_missing"), names(cols))) cols[[k]] <- rep(NA_real_, nrow(cols))
+    for (k in setdiff(names(cols), c("column", "type", "top_values"))) {
+      cols[[k]] <- if (is.character(cols[[k]])) rep(NA_character_, nrow(cols)) else rep(NA_real_, nrow(cols))
+    }
     if ("top_values" %in% names(cols)) {
       cols$top_values <- lapply(cols$top_values, function(tv) {
-        if (is.data.frame(tv) && "n" %in% names(tv)) tv$n <- rep(NA_real_, nrow(tv))
-        tv
+        data.frame(value = character(), n = numeric(), stringsAsFactors = FALSE)
       })
     }
   }

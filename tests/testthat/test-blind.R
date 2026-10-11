@@ -305,3 +305,39 @@ test_that("the query sheet lists record ids for the outcome role only, never beh
   expect_identical(nrow(mo), 150L)
   expect_false(anyNA(mo$record_id))
 })
+
+test_that("the profile and DQ findings of an outcome-dependent table carry no numeric summary while blind (C)", {
+  p <- .bl_project()
+  p <- sr_recipe_add(p, "cardiac", .bl_step("drop_cases", list(where = list(col = "mortality_30d", op = "==", value = 1),
+                                                              confirm_outcome_dependent = TRUE), "died"))
+  p <- sr_recipe_apply(p, "cardiac")
+  expect_true(sr_outcome_dependent(p, "cardiac_clean"))
+  pr <- sr_profile_table(p, "cardiac_clean")
+  pc <- pr$columns
+  expect_true(nrow(pc) > 0L)
+  expect_false(anyNA(pc$column))
+  expect_false(anyNA(pc$type))
+  stats <- c("n", "n_missing", "p_missing", "n_distinct", "min", "max", "mean", "sd", names(SR_PROFILE_QUANTILES),
+             "mean_nchar", "p_numeric_parsable", "p_date_parsable")
+  for (k in stats) expect_true(all(is.na(pc[[k]])), info = k)
+  expect_true(all(vapply(pc$top_values, nrow, 1L) == 0L))
+  expect_true(is.na(pr$rows))
+  expect_true(is.na(pr$sample_file))
+  # the DQ findings keep their check, column and severity, and drop every number of their detail
+  p <- sr_dq_run(p, "cardiac_clean")
+  f <- sr_dq_findings(p, "cardiac_clean")
+  expect_true(nrow(f) > 0L)
+  for (i in seq_len(nrow(f))) {
+    for (d in f$detail[[i]]) {
+      for (k in names(d)) if (is.numeric(d[[k]])) expect_true(all(is.na(d[[k]])), info = paste(f$check[i], k))
+    }
+  }
+  expect_true(all(lengths(f$examples) == 0L))
+  expect_false(any(grepl("[0-9][.][0-9]|%", f$message)))
+  # once the SAP is locked the summaries come back
+  p2 <- p
+  p2$state$sap <- list(locked = TRUE)
+  pc2 <- sr_profile_table(p2, "cardiac_clean")$columns
+  expect_false(is.na(pc2$mean[pc2$column == "age"]))
+  expect_false(is.na(pc2$max[pc2$column == "age"]))
+})

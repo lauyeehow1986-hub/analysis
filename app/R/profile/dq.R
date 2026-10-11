@@ -34,10 +34,12 @@
 # name only (no AUC, level, count or direction). Every finding set passes .sr_assert_blind() with the family
 # as the outcome columns before it is stored. A check that fails while blind stores only its name: its
 # error message could quote a value. On an outcome-dependent table (sr_outcome_dependent: a clean table
-# whose recipe touched the family, a cohort with an outcome-dependent step, anything derived from one) the
-# counts are an outcome statistic while blind: every finding keeps its check, column, severity, where and
-# examples, but n_affected and p_affected are NA, the message is a generic one, and the count fields of
-# its detail are NA. Run the checks again after the SAP is locked for the counts.
+# whose recipe touched the family, a cohort with an outcome-dependent step, anything derived from one)
+# every number is an outcome statistic while blind (a median or an SMD over the survivors is one given
+# survival): every finding keeps its check, column, severity and where, but n_affected and p_affected are
+# NA, the message is a generic one, every numeric field of its detail is NA and it has no examples (the
+# values of the table); an outlier finding has no where either (its cut-offs are the median and robust SD
+# of the table). Run the checks again after the SAP is locked for the numbers.
 #
 # The roles may change after a run (the Variable roles card follows the data cards). While blind,
 # sr_dq_findings() therefore applies the same rule at read time, against the CURRENT roles: a column that
@@ -396,20 +398,23 @@ sr_dq_run <- function(project, table, checks = NULL) {
     })
 }
 
-# The detail fields that are counts or shares of rows.
-.sr_dq_count_field_re <- "^(n|p|k|groups|extra_rows|mean_rows|min_rows|max_rows|observed|freq_ratio)$|^(n|p)_"
+# The checks whose `where` holds a statistic of the table (outlier: the median +- z robust SDs).
+SR_DQ_WHERE_STAT_CHECKS <- "outlier"
 
-# The findings of an outcome-dependent table while blind: the counts withheld (see the header).
+# The findings of an outcome-dependent table while blind: the counts and every other number withheld (see
+# the header).
 .sr_dq_withhold <- function(f) {
   if (!nrow(f)) return(f)
   f$n_affected <- rep(NA_integer_, nrow(f))
   f$p_affected <- rep(NA_real_, nrow(f))
   f$message <- sprintf("%s: %s finding (counts withheld until the SAP is locked: this table depends on the outcome)",
                        ifelse(f$column == "*", "the table", f$column), f$check)
+  f$examples <- lapply(f$examples, function(x) character())
+  f$where[f$check %in% SR_DQ_WHERE_STAT_CHECKS] <- list(NULL)
   f$detail <- lapply(f$detail, function(d) {
     lapply(d, function(x) {
       if (!is.data.frame(x)) return(x)
-      for (k in names(x)[grepl(.sr_dq_count_field_re, names(x))]) {
+      for (k in names(x)) {
         if (is.numeric(x[[k]])) x[[k]] <- rep(NA_real_, nrow(x))
       }
       x
