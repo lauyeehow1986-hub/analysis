@@ -9,7 +9,7 @@ fx_lung <- function() {
 
 # Run setup + design (+ outcome code) the way a route will: sr_data in scope, then .h_design(d).
 fx_build <- function(spec, data, kind = NULL) {
-  tc <- sr_terms_code(spec, data = data)
+  tc <- sr_terms_code(spec)
   env <- new.env(parent = globalenv())
   env$sr_data <- data
   code <- paste(tc$setup, tc$design, sep = "\n")
@@ -55,10 +55,13 @@ test_that("an RCS(4) term fixes knots from observed data and matches a direct fi
   y <- as.integer(lung$status == 2)
   f2 <- lm(y ~ lung$sex + basis)
   expect_equal(unname(coef(f1)), unname(coef(f2)), tolerance = 1e-10)
-  # coef_map names equal the names coef() returns (without the intercept)
-  expect_identical(b$tc$coef_map$coef, names(coef(f1))[-1])
-  expect_identical(b$tc$coef_map$kind, c("linear", "rcs", "rcs", "rcs"))
-  expect_identical(b$tc$coef_map$source_var, c("sex", "age", "age", "age"))
+  # the static coef_map has one row per derived column ...
+  expect_identical(b$tc$coef_map$coef, c("t1", "t2", "t2_s1", "t2_s2"))
+  # ... and sr_coef_source maps the real coefficient names back
+  src <- sr_coef_source(names(coef(f1))[-1], b$tc$coef_map)
+  expect_identical(src$kind, c("linear", "rcs", "rcs", "rcs"))
+  expect_identical(src$source_var, c("sex", "age", "age", "age"))
+  expect_true(all(is.na(src$level)))
 })
 
 test_that("explicit knots are used as given and a bad knot spec is refused", {
@@ -68,7 +71,7 @@ test_that("explicit knots are used as given and a bad knot spec is refused", {
   b <- fx_build(spec, lung)
   expect_identical(unname(b$env$.sr_fixed$knots[["t1"]]), c(50, 60, 70))
   expect_identical(b$tc$rhs, "t1 + t1_s1")
-  bad <- function(k) sr_terms_code(list(outcome = "status", terms = list(list(var = "age", type = "rcs", knots = k))), data = lung)
+  bad <- function(k) sr_terms_code(list(outcome = "status", terms = list(list(var = "age", type = "rcs", knots = k))))
   expect_error(bad(2), "knots")
   expect_error(bad(8), "knots")
   expect_error(bad(c(50, 60)), "knots")
@@ -92,22 +95,53 @@ test_that("a factor term puts ref first, keeps all levels on a subset, and maps 
                terms = list(list(var = "ph.ecog", type = "factor", ref = "2")))
   b <- fx_build(spec, lung)
   expect_identical(b$env$.sr_fixed$levels[["t2"]], c("2", "0", "1", "3"))
-  expect_identical(levels(b$des$t2), c("2", "0", "1", "3"))
+  expect_identical(levels(b$des$t2f), c("2", "0", "1", "3"))
   sub <- lung[which(lung$ph.ecog %in% c(0, 1)), ]
   des_sub <- b$env$.h_design(sub)
-  expect_identical(levels(des_sub$t2), c("2", "0", "1", "3"))
+  expect_identical(levels(des_sub$t2f), c("2", "0", "1", "3"))
+  expect_identical(b$tc$rhs, "t1 + t2f")
   f <- lm(as.formula(paste(".y ~", b$tc$rhs)), data = transform(b$des, .y = as.numeric(lung$status == 2)))
-  expect_identical(b$tc$coef_map$coef, names(coef(f))[-1])
-  expect_identical(b$tc$coef_map$coef, c("t1", "t20", "t21", "t23"))
-  expect_identical(b$tc$coef_map$kind, c("linear", "factor", "factor", "factor"))
-  expect_identical(b$tc$coef_map$source_var, c("sex", "ph.ecog", "ph.ecog", "ph.ecog"))
+  expect_identical(names(coef(f))[-1], c("t1", "t2f0", "t2f1", "t2f3"))
+  expect_identical(b$tc$coef_map$coef, c("t1", "t2f"))
+  expect_identical(b$tc$coef_map$kind, c("linear", "factor"))
+  src <- sr_coef_source(names(coef(f))[-1], b$tc$coef_map)
+  expect_identical(src$kind, c("linear", "factor", "factor", "factor"))
+  expect_identical(src$source_var, c("sex", "ph.ecog", "ph.ecog", "ph.ecog"))
+  expect_identical(src$level, c(NA, "0", "1", "3"))
   # no ref: first sorted level is the reference
   spec$terms[[1]]$ref <- NULL
   b2 <- fx_build(spec, lung)
   expect_identical(b2$env$.sr_fixed$levels[["t2"]], c("0", "1", "2", "3"))
-  # a ref that is not an observed level is refused when the code runs
-  spec$terms[[1]]$ref <- "9"
-  expect_error(suppressMessages(fx_build(spec, lung)), "reference level")
+})
+
+test_that("factor checks that need data run in the emitted setup", {
+  lung <- fx_lung()
+  spec <- list(outcome = "status", event_value = 2,
+               terms = list(list(var = "ph.ecog", type = "factor", ref = "9")))
+  tc <- sr_terms_code(spec)   # compiles without data
+  run <- function(tc, data) {
+    env <- new.env(parent = globalenv())
+    env$sr_data <- data
+    eval(parse(text = tc$setup), env)
+  }
+  expect_error(run(tc, lung), "reference level '9'")
+  # a ref that is observed in the full table but absent from this table
+  spec$terms[[1]]$ref <- "3"
+  tc3 <- sr_terms_code(spec)
+  expect_error(run(tc3, lung[lung$ph.ecog %in% c(0, 1), ]), "reference level '3'")
+  # a single observed level
+  tc1 <- sr_terms_code(list(outcome = "status", terms = list(list(var = "ph.ecog", type = "factor"))))
+  expect_error(run(tc1, lung[which(lung$ph.ecog == 1), ]), "at least two")
+})
+
+test_that("a missing column stops the setup first, naming the columns", {
+  lung <- fx_lung()
+  spec <- list(outcome = "status", exposure = "sex",
+               terms = list(list(var = "nope", type = "factor"), list(var = "gone", type = "linear")))
+  tc <- sr_terms_code(spec)
+  env <- new.env(parent = globalenv())
+  env$sr_data <- lung
+  expect_error(eval(parse(text = tc$setup), env), "column(s) not in the data: nope, gone", fixed = TRUE)
 })
 
 test_that("a factor exposure takes its levels from exposure_ref; a quadratic term adds t<i>_q", {
@@ -117,43 +151,84 @@ test_that("a factor exposure takes its levels from exposure_ref; a quadratic ter
                terms = list(list(var = "age", type = "quad")))
   b <- fx_build(spec, lung)
   expect_identical(b$env$.sr_fixed$levels[["t1"]], c("male", "female"))
-  expect_identical(b$tc$rhs, "t1 + t2 + t2_q")
-  expect_identical(b$tc$coef_map$coef, c("t1female", "t2", "t2_q"))
-  expect_identical(b$tc$coef_map$kind, c("factor", "quad", "quad"))
+  expect_identical(b$tc$rhs, "t1f + t2 + t2_q")
   expect_equal(b$des$t2_q, b$des$t2^2, tolerance = 0)
   f <- lm(as.formula(paste("as.numeric(lung$status == 2) ~", b$tc$rhs)), data = b$des)
-  expect_identical(b$tc$coef_map$coef, names(coef(f))[-1])
+  expect_identical(names(coef(f))[-1], c("t1ffemale", "t2", "t2_q"))
+  src <- sr_coef_source(names(coef(f))[-1], b$tc$coef_map)
+  expect_identical(src$kind, c("factor", "quad", "quad"))
+  expect_identical(src$source_var, c("grp", "age", "age"))
+  expect_identical(src$level, c("female", NA, NA))
 })
 
-test_that("interactions map variable names to derived terms and coef_map follows coef()", {
+test_that("interactions map variable names to derived terms and sr_coef_source resolves them", {
   lung <- fx_lung()
   spec <- list(outcome = "status", event_value = 2, exposure = "sex",
                terms = list(list(var = "age", type = "linear"),
                             list(var = "ph.ecog", type = "factor", ref = "0")),
                interactions = list(c("sex", "age"), c("ph.ecog", "sex")))
   b <- fx_build(spec, lung)
-  expect_identical(b$tc$rhs, "t1 + t2 + t3 + t1:t2 + t1:t3")
+  expect_identical(b$tc$rhs, "t1 + t2 + t3f + t1:t2 + t1:t3f")
+  expect_identical(b$tc$coef_map$coef, c("t1", "t2", "t3f", "t1:t2", "t1:t3f"))
   f <- lm(as.formula(paste("as.numeric(lung$status == 2) ~", b$tc$rhs)), data = b$des)
-  expect_identical(b$tc$coef_map$coef, names(coef(f))[-1])
-  ix <- b$tc$coef_map[b$tc$coef_map$kind == "interaction", ]
-  expect_identical(unique(ix$source_var), c("sex:age", "sex:ph.ecog"))
+  nm <- names(coef(f))[-1]
+  expect_identical(nm, c("t1", "t2", "t3f1", "t3f2", "t3f3", "t1:t2", "t1:t3f1", "t1:t3f2", "t1:t3f3"))
+  src <- sr_coef_source(nm, b$tc$coef_map)
+  expect_identical(src$source_var, c("sex", "age", rep("ph.ecog", 3), "sex:age", rep("sex:ph.ecog", 3)))
+  expect_identical(src$kind, c("linear", "linear", rep("factor", 3), rep("interaction", 4)))
+  expect_identical(src$level, c(NA, NA, "1", "2", "3", NA, "1", "2", "3"))
 })
 
 test_that("interactions with a quad or rcs term, an unknown variable or a self pair are refused", {
-  lung <- fx_lung()
   mk <- function(type, ia) {
     list(outcome = "status", event_value = 2, exposure = "sex",
          terms = list(list(var = "age", type = type), list(var = "wt.loss", type = "linear")),
          interactions = ia)
   }
   msg <- "interactions are between the exposure and linear or factor terms in P1c"
-  expect_error(sr_terms_code(mk("quad", list(c("sex", "age"))), data = lung), msg, fixed = TRUE)
-  expect_error(sr_terms_code(mk("rcs", list(c("age", "wt.loss"))), data = lung), msg, fixed = TRUE)
-  expect_error(sr_terms_code(mk("linear", list(c("sex", "nope"))), data = lung), "not in the model")
-  expect_error(sr_terms_code(mk("linear", list(c("sex", "sex"))), data = lung), "two different")
-  expect_error(sr_terms_code(mk("linear", list("sex")), data = lung), "length-2")
+  expect_error(sr_terms_code(mk("quad", list(c("sex", "age")))), msg, fixed = TRUE)
+  expect_error(sr_terms_code(mk("rcs", list(c("age", "wt.loss")))), msg, fixed = TRUE)
+  expect_error(sr_terms_code(mk("linear", list(c("sex", "nope")))), "not in the model")
+  expect_error(sr_terms_code(mk("linear", list(c("sex", "sex")))), "two different")
+  expect_error(sr_terms_code(mk("linear", list("sex"))), "length-2")
 })
 
+test_that("coefficient names never collide: factor t1 with levels 0 and 2 next to linear t10-t12", {
+  set.seed(1)
+  n <- 120
+  d <- data.frame(f = sample(c(0, 1, 2), n, TRUE), y = rnorm(n))
+  for (j in 2:12) d[[paste0("x", j)]] <- rnorm(n)
+  spec <- list(outcome = "y", terms = c(
+    list(list(var = "f", type = "factor", ref = "1")),
+    lapply(2:12, function(j) list(var = paste0("x", j), type = "linear"))))
+  b <- fx_build(spec, d, "continuous")
+  f <- lm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des)
+  nm <- names(coef(f))[-1]
+  expect_identical(anyDuplicated(nm), 0L)
+  expect_true(all(c("t1f0", "t1f2", "t10", "t11", "t12") %in% nm))
+  src <- sr_coef_source(nm, b$tc$coef_map)
+  expect_identical(src$source_var[match(c("t1f0", "t1f2", "t10", "t11", "t12"), nm)],
+                   c("f", "f", "x10", "x11", "x12"))
+  expect_identical(src$level[match(c("t1f0", "t1f2", "t10"), nm)], c("0", "2", NA))
+  expect_identical(src$kind[match(c("t1f0", "t10"), nm)], c("factor", "linear"))
+})
+
+test_that("sr_coef_source refuses unknown, ambiguous and out-of-model names", {
+  cm <- sr_terms_code(list(outcome = "y", exposure = "a",
+                           terms = list(list(var = "b", type = "linear"), list(var = "c", type = "factor")),
+                           interactions = list(c("b", "c"))))$coef_map
+  expect_error(sr_coef_source("zzz", cm), "does not belong")
+  expect_error(sr_coef_source("t3f", cm), "does not belong")   # a factor prefix alone is no coefficient
+  expect_error(sr_coef_source("t1:t2", cm), "does not belong")  # not an interaction of the model
+  expect_error(sr_coef_source("t1:t3fx", cm), "does not belong")
+  dup <- rbind(cm, cm[1, ])
+  expect_error(sr_coef_source("t1", dup), "more than one")
+  expect_identical(nrow(sr_coef_source(character(), cm)), 0L)
+  # a level containing a colon still resolves
+  s <- sr_coef_source(c("t3fu:v", "t2:t3fu:v"), cm)
+  expect_identical(s$level, c("u:v", "u:v"))
+  expect_identical(s$kind, c("factor", "interaction"))
+})
 test_that("event_value codes the binary outcome and survival outcomes get .time / .event", {
   lung <- fx_lung()
   spec <- list(outcome = "status", event_value = 2, exposure = "sex")
@@ -195,18 +270,18 @@ test_that("hostile column names and levels reach emitted code only as quoted nam
   expect_silent(.sr_emit_check(code, kind = "analysis"))
   expect_false("system" %in% all.names(parse(text = code)))
   expect_identical(b$des[[hostile]], d[[hostile]])
-  expect_identical(b$tc$coef_map$source_var[b$tc$coef_map$kind == "rcs"], rep(hostile, 2))
   f <- lm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des)
-  expect_identical(b$tc$coef_map$coef, names(coef(f))[-1])
+  src <- sr_coef_source(names(coef(f))[-1], b$tc$coef_map)
+  expect_identical(src$source_var[src$kind == "rcs"], rep(hostile, 2))
+  expect_true(all(src$source_var[src$kind == "factor"] == gname))
+  expect_identical(src$level[src$kind == "factor"], "a`);system('x');(")
 })
 
 test_that("a passthrough column named like a derived column is refused; bad specs fail early", {
-  d <- data.frame(t1 = c(0, 1, 1, 0), e = 1:4)
-  expect_error(sr_terms_code(list(outcome = "t1", exposure = "e"), data = d), "derived")
-  expect_error(sr_terms_code(list(outcome = "y", terms = list(list(var = "a", type = "cubic"))), data = d), "type")
-  expect_error(sr_terms_code(list(outcome = "y", exposure = "e", terms = list(list(var = "e", type = "linear"))), data = d), "twice")
-  expect_error(sr_terms_code(list(outcome = "y", terms = list(list(var = "a", type = "factor"))), data = NULL),
-               "data")
+  expect_error(sr_terms_code(list(outcome = "t1", exposure = "e")), "derived")
+  expect_error(sr_terms_code(list(outcome = "t2f", exposure = "e")), "derived")
+  expect_error(sr_terms_code(list(outcome = "y", terms = list(list(var = "a", type = "cubic")))), "type")
+  expect_error(sr_terms_code(list(outcome = "y", exposure = "e", terms = list(list(var = "e", type = "linear")))), "twice")
 })
 
 test_that("no exposure and no terms gives an intercept-only rhs", {

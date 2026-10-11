@@ -5,8 +5,8 @@
 #   setup  - run once on `sr_data` (the observed table): fixes RCS knots and factor levels into
 #            `.sr_fixed`, so every later design (a subset, a bootstrap resample, an imputed copy) has
 #            the same columns and the same coefficient names;
-#   design - defines `.h_design(d)`: the passthrough columns plus derived columns t1, t2, ... (t<i>_s<j>
-#            for the RCS basis, t<i>_q for the quadratic). It reads `.sr_fixed` and the .h_ helpers
+#   design - defines `.h_design(d)`: the passthrough columns plus derived columns t1, t2, ... (t<i>f for a
+#            factor, t<i> and t<i>_s<j> for the RCS basis, t<i> and t<i>_q for the quadratic). It reads `.sr_fixed` and the .h_ helpers
 #            that `setup` defines, so `setup` is always emitted first;
 #   rhs    - the formula right-hand side over the derived names (interactions as t<a>:t<b>).
 # User text (column names, levels) reaches the code only through .sr_q() / .sr_lit(); the derived
@@ -15,7 +15,7 @@
 .sr_term_types <- c("linear", "factor", "rcs", "quad")
 
 # Names a passthrough column must not take: the derived design columns and the outcome columns.
-.sr_reserved_col <- function(x) grepl("^t[0-9]+(_s[0-9]+|_q)?$", x) | x %in% c(".y", ".time", ".event")
+.sr_reserved_col <- function(x) grepl("^t[0-9]+(f|_s[0-9]+|_q)?$", x) | x %in% c(".y", ".time", ".event")
 
 # ---- helpers inlined into the emitted code (via .sr_inline) -------------------------------------
 
@@ -101,8 +101,8 @@ sr_spec_cols <- function(spec) {
 }
 
 #' The ordered terms of the model: exposure first, then spec$terms. Each: id, var, type, ref, knots,
-#' role, plus `levels` for a factor (taken from `data`, which a factor needs).
-.sr_term_plan <- function(spec, data = NULL) {
+#' role. Nothing here looks at data (compile has none); factor levels are fixed by the emitted setup.
+.sr_term_plan <- function(spec) {
   items <- list()
   ex <- spec[["exposure"]]
   if (length(.sr_spec_chr(ex))) {
@@ -128,25 +128,16 @@ sr_spec_cols <- function(spec) {
     stop("variable '", vars[anyDuplicated(vars)], "' appears twice in the model (exposure and terms)",
          call. = FALSE)
   }
-  for (i in seq_along(items)) {
-    items[[i]]$id <- paste0("t", i)
-    if (items[[i]]$type == "factor") {
-      if (is.null(data)) {
-        stop("factor terms need `data` (the observed table) to list one coefficient per level", call. = FALSE)
-      }
-      if (!(items[[i]]$var %in% names(data))) {
-        stop("column '", items[[i]]$var, "' is not in the data", call. = FALSE)
-      }
-      items[[i]]$levels <- .h_levels(data[[items[[i]]$var]], items[[i]]$ref)
-    }
-  }
+  for (i in seq_along(items)) items[[i]]$id <- paste0("t", i)
   items
 }
 
-#' Derived column names of one planned term, in rhs order.
+#' Derived column names of one planned term, in rhs order. A factor's column is t<i>f, so that its
+#' coefficients t<i>f<level> can never be mistaken for a linear term t<i><digits>.
 .sr_term_cols <- function(it) {
   switch(it$type,
-    linear = , factor = it$id,
+    linear = it$id,
+    factor = paste0(it$id, "f"),
     quad = c(it$id, paste0(it$id, "_q")),
     rcs = c(it$id, if (it$knots$nk > 2L) paste0(it$id, "_s", seq_len(it$knots$nk - 2L)))
   )
@@ -179,66 +170,100 @@ sr_spec_cols <- function(spec) {
   out
 }
 
-#' coef_map (coef, source_var, kind) in the order coef() lists the terms of `rhs`, without the
-#' intercept. Names come from model.matrix on a small dummy frame carrying the same factor levels, so
-#' they are exactly what R gives a fit (including interaction names).
-.sr_coef_map <- function(plan, ia, rhs) {
-  empty <- data.frame(coef = character(), source_var = character(), kind = character(),
-                      stringsAsFactors = FALSE)
-  if (identical(rhs, "1")) return(empty)
-  n <- max(c(3L, vapply(plan, function(i) length(i$levels), integer(1))))
-  dummy <- list()
+#' Static coef_map: one row per derived column (coef, source_var, kind), from the spec alone. A factor
+#' has one row whose coef is its prefix t<i>f; its coefficients are t<i>f<level>. An interaction row
+#' has coef "<derived a>:<derived b>" (a factor part as its prefix), source_var "<var a>:<var b>",
+#' kind "interaction". sr_coef_source() resolves real coefficient names against it.
+.sr_coef_map <- function(plan, ia) {
+  coef <- character()
+  src <- character()
+  kind <- character()
   for (it in plan) {
-    for (cn in .sr_term_cols(it)) {
-      dummy[[cn]] <- if (it$type == "factor") factor(rep_len(it$levels, n), levels = it$levels) else seq_len(n) + 0.5
+    cols <- .sr_term_cols(it)
+    coef <- c(coef, cols)
+    src <- c(src, rep(it$var, length(cols)))
+    kind <- c(kind, rep(it$type, length(cols)))
+  }
+  for (p in ia) {
+    coef <- c(coef, paste(.sr_term_cols(plan[[p$a]])[1L], .sr_term_cols(plan[[p$b]])[1L], sep = ":"))
+    src <- c(src, paste(plan[[p$a]]$var, plan[[p$b]]$var, sep = ":"))
+    kind <- c(kind, "interaction")
+  }
+  data.frame(coef = coef, source_var = src, kind = kind, stringsAsFactors = FALSE)
+}
+
+#' Map real coefficient names (e.g. names(coef(fit))) back to the user's variables.
+#' Grammar of a coefficient name: t<i> (linear, or the first column of an rcs / quad term),
+#' t<i>_s<j> (rcs), t<i>_q (quad), t<i>f<level> (factor, level = the remainder), and
+#' "<part>:<part>" for an interaction. Matching is exact first, then by factor prefix; a name that
+#' resolves to nothing or to more than one thing is an error.
+#' @param coef_names character vector of coefficient names (without the intercept)
+#' @param coef_map the `coef_map` of sr_terms_code()
+#' @return data.frame(coef, source_var, kind, level). `level` is the factor level of a factor
+#'   coefficient, NA for the others. For an interaction it is the level of its factor part, or the two
+#'   part levels joined by ":" when both parts are factors; NA when neither is.
+sr_coef_source <- function(coef_names, coef_map) {
+  coef_names <- as.character(coef_names)
+  base <- coef_map[coef_map$kind != "interaction", , drop = FALSE]
+  inter <- coef_map[coef_map$kind == "interaction", , drop = FALSE]
+  hits <- function(p) {
+    unique(c(which(base$coef == p & base$kind != "factor"),
+             which(base$kind == "factor" & startsWith(p, base$coef) & nchar(p) > nchar(base$coef))))
+  }
+  level_of <- function(row, p) {
+    if (base$kind[row] == "factor") substring(p, nchar(base$coef[row]) + 1L) else NA_character_
+  }
+  one <- function(nm) {
+    cand <- list()
+    h <- hits(nm)
+    for (r in h) {
+      cand[[length(cand) + 1L]] <- list(source_var = base$source_var[r], kind = base$kind[r], level = level_of(r, nm))
     }
-  }
-  mm <- stats::model.matrix(stats::as.formula(paste("~", rhs)), data = as.data.frame(dummy, check.names = FALSE))
-  tl <- attr(stats::terms(stats::as.formula(paste("~", rhs))), "term.labels")
-  labels <- c("(Intercept)", tl)[attr(mm, "assign") + 1L]
-  cols <- colnames(mm)
-  keep <- cols != "(Intercept)"
-  cols <- cols[keep]
-  labels <- labels[keep]
-  by_label <- list()
-  for (it in plan) {
-    kind <- it$type
-    for (cn in .sr_term_cols(it)) by_label[[cn]] <- list(var = it$var, kind = kind)
-  }
-  ia_label <- vapply(ia, function(p) paste0(plan[[p$a]]$id, ":", plan[[p$b]]$id), character(1))
-  ia_var <- vapply(ia, function(p) paste0(plan[[p$a]]$var, ":", plan[[p$b]]$var), character(1))
-  src <- character(length(cols))
-  kind <- character(length(cols))
-  for (j in seq_along(cols)) {
-    if (labels[j] %in% ia_label) {
-      src[j] <- ia_var[match(labels[j], ia_label)]
-      kind[j] <- "interaction"
-    } else {
-      src[j] <- by_label[[labels[j]]]$var
-      kind[j] <- by_label[[labels[j]]]$kind
+    pos <- gregexpr(":", nm, fixed = TRUE)[[1L]]
+    for (k in pos[pos > 0L]) {
+      left <- substr(nm, 1L, k - 1L)
+      right <- substring(nm, k + 1L)
+      hl <- hits(left)
+      hr <- hits(right)
+      if (length(hl) != 1L || length(hr) != 1L) next
+      ii <- which(inter$coef == paste(base$coef[hl], base$coef[hr], sep = ":"))
+      if (length(ii) != 1L) next
+      lv <- c(level_of(hl, left), level_of(hr, right))
+      lv <- lv[!is.na(lv)]
+      cand[[length(cand) + 1L]] <- list(source_var = inter$source_var[ii], kind = "interaction",
+                                        level = if (length(lv)) paste(lv, collapse = ":") else NA_character_)
     }
+    if (length(cand) == 0L) stop("coefficient '", nm, "' does not belong to any term of the model", call. = FALSE)
+    if (length(cand) > 1L) stop("coefficient '", nm, "' matches more than one term", call. = FALSE)
+    cand[[1L]]
   }
-  data.frame(coef = cols, source_var = src, kind = kind, stringsAsFactors = FALSE)
+  res <- lapply(coef_names, one)
+  data.frame(
+    coef = coef_names,
+    source_var = vapply(res, function(r) r$source_var, character(1)),
+    kind = vapply(res, function(r) r$kind, character(1)),
+    level = vapply(res, function(r) r$level, character(1)),
+    stringsAsFactors = FALSE
+  )
 }
 
 # ---- code emission ------------------------------------------------------------------------------
 
-#' Code for the term builder of a spec.
+#' Code for the term builder of a spec (no data needed: levels and knots are fixed by the emitted
+#' setup from `sr_data` when it runs).
 #' @param spec list with exposure, exposure_ref, terms, interactions (and the columns the passthrough
 #'   needs: outcome, time, status, cluster, strata)
-#' @param data the observed table; needed only when a factor is in the model (it lists the level
-#'   coefficients in coef_map). The emitted setup recomputes the levels from `sr_data` with the same
-#'   function, so pass the table the route will run on.
 #' @return list(setup, design, rhs, coef_map). Interactions are named by variable and refer to the
-#'   exposure or a linear / factor term; coef_map marks their coefficients kind = "interaction" with
-#'   source_var "<var a>:<var b>".
-sr_terms_code <- function(spec, data = NULL) {
-  plan <- .sr_term_plan(spec, data)
+#'   exposure or a linear / factor term. See .sr_coef_map() and sr_coef_source() for coef_map.
+sr_terms_code <- function(spec) {
+  plan <- .sr_term_plan(spec)
   ia <- .sr_interaction_plan(spec, plan)
   types <- vapply(plan, function(i) i$type, character(1))
 
   rhs_parts <- unlist(lapply(plan, .sr_term_cols))
-  rhs_parts <- c(rhs_parts, vapply(ia, function(p) paste0(plan[[p$a]]$id, ":", plan[[p$b]]$id), character(1)))
+  rhs_parts <- c(rhs_parts, vapply(ia, function(p) {
+    paste(.sr_term_cols(plan[[p$a]])[1L], .sr_term_cols(plan[[p$b]])[1L], sep = ":")
+  }, character(1)))
   rhs <- if (length(rhs_parts)) paste(rhs_parts, collapse = " + ") else "1"
 
   pass <- unique(c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]),
@@ -246,13 +271,17 @@ sr_terms_code <- function(spec, data = NULL) {
                    .sr_spec_chr(spec[["strata"]])))
   clash <- pass[.sr_reserved_col(pass)]
   if (length(clash)) {
-    stop("column '", clash[1L], "' has the name of a derived design column (t1, t1_s1, t1_q, .y, ...); rename it",
+    stop("column '", clash[1L], "' has the name of a derived design column (t1, t1f, t1_s1, t1_q, .y, ...); rename it",
          call. = FALSE)
   }
   needed <- unique(c(pass, vapply(plan, function(i) i$var, character(1))))
 
-  # setup: helpers, then .sr_fixed (factor levels, RCS knots) from the observed table
+  # setup: the column check, helpers, then .sr_fixed (factor levels, RCS knots) from the observed table
   setup <- c(
+    if (length(needed)) c(
+      sprintf(".miss <- setdiff(%s, names(sr_data))", .sr_lit(needed)),
+      "if (length(.miss)) stop(\"column(s) not in the data: \", paste(.miss, collapse = \", \"))"
+    ),
     if (any(types == "factor")) .sr_inline(.h_levels, ".h_levels"),
     if (any(types != "factor")) .sr_inline(.h_num, ".h_num"),
     if (any(types == "rcs")) .sr_inline(.h_knots, ".h_knots"),
@@ -285,7 +314,7 @@ sr_terms_code <- function(spec, data = NULL) {
     set <- function(nm, expr) sprintf("  out[[%s]] <- %s", .sr_lit(nm), expr)
     body <- c(body, switch(it$type,
       linear = set(id, sprintf(".h_num(x, %s)", .sr_lit(it$var))),
-      factor = set(id, sprintf("factor(as.character(x), levels = .sr_fixed$levels[[%s]])", .sr_lit(id))),
+      factor = set(paste0(id, "f"), sprintf("factor(as.character(x), levels = .sr_fixed$levels[[%s]])", .sr_lit(id))),
       quad = c(set(id, sprintf(".h_num(x, %s)", .sr_lit(it$var))),
                set(paste0(id, "_q"), sprintf("out[[%s]]^2", .sr_lit(id)))),
       rcs = c(
@@ -300,9 +329,8 @@ sr_terms_code <- function(spec, data = NULL) {
   design <- paste(c(".h_design <- function(d) {", body, "  out", "}"), collapse = "\n")
 
   list(setup = paste(setup, collapse = "\n"), design = design, rhs = rhs,
-       coef_map = .sr_coef_map(plan, ia, rhs))
+       coef_map = .sr_coef_map(plan, ia))
 }
-
 #' Code adding the outcome to the design frame `des` (the value of .h_design(...)):
 #'   binary     .y  0/1 integer: `outcome == event_value`, or the outcome itself when it is logical or 0/1
 #'   continuous .y  numeric
