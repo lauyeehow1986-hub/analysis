@@ -194,3 +194,76 @@ test_that("rmst runs through sr_sap_add, lock and sr_run; a bad tau is refused o
   expect_true(is.data.frame(res$figures$km) && nrow(res$figures$km) > 0L)
   expect_error(sr_result(p, "r2"), "has not run successfully")
 })
+
+# ---- fix round 1 --------------------------------------------------------------------------------
+
+test_that("a numeric exposure is ordered as numbers: the reference is the smallest value", {
+  d <- survival::lung
+  d$g <- c(5, 10, 20)[as.integer(cut(d$age, c(0, 60, 70, 100)))]
+  s <- .rm_spec(tau = 300, exposure = "g")
+  val <- .rm_value(d, s)
+  expect_equal(val$groups$level, c("5", "10", "20"))
+  tab <- summary(survival::survfit(survival::Surv(time, status == 2) ~ g, d), rmean = 300)$table
+  expect_equal(val$groups$rmst, unname(tab[, "rmean"]), tolerance = 1e-8)
+  e <- .rm_present(val, s)$effects
+  dif <- e[e$measure == "RMST_diff", ]
+  expect_equal(dif$term, c("g: 10 vs 5", "g: 20 vs 5"))
+  expect_equal(dif$est, unname(tab[c(2, 3), "rmean"] - tab[1, "rmean"]), tolerance = 1e-8)
+  # an explicit reference still goes first
+  val2 <- .rm_value(d, .rm_spec(tau = 300, exposure = "g", exposure_ref = "20"))
+  expect_equal(val2$groups$level, c("20", "5", "10"))
+})
+
+test_that("an exposure with more than 8 distinct values is refused by the code", {
+  d <- survival::lung
+  e <- tryCatch(.rm_value(d, .rm_spec(exposure = "age")), error = function(e) e)
+  expect_s3_class(e, "error")
+  expect_match(conditionMessage(e), "RMST compares groups: exposure 'age' has", fixed = TRUE)
+  expect_match(conditionMessage(e), paste(length(unique(d$age)), "distinct values; categorise it first"),
+               fixed = TRUE)
+  # 8 distinct values are allowed
+  d8 <- d
+  d8$g8 <- as.integer(cut(d8$age, c(0, 45, 50, 55, 60, 65, 70, 75, 100)))
+  expect_equal(length(unique(d8$g8)), 8L)
+  expect_type(.rm_value(d8, .rm_spec(tau = 300, exposure = "g8")), "list")
+  # the guard counts the rows analysed, not the ones lost to a missing value
+  d9 <- d8
+  d9$g8[d9$g8 == 8L] <- NA
+  expect_type(.rm_value(d9, .rm_spec(tau = 300, exposure = "g8")), "list")
+})
+
+test_that("the many-level guard ends the run with a readable error", {
+  d <- survival::lung
+  d$id <- seq_len(nrow(d))
+  p <- .fx_ready_project(d, "t", c(id = "id", status = "outcome"))
+  .rm_route()
+  p <- sr_sap_add(p, "agey", "rmst", .rm_spec(exposure = "age"), "t", label = "primary")
+  p <- sr_sap_lock(p)
+  p <- sr_run(p, "agey")
+  expect_false(p$state$runs$agey$ok)
+  expect_match(p$state$runs$agey$error, "RMST compares groups: exposure 'age' has", fixed = TRUE)
+  expect_match(p$state$runs$agey$error, "categorise it first", fixed = TRUE)
+})
+
+test_that("a non-finite RMST difference stops present with a plain message", {
+  val <- .rm_value(survival::lung)
+  val$groups$se[1L] <- NaN
+  r <- .rm_route()
+  expect_error(r$present(val, .rm_spec()), "not finite", fixed = TRUE)
+  expect_error(r$present(val, .rm_spec()), "sex", fixed = TRUE)
+  val2 <- .rm_value(survival::lung)
+  val2$groups$rmst[2L] <- Inf
+  expect_error(r$present(val2, .rm_spec()), "not finite", fixed = TRUE)
+})
+
+test_that("the thin-tail note names the groups and their counts", {
+  d <- survival::lung
+  val <- .rm_value(d, .rm_spec(tau = 700))
+  g <- val$groups
+  thin <- g$at_risk < 10
+  expect_true(any(thin))
+  frag <- .rm_present(val, .rm_spec(tau = 700))$fragments$rmst_few_at_risk
+  expect_match(frag, "at tau = 700 in group(s) ", fixed = TRUE)
+  expect_match(frag, paste0("group(s) ", paste(g$level[thin], collapse = ", "), " (",
+                            paste(g$at_risk[thin], collapse = ", "), ")"), fixed = TRUE)
+})

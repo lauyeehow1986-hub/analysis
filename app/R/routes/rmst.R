@@ -12,6 +12,11 @@
 # fewer than 10 subjects still at risk at tau gets a note (fragment rmst_few_at_risk), because the
 # RMST then rests on the thin tail of the curve.
 #
+# The groups are the distinct values of the exposure, ordered as the original type (numbers as numbers),
+# the reference first. The code stops when the exposure has more than 8 distinct values among the rows
+# analysed ("categorise it first", ruling R24a): a continuous exposure would give one curve per value.
+# present() stops when a primary difference is not finite (ruling R24b).
+#
 # Effects. One RMST_diff row per non-reference level: role "primary", scale "difference", level the
 # compared level. One RMST row per level: role "descriptive". All rows carry n and events of their own
 # group (the difference rows those of the analysis). figures$km and figures$km_risk are the Kaplan-Meier
@@ -71,14 +76,20 @@
     sprintf(".tau <- %s", .sr_lit(spec[["tau"]])),
     sprintf("des <- as.data.frame(sr_data)[%s]", .sr_lit(cols)),
     sr_outcome_code(spec, "surv"),
-    sprintf("des[[\".grp\"]] <- as.character(des[[%s]])", .sr_lit(spec[["exposure"]])),
-    ".keep <- stats::complete.cases(des[c(\".time\", \".event\", \".grp\")])",
+    sprintf("des[[\".ex\"]] <- des[[%s]]", .sr_lit(spec[["exposure"]])),
+    ".keep <- stats::complete.cases(des[c(\".time\", \".event\", \".ex\")])",
     "if (!any(.keep)) stop(\"no complete rows: every row has a missing value in the model\")",
     "des <- des[.keep, , drop = FALSE]",
     "if (sum(des[[\".event\"]]) == 0L) {",
     "  stop(\"the outcome has no events among the \", nrow(des), \" rows analysed\")",
     "}",
-    sprintf(".lv <- .h_levels(des[[\".grp\"]], %s)", if (has_ref) .sr_lit(as.character(ref)) else "NULL"),
+    sprintf(".exn <- %s", .sr_lit(spec[["exposure"]])),
+    ".nlv <- length(unique(des[[\".ex\"]]))",
+    "if (.nlv > 8L) {",
+    "  stop(\"RMST compares groups: exposure '\", .exn, \"' has \", .nlv, \" distinct values; categorise it first\")",
+    "}",
+    sprintf(".lv <- .h_levels(des[[\".ex\"]], %s)", if (has_ref) .sr_lit(as.character(ref)) else "NULL"),
+    "des[[\".grp\"]] <- as.character(des[[\".ex\"]])",
     ".mx <- vapply(.lv, function(l) max(des[[\".time\"]][des[[\".grp\"]] == l]), numeric(1))",
     ".far <- which(.mx < .tau)",
     "if (length(.far)) {",
@@ -126,6 +137,12 @@
     est = dest, lo = dest - z * dse, hi = dest + z * dse, p = 2 * stats::pnorm(-abs(dest / dse)),
     scale = "difference", level = gl[js], mcse = NA_real_, role = "primary", conditional = FALSE,
     ci_method = "z_independent_groups", n = value$n, events = value$events, stringsAsFactors = FALSE)
+  bad <- diffs[!is.finite(diffs$est) | !is.finite(diffs$lo) | !is.finite(diffs$hi), , drop = FALSE]
+  if (nrow(bad)) {
+    stop("The RMST difference for \"", bad$term[1L], "\" is not finite: the standard error of a group's restricted ",
+         "mean could not be computed (a group with too few subjects or events), so the comparison cannot be reported.",
+         call. = FALSE)
+  }
   effects <- rbind(diffs, per_group)
   rownames(effects) <- NULL
 

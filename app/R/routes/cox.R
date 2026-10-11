@@ -250,10 +250,12 @@
     stringsAsFactors = FALSE)
   tables <- list(coefficients = coefs, model_fit = fit_tab)
 
+  n_other <- if (nrow(tab)) sum(!prim) else 0L
+  adj_text <- if (n_other > 0L) "adjusted for the other terms of the model" else "unadjusted (no model terms besides the exposure)"
   frag <- list(cox_note = sprintf(
-    paste0("Cox proportional hazards regression of time to %s on %s (%s ties), adjusted for the other terms of the model; ",
+    paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
            "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
-    spec[["status"]], exposure, value$ties, as.integer(round(value$n)), as.integer(round(value$events)),
+    spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
     as.integer(round(value$n_total - value$n)),
     if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
     .sr_cox_se_text(value)))

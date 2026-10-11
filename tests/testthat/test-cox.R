@@ -304,3 +304,32 @@ test_that("cox runs through sr_sap_add, lock and sr_run; hostile names are data"
   expect_false("system" %in% all.names(parse(text = code)))
   expect_true(sr_run(p, "m1")$state$runs$m1$cached)
 })
+
+# ---- fix round 1 --------------------------------------------------------------------------------
+
+test_that("the note says adjusted only when the model has terms beyond the exposure", {
+  d <- survival::lung
+  crude <- .cx_present(.cx_value(d), .cx_spec())$fragments$cox_note
+  expect_false(grepl("adjusted for", crude, fixed = TRUE))
+  expect_match(crude, "unadjusted", fixed = TRUE)
+  s <- .cx_spec(terms = list(list(var = "age")))
+  adj <- .cx_present(.cx_value(d, s), s)$fragments$cox_note
+  expect_match(adj, "adjusted for the other terms of the model", fixed = TRUE)
+  s2 <- .cx_spec(strata = "ph.ecog")
+  strat <- .cx_present(.cx_value(d, s2), s2)$fragments$cox_note
+  expect_false(grepl("adjusted for the other terms", strat, fixed = TRUE))
+  expect_match(strat, "stratified by ph.ecog", fixed = TRUE)
+})
+
+test_that("cox_describe compiles, runs and presents HR rows, the same numbers as cox", {
+  d <- survival::lung
+  sd <- .cx_spec(purpose = "describe")
+  s <- .cx_spec()
+  b <- .cx_present(.cx_value(d, sd, "cox_describe"), sd, "cox_describe")
+  a <- .cx_present(.cx_value(d, s, "cox"), s, "cox")
+  expect_identical(a$effects, b$effects)
+  expect_equal(nrow(.cx_hr(b$effects, "sex")), 1L)
+  expect_true(is.data.frame(b$figures$km) && nrow(b$figures$km) > 0L)
+  expect_true(any(a$flags$flag == "table2") || nrow(a$flags) == 0L)
+  expect_false(any(b$flags$flag == "table2"))
+})
