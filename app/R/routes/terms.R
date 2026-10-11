@@ -63,13 +63,14 @@
 }
 
 #' The unique source columns a spec reads, in the order outcome, time, status, exposure, term
-#' variables, cluster, strata, mi$aux. Absent fields contribute nothing.
+#' variables, cluster, strata, mi$aux, by, vars, nonnormal (the Table 1 fields). Absent fields contribute nothing.
 sr_spec_cols <- function(spec) {
   term_vars <- unlist(lapply(spec[["terms"]], function(t) t[["var"]]))
   unique(c(
     .sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]),
     .sr_spec_chr(spec[["exposure"]]), .sr_spec_chr(term_vars), .sr_spec_chr(spec[["cluster"]]),
-    .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["mi"]][["aux"]])
+    .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["mi"]][["aux"]]),
+    .sr_spec_chr(spec[["by"]]), .sr_spec_chr(spec[["vars"]]), .sr_spec_chr(spec[["nonnormal"]])
   ))
 }
 
