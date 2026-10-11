@@ -67,7 +67,6 @@
 # the effects rows without the descriptive observed-risk rows
 .gl_cf <- function(e) e[e$measure != "risk", , drop = FALSE]
 
-
 # ---- registration and validation ----------------------------------------------------------------
 
 test_that("logistic, logistic_describe and modpois are registered with the documented schema", {
@@ -577,6 +576,56 @@ test_that("the convergence fragment appears when the fit reports non-convergence
   val$converged <- FALSE
   expect_true("glm_convergence" %in% names(.gl_present(val, s)$fragments))
 })
+
+test_that("complete separation on the exposure ends the run with a readable message that advises Firth", {
+  d <- .gl_df()[c("y", "a", "x1", "x2")]
+  d$a <- d$y
+  d$id <- seq_len(nrow(d))
+  p <- .fx_ready_project(d, "t", c(id = "id", y = "outcome"))
+  .gl_route("logistic")
+  s <- .gl_spec()
+  # the presentation itself refuses, before the contract check, with the advice
+  val <- .gl_value(d, s)
+  expect_error(.gl_present(val, s), "separation")
+  expect_error(.gl_present(val, s), "penalty = \"firth\"", fixed = TRUE)
+  p <- sr_sap_add(p, "m1", "logistic", s, "t", label = "primary")
+  p <- sr_sap_lock(p)
+  p <- sr_run(p, "m1")
+  r <- p$state$runs$m1
+  expect_false(r$ok)
+  expect_match(r$error, "separation")
+  expect_match(r$error, "firth", ignore.case = TRUE)
+  expect_false(grepl("needs a finite estimate", r$error, fixed = TRUE))
+  expect_error(sr_result(p, "m1"), "has not run successfully")
+})
+
+test_that("a non-finite exposure estimate from modpois is reported without Firth advice", {
+  # a robust-SE log-link fit rarely overflows on real data, so overflow the exposure bound by hand
+  d <- .gl_df()
+  s <- .gl_spec()
+  val <- .gl_value(d, s, "modpois")
+  val$coef$hi[val$coef$term == "t1"] <- 800
+  e <- tryCatch(.gl_present(val, s, "modpois"), error = function(e) e)
+  expect_s3_class(e, "error")
+  expect_match(conditionMessage(e), "unbounded|converge")
+  expect_false(grepl("firth|separation", conditionMessage(e), ignore.case = TRUE))
+  # the logistic route names near-separation when the fit flagged it
+  sl <- .gl_spec(marginal = FALSE)
+  vl <- .gl_value(d, sl)
+  vl$coef$hi[vl$coef$term == "t1"] <- 800
+  vl$near_separation <- TRUE
+  el <- tryCatch(.gl_present(vl, sl), error = function(e) e)
+  expect_match(conditionMessage(el), "near-separation")
+  expect_match(conditionMessage(el), "firth")
+  # Firth gets a generic message
+  sf <- .gl_spec(penalty = "firth", marginal = FALSE)
+  vf <- .gl_value(d, sf)
+  vf$coef$hi[vf$coef$term == "t1"] <- 800
+  ef <- tryCatch(.gl_present(vf, sf), error = function(e) e)
+  expect_match(conditionMessage(ef), "not finite")
+  expect_false(grepl("separation", conditionMessage(ef), ignore.case = TRUE))
+})
+
 # ---- end to end -------------------------------------------------------------------------------
 
 test_that("logistic and modpois run through sr_sap_add, lock and sr_run; hostile names are data", {

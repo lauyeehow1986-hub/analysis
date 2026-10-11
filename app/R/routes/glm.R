@@ -230,6 +230,26 @@
     value$se_type)
 }
 
+# Stops with a user-facing message when a primary effect (the exposure) is not finite, before the
+# result contract would reject it with a message that hides the cause. Complete or quasi-complete
+# separation is the usual cause for an unpenalised logistic fit, so that message advises Firth.
+.sr_glm_nonfinite_stop <- function(effects, value, exposure) {
+  prim <- effects[effects$role == "primary", , drop = FALSE]
+  if (!nrow(prim) || all(is.finite(c(prim$est, prim$lo, prim$hi)))) return(invisible(NULL))
+  what <- sprintf("The estimate or interval for the exposure \"%s\" is not finite", exposure)
+  msg <- if (identical(value$penalty, "firth")) {
+    paste0(what, ".")
+  } else if (identical(value$family, "binomial")) {
+    paste0(what, " because of complete or quasi-complete separation: the outcome is perfectly (or almost perfectly) ",
+           "predicted, so the maximum-likelihood estimate does not exist",
+           if (isTRUE(value$near_separation)) " (the fit also flagged near-separation: fitted probabilities numerically 0 or 1)",
+           ". Pre-specify penalty = \"firth\" (Firth penalised logistic regression) in the analysis plan.")
+  } else {
+    paste0(what, ": the log-link fit did not converge or gave an unbounded estimate, so the risk ratio cannot be reported.")
+  }
+  stop(msg, call. = FALSE)
+}
+
 .sr_glm_present <- function(value, spec) {
   tc <- sr_terms_code(spec)
   tab <- value$coef
@@ -347,6 +367,7 @@
       as.integer(round(mgv$n_over)), mgv$over)
   }
   if (!is.null(mgv) && is.null(mgv$rows) && !is.null(mgv$note)) frag$glm_marginal_skipped <- mgv$note
+  .sr_glm_nonfinite_stop(effects, value, exposure)
   list(tables = tables, figures = list(), fragments = frag, effects = effects)
 }
 
