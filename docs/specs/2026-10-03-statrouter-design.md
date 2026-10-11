@@ -141,6 +141,8 @@ per file; `testServer` for reactive logic; ASCII-only generated scripts.
   analyses are hash-frozen into `SAP_v1.docx`. Anything run afterwards is labelled
   **primary / sensitivity / exploratory / post hoc**, and deviations are listed automatically. Every
   run is logged; a multiverse / specification curve is offered as a legitimate sensitivity analysis.
+  The lock requires a **study feasibility verdict** (catalogue O) to have been decided for every
+  primary analysis.
 - **Freeze snapshots** (`submission-v1`, `revision-r1`) contain data hashes, events, code, lockfile and
   outputs. They are exported as `.srproj` and are drive-letter independent. A shared-drive lock file
   prevents concurrent edits. Data versioning covers new follow-up data arriving during revision.
@@ -868,6 +870,86 @@ emits a standalone offline JS calculator, so this fills a real gap).
 - **Phase**: built in P6 (after prediction/validation); a published-model calculator can ship with
   the P6 validation module.
 
+**O. Study feasibility verdict** (addendum 2026-10-11; built in **P1c.1**). Not to be confused with
+the P0 *technical* feasibility spike. Before the SAP is locked, the app answers "can this dataset
+answer this question precisely enough to be worth running?" and advises the user to proceed, proceed
+as exploratory, revise the design, or stop. It never answers "will the result be significant or
+interesting?": choosing whether to analyse from an expected effect is outcome selection (file-drawer
+bias) and is refused, like post-hoc power.
+
+- **Outcome-blind by construction.** The verdict uses only what catalogue A already shows while blind:
+  - analysed n after the recipe's exclusions and the complete-case filter of each primary analysis;
+  - the outcome's **own marginals** (event count and marginal risk, marginal SD, total events and
+    follow-up, the pooled exposure-blind Kaplan–Meier curve);
+  - exposure marginals and **exposure-on-covariate** structure (R² of the exposure model, propensity
+    overlap) — these contain no outcome information;
+  - cluster counts and sizes; the number of model parameters from the compiled terms.
+
+  It never uses any outcome-by-exposure or outcome-by-covariate statistic. Quantities that would need
+  one (outcome ICC, outcome R² explained by covariates) are **user-entered assumptions** with a
+  written justification, never estimated from the data. Without them the verdict uses the marginal
+  values, which is conservative (wider than the eventual adjusted CI).
+- **Required input:** the **smallest clinically important difference** δ on the estimand's scale
+  (e.g. 2 percentage points RD, HR 0.80, 5 mmHg), with its source (MCID literature, guideline, trial
+  convention). δ is optional; without it the verdict reports precision only and says so.
+- **Computation**, per primary analysis, from the compiled spec (so it matches what will run).
+  - Approximate null-effect standard errors, with v = n·Var(x)·(1 − R²ₓ), where R²ₓ is the exposure
+    on the planned covariates (Var(x) = p(1 − p) for a binary exposure; for a factor exposure each
+    contrast uses 1/n_k + 1/n_ref):
+    - MD: σ_y·√(1 − R²_y,assumed) / √v;
+    - RD: √(π(1 − π) / v);
+    - log RR: √((1 − π) / (π·v));
+    - log OR: 1 / √(v·π(1 − π));
+    - log HR (Schoenfeld): 1 / √(D·Var(x)·(1 − R²ₓ)), where D is total events;
+    - RMST difference: simulation from the pooled KM curve with exposure assigned at the observed
+      prevalence (exposure-blind).
+  - Clustering multiplies the variance by the design effect 1 + ((cv² + 1)·m̄ − 1)·ICC_assumed
+    (Eldridge 2006).
+  - Missing data: complete-case n; for MI the verdict shows the range from complete-case n to n with
+    observed outcome.
+  - Results: expected 95% CI half-width h = 1.96·SE, and the **minimum detectable effect** at 80%
+    power MDE = 2.80·SE. Both are on the reporting scale (ratios are exponentiated).
+- **Verdict tiers**:
+  - **Adequate**: MDE ≤ δ.
+  - **Limited**: MDE > δ ≥ h. The study can probably rule out an effect as large as δ but has under
+    80% power to detect one. The default advice is *proceed*, with the precision stated in the Methods.
+  - **Inadequate**: h > δ. The study can neither reliably detect nor rule out a clinically important
+    effect. The default advice is *revise or stop*, or *proceed as exploratory / hypothesis-generating*.
+  - **Cannot run** (hard blockers, independent of δ):
+    - an exposure with fewer than two populated levels or an empty contrast group;
+    - no events, or an outcome that is constant;
+    - more model parameters than events, or than observations for a continuous outcome;
+    - exposure perfectly predicted by the covariates (separation of the exposure model, i.e. a
+      positivity violation).
+  - **Warnings** (shown, never pass/fail):
+    - near-positivity violations (propensity outside [0.01, 0.99] for more than 5% of rows);
+    - few events per model parameter as a sparse-data-bias screen, offering pre-specified Firth;
+    - for prediction routes, the Riley criteria (pmsampsize) feed the verdict;
+    - few clusters (< 30) for cluster-robust SE.
+- **Decision** (rules only; System One is not involved because everything is computed):
+  - **Proceed**: the analysis stays primary.
+  - **Proceed as exploratory**: the analysis is labelled exploratory. The writer and claim guard
+    require hypothesis-generating language, and the Methods state why.
+  - **Revise**: go back and change the design before lock, for example fewer terms, pooled sparse
+    levels, a different estimand, a composite outcome or a longer horizon. Revisions are outcome-blind
+    and logged. They are not deviations, because nothing is locked yet.
+  - **Stop**: the project is marked stopped with the reason, and `sr_run` refuses. Reversing a stop
+    is allowed before lock with a logged reason.
+  - A feasibility report is exportable for data-request, ethics or grant use. It is a structured
+    result in P1c.1, and the docx comes with the P1d writer.
+- **Events and lock gate**:
+  - `feasibility.assessed` {analysis_id, inputs, assumptions + justifications, SEs, h, MDE, tier,
+    data/spec hash}.
+  - `feasibility.decided` {analysis_id, decision, reason}.
+  - The SAP lock refuses while any primary analysis has no decision, has *stop*, or has an assessment
+    whose data/spec hash is stale.
+  - The verdict is frozen into the SAP hash and **never recomputed after lock**. After lock the
+    stored verdict is shown as recorded, and power from an observed effect stays refused.
+- **Reporting**: a Methods fragment states that the anticipated precision was assessed before outcome
+  analysis and gives n, events, exposure prevalence, h, MDE, δ and its source. Guided mode (P4) adds
+  plain-language wording, for example: "with this many patients the 95% CI will be about ±4
+  percentage points; a 2-point difference cannot be detected or ruled out".
+
 ## Phases (each ends shippable, tested, committed; ask before any push)
 
 Cross-cutting placement:
@@ -906,6 +988,10 @@ Cross-cutting placement:
   **Exit**: reproduce published values for NHEFS (causal), `survival::lung`, GBSG/Rotterdam
   (prediction); MI + bootstrap CI coverage checked by simulation; planted-defect recall 100% with a low
   false-positive rate on clean twins.
+- **P1c.1 Study feasibility verdict** (catalogue O; addendum 2026-10-11): built right after P1c
+  merges and before P1d. It covers the headless engine, the `feasibility.*` events, the lock gate
+  and the tests. The panel UI arrives with P1d's UI, the feasibility-report docx with the P1d
+  writer, and plain-language wording with Guided mode (P4).
 - **P2 Reviewer mode v1**: split → tag → self-diagnose → re-run on the frozen archive under the pinned
   library → reply docx + **refresh numbers in the edited manuscript** + plot/table builder.
 - **P3 Local System One**: Von (stdio) + CLM on the laptop; golden set + shadow logs → bake-off →
@@ -1016,6 +1102,16 @@ Cross-cutting placement:
   - Instance-based models (kNN, RBF-SVM, GP, LOESS, TabPFN) are refused; exported spec contains no
     row-level data; tree leaves respect the minimum leaf n.
   - Accessibility smoke test (keyboard-only use, contrast, icon-array text alternative).
+- Feasibility verdict (catalogue O):
+  - **Blindness test**: permuting the observed outcome values among rows with a non-missing
+    outcome (NA positions kept) leaves the verdict byte-identical.
+  - Predicted SEs are within 10% of the empirical SD of the estimates over 1000 simulated datasets
+    for each estimand (MD, RD, RR, OR, HR, RMST), with and without clustering.
+  - On NHEFS the marginal-value prediction is conservative: it is at least 0.9 × the SE actually
+    obtained after lock.
+  - Each hard blocker fires on a planted case.
+  - The lock refuses with a missing, *stop* or stale decision.
+  - No verdict is recomputed after lock.
 - Profiler: planted-defect recall and clean-twin false-positive rate.
 - Router: golden set + shadow logs → accuracy, cost-weighted error, ECE, abstain rate, latency and RAM
   per profile; vetoes and sensitivity nodes fire on planted violations.
