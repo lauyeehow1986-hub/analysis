@@ -145,26 +145,6 @@
   list(name = nm, rhs = rhs)
 }
 
-#' Names the code binds itself: assigned variables and function parameters. They are exempt from the
-#' alias rule (a parameter called q is not the function q).
-.sr_emit_bound <- function(exprs) {
-  out <- character()
-  rec <- function(x) {
-    if (!is.call(x)) return(invisible())
-    h <- x[[1L]]
-    if (is.symbol(h)) {
-      hs <- as.character(h)
-      if (hs %in% c("<-", "=", "<<-") && length(x) == 3L && is.symbol(x[[2L]])) {
-        out <<- c(out, as.character(x[[2L]]))
-      }
-      if (hs == "function" && length(x) >= 2L) out <<- c(out, names(x[[2L]]))
-    }
-    for (i in seq_along(x)) if (!identical(x[[i]], quote(expr = ))) rec(x[[i]])
-  }
-  for (e in exprs) rec(e)
-  out
-}
-
 #' Variables whose value derives (through assignments, to a fixpoint) from a diagnostic, so that
 #' `z <- cox.zph(f); if (z$table[1, 3] < 0.05)` is caught as well as the direct form. A replacement
 #' assignment (res$z <- cox.zph(f)) taints the root variable.
@@ -205,8 +185,8 @@
 #' Check emitted code against the Global Constraints. Stops, naming the offending call, on the
 #' first violation; otherwise returns TRUE invisibly.
 #' A forbidden function name also counts when it appears as a bare symbol used as a value (an alias),
-#' except inside a formula, after `$` / `@`, as an argument name, as a string, or when the code binds
-#' that name itself (a parameter or variable called q or url).
+#' except inside a formula, after `$` / `@`, as an argument name, as a string, or as an assignment
+#' target. Emitted code never binds a forbidden name, so there is no lexical-scope exemption.
 #' @param code one string of R code
 #' @param kind "analysis" (no diagnostic call or p-name at all) or "diagnostic" (diagnostics may
 #'   run, but no branch condition, subscript or && / || operand may depend on one)
@@ -225,7 +205,6 @@
   diag <- .sr_emit_diag_names()
   diag_subscript <- setdiff(diag, "$p")
   tainted_vars <- if (kind == "diagnostic") .sr_emit_tainted(exprs) else character()
-  bound <- .sr_emit_bound(exprs)
   barred_values <- c(.sr_emit_forbidden, if (!isTRUE(prologue)) .sr_emit_prologue_only)
   bad <- function(e, why) {
     stop("emitted code rejected: ", why, " in `", .sr_emit_show(e), "`", call. = FALSE)
@@ -254,7 +233,7 @@
     if (is.symbol(e)) {
       s <- as.character(e)
       check_pname(s, e)
-      if (!fm && s %in% barred_values && !(s %in% bound)) {
+      if (!fm && s %in% barred_values) {
         bad(e, sprintf("forbidden function '%s' used as a value", s))
       }
       return(invisible())
@@ -290,6 +269,18 @@
         for (i in seq_along(e)[-(1:2)]) {
           if (!identical(e[[i]], quote(expr = )) && depends(e[[i]], diag_subscript)) {
             bad(e, "a subscript (a branch condition) depends on a diagnostic")
+          }
+        }
+      }
+      # subset(x, <cond>) and Filter(<pred>, x) select by a condition, like x[<cond>]
+      if (kind == "diagnostic" && hs %in% c("subset", "Filter") && length(e) >= 3L) {
+        obj <- if (hs == "subset") 2L else 3L
+        conds <- if (hs == "subset") seq_along(e)[-(1:2)] else 2L
+        if (!identical(e[[obj]], quote(expr = )) && !depends(e[[obj]], diag)) {
+          for (i in conds) {
+            if (!identical(e[[i]], quote(expr = )) && depends(e[[i]], diag_subscript)) {
+              bad(e, sprintf("the condition of %s() depends on a diagnostic", hs))
+            }
           }
         }
       }

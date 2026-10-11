@@ -184,7 +184,13 @@ test_that(".sr_emit_check: no branch may depend on a diagnostic", {
 test_that(".sr_emit_check refuses a forbidden function used as a value (aliases)", {
   for (code in c("(system)('x')", "f <- system; f('x')", "Negate(system)", "g <- base::system",
                  "h <- list(run = eval)", "sapply(1:2, FUN = unlink)", "f <- get; f('a')",
-                 "k <- function() library")) {
+                 "k <- function() library",
+                 "g <- function(system) h(system); h <- function(fn) fn('x'); g(system)",
+                 "(function(system) 1)(system)",
+                 "local({system <- 1}); f <- system; f('x')",
+                 "k <- function() { system <- 1 }; f <- system; f('x')",
+                 "system <- 1; rm(system); f <- system; f('x')",
+                 "h <- function(fn) fn('x'); eval <- 1; h(eval)")) {
     expect_error(.sr_emit_check(code, "analysis"), "forbidden", info = code)
     expect_error(.sr_emit_check(code, "diagnostic"), "forbidden", info = code)
   }
@@ -202,10 +208,7 @@ test_that("column names like source, get and url still work where they are not v
     "list(get = 1, url = 2, source = 3)",
     'x <- c(system = 1, eval = 2); "system"',
     "d[d$source > 1 & !is.na(d$url), ]",
-    "stats::lm(`source` ~ `get`, data = d)",
-    "f <- function(q, url = 1) q + url; f(1)",
-    "q <- 0.5; stats::qnorm(q)",
-    "get <- 3; get + 1"
+    "stats::lm(`source` ~ `get`, data = d)"
   )
   for (code in ok) {
     expect_true(.sr_emit_check(code, "analysis"), info = code)
@@ -224,6 +227,9 @@ test_that("a diagnostic cannot gate a branch through a replacement assignment, a
     "z <- survival::cox.zph(f); x[z$table[,3] < .05]",
     "z <- survival::cox.zph(f); x[[z$table[1,3] < .05]]",
     "x[survival::cox.zph(f)$table[,3] < .05]",
+    "z <- survival::cox.zph(f); subset(x, z$table[,3] < .05)",
+    "subset(x, survival::cox.zph(f)$table[,3] < .05)",
+    "z <- survival::cox.zph(f); Filter(function(v) v < z$table[1, 3], x)",
     "z <- survival::cox.zph(f); z$table[1,3] < .05 && g()",
     "z <- survival::cox.zph(f); g() || z$table[1,3] < .05",
     "stats::shapiro.test(x)$p.value > .05 && g()"
@@ -239,7 +245,9 @@ test_that("a diagnostic cannot gate a branch through a replacement assignment, a
     "z <- survival::cox.zph(f); res <- list(); res$n <- nrow(d); if (res$n > 3) 1",
     "z <- survival::cox.zph(f); x[1:3]; if (nrow(d) > 1 && ncol(d) > 1) 2",
     "p <- spec$p; if (p > 3) 1",
-    "p <- spec$p; x[1:spec$p]"
+    "p <- spec$p; x[1:spec$p]",
+    "z <- survival::cox.zph(f); out <- subset(z$table, z$table[, 3] < 0.05)",
+    "out <- subset(d, age > 3); Filter(is.numeric, d)"
   )
   for (code in ok) expect_true(.sr_emit_check(code, "diagnostic"), info = code)
 })
