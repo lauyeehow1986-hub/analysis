@@ -538,7 +538,8 @@ sr_reducer_register("action.decided", function(state, event) {
 
 #' What still blocks analysis on `table`, one row per item, in this order:
 #' ingest complete, dictionary attached (warn if absent), roles confirmed (block if no roles.set), outcome
-#' role set (block), DQ run on current store hash (block if absent or stale), block findings decided (block
+#' role set (block), DQ run on current store hash (block if absent, stale, or made under another outcome
+#' family: see sr_dq_run), block findings decided (block
 #' while any is undecided), warn findings decided (warn), recipe applied (warn while steps are newer than
 #' <table>_clean), source full SHA (warn while pending; required at freeze). A finding is decided when
 #' state$actions holds a decision for it on this table, whatever the action.
@@ -583,6 +584,9 @@ sr_readiness <- function(project, table) {
     add("DQ run on current store hash", "block", why)
   } else if (is.null(cur) || !identical(as.character(run$store_hash), as.character(cur))) {
     add("DQ run on current store hash", "block", "the store changed since the latest DQ run; run the checks again")
+  } else if (!.sr_dq_family_current(run, tryCatch(sr_outcome_family_cols(project, table), error = function(err) NULL))) {
+    add("DQ run on current store hash", "block",
+        "the variable roles changed since the latest DQ run (its outcome-family columns differ); run the checks again")
   } else {
     add("DQ run on current store hash", "ok", sprintf("run %s matches the current store", run$run_id))
   }

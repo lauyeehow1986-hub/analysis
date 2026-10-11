@@ -18,10 +18,13 @@
 #   or level name: the outcome-blind gate (.sr_assert_blind) matches names exactly.
 #
 # A run is stored as data/dq/<table>-<run_id>.json (written atomically) and recorded by the `dq.run`
-# event {table, run_id, file, sha256, n_findings, by_severity, store_hash, checks}; state$dq[[table]]
-# holds the latest run of each table. sr_dq_findings() reads the file back (checking its SHA-256) and
-# returns exactly what sr_dq_run() saw: the findings are normalised through their own JSON form, so
-# the two are identical().
+# event {table, run_id, file, sha256, n_findings, by_severity, store_hash, checks, blind, family,
+# family_hash}; state$dq[[table]] holds the latest run of each table. `family` is the outcome family of the
+# table when the run was made (sr_outcome_family_cols) and `family_hash` its fingerprint
+# (.sr_dq_family_hash); sr_readiness() calls a run stale when the current family differs (an event written
+# before these fields existed is stale). sr_dq_findings() reads the file back (checking its SHA-256) and,
+# while the roles are those of the run, returns exactly what sr_dq_run() saw: the findings are normalised
+# through their own JSON form, so the two are identical().
 #
 # Outcome-blind rule: a check sees ctx$sample, which sr_sample() already strips of the outcome-family
 # columns (SR_OUTCOME_FAMILY_ROLES, by lineage) while blind, so no pattern or statistic over the sample can
@@ -35,10 +38,26 @@
 # counts are an outcome statistic while blind: every finding keeps its check, column, severity, where and
 # examples, but n_affected and p_affected are NA, the message is a generic one, and the count fields of
 # its detail are NA. Run the checks again after the SAP is locked for the counts.
+#
+# The roles may change after a run (the Variable roles card follows the data cards). While blind,
+# sr_dq_findings() therefore applies the same rule at read time, against the CURRENT roles: a column that
+# is in the family now but was not kept out of the run (all of the family for a run recorded without
+# `family`) is "new". Through .sr_dq_blind_filter() a finding on a new family column survives only when it is
+# one of the marginals the write-time checks give a family column (SR_DQ_FAMILY_MARGINAL_CHECKS) and reads
+# no other column; any other finding that names a new family column (column, `where`, detail or message)
+# is dropped; and the multi-column findings whose column set the family decides at write time
+# (SR_DQ_FAMILY_SCOPED_CHECKS: the field count of missing_row, the patterns of missing_pattern) are dropped.
+# A table that is outcome-dependent now gets .sr_dq_withhold(). The result passes .sr_assert_blind().
 
 SR_DQ_DOMAINS <- c("conformance", "completeness", "plausibility", "uniqueness", "structure", "leakage")
 SR_DQ_SEVERITIES <- c("info", "warn", "block")
 SR_DQ_EXAMPLES_N <- 5L
+# The findings a blind run gives an outcome-family column itself: its own marginals, no other column
+# (missing_col in dq_completeness.R; range, unit_mix, heaping, future_date, old_date in dq_plausibility.R).
+SR_DQ_FAMILY_MARGINAL_CHECKS <- c("missing_col", "range", "unit_mix", "heaping", "future_date", "old_date")
+# The whole-table findings whose column set leaves the family out while blind (missing_row counts the
+# fields of a row without it; missing_pattern reads the blind sample).
+SR_DQ_FAMILY_SCOPED_CHECKS <- c("missing_row", "missing_pattern")
 
 # ---- the schema -------------------------------------------------------------------------------------
 
@@ -355,6 +374,7 @@ sr_dq_run <- function(project, table, checks = NULL) {
   if (ctx$blind && sr_outcome_dependent(project, table)) findings <- .sr_dq_normalise(.sr_dq_withhold(findings))
   if (ctx$blind) .sr_assert_blind(findings, outcome_cols, other_cols)
 
+  fam <- sort(unique(as.character(outcome_cols)), method = "radix")
   run_id <- .sr_dq_run_id()
   rel <- .sr_dq_rel(table, run_id)
   file <- file.path(sr_project_paths(project$paths$dir)$dir, rel)
@@ -367,7 +387,9 @@ sr_dq_run <- function(project, table, checks = NULL) {
   tryCatch(
     sr_project_append(project, "dq.run", list(table = table, run_id = run_id, file = rel, sha256 = sha,
                                               n_findings = nrow(findings), by_severity = by_sev,
-                                              store_hash = ctx$profile$store_hash, checks = as.list(checks))),
+                                              store_hash = ctx$profile$store_hash, checks = as.list(checks),
+                                              blind = isTRUE(ctx$blind), family = as.list(fam),
+                                              family_hash = .sr_dq_family_hash(fam))),
     error = function(e) {
       unlink(file)   # the event is the commit: no event, no file
       stop(e)
@@ -396,8 +418,68 @@ sr_dq_run <- function(project, table, checks = NULL) {
   f
 }
 
+# The fingerprint of an outcome-family column set (order and repeats do not matter).
+.sr_dq_family_hash <- function(fam) {
+  fam <- sort(unique(as.character(unlist(fam, use.names = FALSE))), method = "radix")
+  .sr_sha256(paste0("family:", .sr_json(as.list(fam))))
+}
+
+# TRUE when run `run` (a dq.run payload) was made under the outcome family `fam`. A run recorded without a
+# family fingerprint, or a family that cannot be read (NULL), is not.
+.sr_dq_family_current <- function(run, fam) {
+  h <- run$family_hash
+  !is.null(fam) && is.character(h) && length(h) == 1L && identical(h, .sr_dq_family_hash(fam))
+}
+
+# The names among `names` that occur in the strings `s` as whole names (a name is matched literally, not
+# as a pattern).
+.sr_dq_names_in <- function(s, names) {
+  s <- s[!is.na(s) & nzchar(s)]
+  if (!length(s) || !length(names)) return(character())
+  hit <- vapply(names, function(cn) {
+    lit <- gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", cn)
+    any(grepl(paste0("(?<![A-Za-z0-9_.])", lit, "(?![A-Za-z0-9_.])"), s, perl = TRUE))
+  }, NA)
+  names[hit]
+}
+
+# Every text of a finding's detail: the names of its frames and of their fields, and their text cells.
+.sr_dq_detail_text <- function(d) {
+  out <- names(d)
+  for (x in d) {
+    if (!is.data.frame(x)) next
+    out <- c(out, names(x))
+    for (v in x) if (is.character(v)) out <- c(out, v)
+  }
+  as.character(out)
+}
+
+# The read-time blind rule (see the header): the findings `f` of a run that kept the columns `kept` out,
+# re-checked against the current outcome family `fam`. Drops what crosses a family column the run did not
+# keep out with another column.
+.sr_dq_blind_filter <- function(f, fam, kept) {
+  new <- setdiff(fam, kept)
+  if (!nrow(f) || !length(new)) return(f)
+  keep <- vapply(seq_len(nrow(f)), function(i) {
+    col <- f$column[i]
+    if (identical(f$check[i], "check_error")) return(TRUE)
+    if (f$check[i] %in% SR_DQ_FAMILY_SCOPED_CHECKS) return(FALSE)
+    wcols <- .sr_rc_where_cols(f$where[[i]])
+    if (col %in% new) {
+      dcols <- unlist(lapply(f$detail[[i]], function(x) if (is.data.frame(x)) as.character(x$column)), use.names = FALSE)
+      return(f$check[i] %in% SR_DQ_FAMILY_MARGINAL_CHECKS && all(wcols %in% col) && all(dcols %in% col))
+    }
+    txt <- c(wcols, f$message[i], .sr_dq_detail_text(f$detail[[i]]))
+    !length(.sr_dq_names_in(txt, new))
+  }, NA)
+  f[keep, , drop = FALSE]
+}
+
 #' The findings of the latest DQ run of `table`, as sr_dq_run() saw them. The file is checked against
-#' the SHA-256 recorded by the `dq.run` event; a missing or altered file is an error.
+#' the SHA-256 recorded by the `dq.run` event; a missing or altered file is an error. While blind, the
+#' findings are re-checked against the CURRENT roles (see the header): a finding that crosses a column
+#' that joined the outcome family after the run is dropped, and an outcome-dependent table has its counts
+#' and numbers withheld.
 sr_dq_findings <- function(project, table) {
   .sr_store_check_table(table)
   e <- project$state$dq[[table]]
@@ -411,7 +493,16 @@ sr_dq_findings <- function(project, table) {
   }
   txt <- rawToChar(bytes)
   Encoding(txt) <- "UTF-8"
-  .sr_dq_from_json(.sr_parse_json(txt)$findings)
+  f <- .sr_dq_from_json(.sr_parse_json(txt)$findings)
+  if (!sr_blind(project)) return(f)
+  fam <- sr_outcome_family_cols(project, table)
+  kept <- if (isTRUE(e$blind)) as.character(unlist(e$family, use.names = FALSE)) else character()
+  f <- .sr_dq_blind_filter(f, fam, kept)
+  if (sr_outcome_dependent(project, table)) f <- .sr_dq_normalise(.sr_dq_withhold(f))
+  cols <- tryCatch(vapply(sr_store_manifest(project, table)$schema, function(s) s$name, ""),
+                   error = function(err) character())
+  .sr_assert_blind(f, fam, setdiff(union(union(cols, names(sr_roles(project, table))), f$column), fam))
+  f
 }
 
 # `dq.run` keeps the latest run of each table; other tables are untouched.

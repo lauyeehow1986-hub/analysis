@@ -242,3 +242,41 @@ test_that("a failing check stores no detail of its error while blind", {
   q <- .bl_reopen(p)
   expect_identical(q$state$dq, p$state$dq)
 })
+
+test_that("DQ findings stored before the roles were set are re-filtered against the current roles, and the run is stale (A)", {
+  p <- .bl_project(roles = FALSE)
+  p <- sr_dq_run(p, "cardiac")
+  p <- .bl_roles(p)
+  fam <- .bl_fam(p, "cardiac")
+  cols <- .bl_cols(p, "cardiac")
+  f <- sr_dq_findings(p, "cardiac")
+  expect_identical(.bl_crossing(f, fam, cols), character())
+  expect_false(any(f$check %in% c("missing_pattern", "missing_row")))
+  expect_false(any(f$check == "missing_dependence" & f$column %in% fam))
+  expect_silent(.sr_assert_blind(f, fam, setdiff(cols, fam)))
+  # a family column keeps its own marginal (missing_col), with no other column
+  expect_true(any(f$check == "missing_col" & f$column == "death_date"))
+  rd <- sr_readiness(p, "cardiac")
+  dq_row <- rd$item == "DQ run on current store hash"
+  expect_identical(rd$status[dq_row], "block")
+  expect_match(rd$detail[dq_row], "roles changed")
+  expect_no_error(sr_suggest(p, "cardiac"))
+  # reopening gives the same findings and the same readiness
+  q <- .bl_reopen(p)
+  expect_identical(q$state$dq, p$state$dq)
+  expect_identical(sr_dq_findings(q, "cardiac"), f)
+  expect_identical(sr_readiness(q, "cardiac"), rd)
+  # a run made under the current roles is current again
+  q <- sr_dq_run(q, "cardiac")
+  rq <- sr_readiness(q, "cardiac")
+  expect_identical(rq$status[rq$item == "DQ run on current store hash"], "ok")
+  expect_identical(.bl_crossing(sr_dq_findings(q, "cardiac"), fam, cols), character())
+  # an old dq.run event without the family fingerprint is stale, and its findings are re-filtered
+  q2 <- q
+  q2$state$dq$cardiac$family_hash <- NULL
+  q2$state$dq$cardiac$family <- NULL
+  r2 <- sr_readiness(q2, "cardiac")
+  expect_identical(r2$status[r2$item == "DQ run on current store hash"], "block")
+  expect_identical(.bl_crossing(sr_dq_findings(q2, "cardiac"), fam, cols), character())
+  expect_false(any(sr_dq_findings(q2, "cardiac")$check %in% c("missing_pattern", "missing_row")))
+})
