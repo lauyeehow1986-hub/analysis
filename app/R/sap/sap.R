@@ -2,10 +2,10 @@
 #
 # A SAP is a set of pre-specified analyses (primary / secondary / sensitivity), multiplicity families
 # of the inferential analyses, and rules that name a pre-specified response to a diagnostic. Every edit
-# is an event (sap.analysis_added, sap.analysis_removed, sap.family_set, sap.rule_set); the lock
+# is an event (sap.analysis_set, sap.analysis_removed, sap.family_set, sap.rule_set); the lock
 # (sap.locked) freezes them. State:
-#   state$analyses[[id]]      list(id, route, version, spec, table, label, family, parent, addresses,
-#                                  prespecified)
+#   state$analyses[[id]]      list(id, route, route_version, table, label, family, spec, parent, trigger,
+#                                  addresses, prespecified, reason)
 #   state$sap$families[[id]]  list(id, members, method)
 #   state$sap$rules[[id]]     list(id, analysis, check, action, alternative)
 #   state$sap$locked / $lock  TRUE / list(sap_hash, tables = list(<t> = list(store_hash)), libsnap_hash,
@@ -54,15 +54,17 @@ SR_SAP_ACTIONS <- c("add_sensitivity", "replace_primary")
 
 # ---- reducers --------------------------------------------------------------------------------------
 
-sr_reducer_register("sap.analysis_added", function(state, event) {
+sr_reducer_register("sap.analysis_set", function(state, event) {
   p <- event$payload
   id <- p$id
   if (!is.character(id) || length(id) != 1L || is.na(id) || !nzchar(id)) {
-    stop("sap.analysis_added needs an id", call. = FALSE)
+    stop("sap.analysis_set needs an id", call. = FALSE)
   }
-  rec <- list(id = id, route = as.character(p$route), version = as.integer(p$version), spec = p$spec,
-              table = as.character(p$table), label = as.character(p$label), family = .sr_sap_chr1(p$family),
-              parent = .sr_sap_chr1(p$parent), addresses = .sr_sap_chrv(p$addresses), prespecified = TRUE)
+  rec <- list(id = id, route = as.character(p$route), route_version = as.integer(p$route_version),
+              table = as.character(p$table), label = as.character(p$label),
+              family = .sr_sap_chr1(p$family), spec = p$spec, parent = .sr_sap_chr1(p$parent),
+              trigger = NA_character_, addresses = .sr_sap_chrv(p$addresses), prespecified = TRUE,
+              reason = NA_character_)
   an <- state$analyses %||% list()
   an[[id]] <- rec
   state$analyses <- an
@@ -166,7 +168,7 @@ sr_reducer_register("sap.locked", function(state, event) {
 #' @param parent the analysis this one is a sensitivity analysis of.
 #' @param addresses ids of the DQ findings (kept for a sensitivity analysis) this analysis answers.
 #' @param version route version; NULL pins the latest registered one.
-#' @return the project (`sap.analysis_added`).
+#' @return the project (`sap.analysis_set`).
 sr_sap_add <- function(project, id, route, spec, table, label = c("primary", "secondary", "sensitivity"),
                        family = NA, parent = NA, addresses = character(), version = NULL) {
   .sr_sap_open(project, "the SAP is locked; use sr_analysis_add")
@@ -220,8 +222,8 @@ sr_sap_add <- function(project, id, route, spec, table, label = c("primary", "se
   if (!is.na(family) && label == "sensitivity") {
     stop("sensitivity analyses are not an inferential family", call. = FALSE)
   }
-  sr_project_append(project, "sap.analysis_added", list(
-    id = id, route = route, version = as.integer(r$version), spec = spec, table = table, label = label,
+  sr_project_append(project, "sap.analysis_set", list(
+    id = id, route = route, route_version = as.integer(r$version), spec = spec, table = table, label = label,
     family = family, parent = parent, addresses = addresses))
 }
 

@@ -76,6 +76,21 @@ test_that(".sr_mem_method maps a route id to an sr_mem_estimate method", {
 
 # ---- drafting ---------------------------------------------------------------------------------------
 
+test_that("the analysis record has the one contract shape and sr_sap_add emits sap.analysis_set", {
+  .sap_route()
+  p <- .sap_project()
+  p <- sr_sap_add(p, "a1", "stub_sap", .sap_spec(), "t", label = "primary")
+  shape <- c("id", "route", "route_version", "table", "label", "family", "spec", "parent",
+             "trigger", "addresses", "prespecified", "reason")
+  expect_identical(names(p$state$analyses$a1), shape)
+  expect_true(is.na(p$state$analyses$a1$trigger))
+  expect_true(is.na(p$state$analyses$a1$reason))
+  types <- vapply(sr_events_read(p$paths$events), function(e) e$type, "")
+  expect_true("sap.analysis_set" %in% types)
+  p <- sr_sap_family(p, "f1", "a1")                           # joining a family keeps the shape
+  expect_identical(names(p$state$analyses$a1), shape)
+})
+
 test_that("sr_sap_add records a pre-specified analysis", {
   .sap_route()
   p <- .sap_project()
@@ -85,7 +100,7 @@ test_that("sr_sap_add records a pre-specified analysis", {
   expect_identical(a$label, "primary")
   expect_identical(a$table, "t")
   expect_identical(a$route, "stub_sap")
-  expect_identical(a$version, 1L)
+  expect_identical(a$route_version, 1L)
   expect_identical(a$spec$outcome, "died")
   expect_true(is.na(a$family))
   expect_true(is.na(a$parent))
