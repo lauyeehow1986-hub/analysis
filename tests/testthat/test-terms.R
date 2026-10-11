@@ -213,6 +213,68 @@ test_that("coefficient names never collide: factor t1 with levels 0 and 2 next t
   expect_identical(src$kind[match(c("t1f0", "t10"), nm)], c("factor", "linear"))
 })
 
+test_that("sr_coef_source maps every coefficient of a factor exposure x linear interaction", {
+  lung <- fx_lung()
+  lung$wt <- lung$wt.loss
+  spec <- list(outcome = "status", event_value = 2, time = "time", status = "status", status_event = 2,
+               exposure = "ph.ecog", exposure_ref = "0",
+               terms = list(list(var = "age", type = "linear")),
+               interactions = list(c("ph.ecog", "age")))
+  b <- fx_build(spec, lung, "binary")
+  expect_identical(b$tc$rhs, "t1f + t2 + t1f:t2")
+  fits <- list(
+    lm = lm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des),
+    glm = suppressWarnings(glm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des, family = binomial())),
+    cox = survival::coxph(as.formula(paste("survival::Surv(time, status) ~", b$tc$rhs)), data = b$des)
+  )
+  for (nm in names(fits)) {
+    cn <- setdiff(names(coef(fits[[nm]])), "(Intercept)")
+    expect_identical(cn, c("t1f1", "t1f2", "t1f3", "t2", "t1f1:t2", "t1f2:t2", "t1f3:t2"))
+    src <- sr_coef_source(cn, b$tc$coef_map)
+    expect_identical(src$source_var, c(rep("ph.ecog", 3), "age", rep("ph.ecog:age", 3)))
+    expect_identical(src$kind, c(rep("factor", 3), "linear", rep("interaction", 3)))
+    expect_identical(src$level, c("1", "2", "3", NA, "1", "2", "3"))
+  }
+})
+
+test_that("sr_coef_source maps every coefficient of a factor exposure x factor interaction", {
+  lung <- fx_lung()
+  lung$sx <- ifelse(lung$sex == 1, "male", "female")
+  spec <- list(outcome = "status", event_value = 2, exposure = "ph.ecog", exposure_ref = "0",
+               terms = list(list(var = "sx", type = "factor", ref = "male")),
+               interactions = list(c("sx", "ph.ecog")))
+  b <- fx_build(spec, lung, "binary")
+  expect_identical(b$tc$rhs, "t1f + t2f + t1f:t2f")
+  f <- lm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des)
+  cn <- setdiff(names(coef(f)), "(Intercept)")
+  expect_identical(cn, c("t1f1", "t1f2", "t1f3", "t2ffemale", "t1f1:t2ffemale", "t1f2:t2ffemale", "t1f3:t2ffemale"))
+  src <- sr_coef_source(cn, b$tc$coef_map)
+  expect_identical(src$source_var, c(rep("ph.ecog", 3), "sx", rep("ph.ecog:sx", 3)))
+  expect_identical(src$kind, c(rep("factor", 4), rep("interaction", 3)))
+  expect_identical(src$level, c("1", "2", "3", "female", "1:female", "2:female", "3:female"))
+})
+
+test_that("sr_coef_source keeps a colon inside a factor level, also in a factor-first interaction", {
+  set.seed(2)
+  n <- 90
+  d <- data.frame(y = rnorm(n), g = sample(c("0", "x:y", "a:b"), n, TRUE), z = rnorm(n),
+                  h = sample(c("p", "q:r"), n, TRUE), stringsAsFactors = FALSE)
+  spec <- list(outcome = "y", exposure = "g", exposure_ref = "0",
+               terms = list(list(var = "z", type = "linear"), list(var = "h", type = "factor", ref = "p")),
+               interactions = list(c("g", "z"), c("g", "h")))
+  b <- fx_build(spec, d, "continuous")
+  f <- lm(as.formula(paste(".y ~", b$tc$rhs)), data = b$des)
+  cn <- setdiff(names(coef(f)), "(Intercept)")
+  src <- sr_coef_source(cn, b$tc$coef_map)
+  expect_identical(anyDuplicated(cn), 0L)
+  i <- match(c("t1fx:y", "t1fa:b", "t3fq:r", "t1fx:y:t2", "t1fx:y:t3fq:r"), cn)
+  expect_false(anyNA(i))
+  expect_identical(src$kind[i], c("factor", "factor", "factor", "interaction", "interaction"))
+  expect_identical(src$level[i], c("x:y", "a:b", "q:r", "x:y", "x:y:q:r"))
+  expect_identical(src$source_var[i], c("g", "g", "h", "g:z", "g:h"))
+  # every coefficient resolved
+  expect_identical(nrow(src), length(cn))
+})
 test_that("sr_coef_source refuses unknown, ambiguous and out-of-model names", {
   cm <- sr_terms_code(list(outcome = "y", exposure = "a",
                            terms = list(list(var = "b", type = "linear"), list(var = "c", type = "factor")),
@@ -229,6 +291,7 @@ test_that("sr_coef_source refuses unknown, ambiguous and out-of-model names", {
   expect_identical(s$level, c("u:v", "u:v"))
   expect_identical(s$kind, c("factor", "interaction"))
 })
+
 test_that("event_value codes the binary outcome and survival outcomes get .time / .event", {
   lung <- fx_lung()
   spec <- list(outcome = "status", event_value = 2, exposure = "sex")

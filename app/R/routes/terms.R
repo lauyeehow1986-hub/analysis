@@ -194,9 +194,16 @@ sr_spec_cols <- function(spec) {
 
 #' Map real coefficient names (e.g. names(coef(fit))) back to the user's variables.
 #' Grammar of a coefficient name: t<i> (linear, or the first column of an rcs / quad term),
-#' t<i>_s<j> (rcs), t<i>_q (quad), t<i>f<level> (factor, level = the remainder), and
-#' "<part>:<part>" for an interaction. Matching is exact first, then by factor prefix; a name that
-#' resolves to nothing or to more than one thing is an error.
+#' t<i>_s<j> (rcs), t<i>_q (quad), t<i>f<level> (factor, level = the remainder, which may itself
+#' contain ":"), and "<part>:<part>" for an interaction.
+#' Matching rule, in order: (1) an interaction reading wins: the name is split at each ":" and it
+#' counts when both halves resolve as single parts and the pair is an interaction row of coef_map;
+#' (2) only when no interaction reading exists, a direct reading: exact match, else factor prefix
+#' with the remainder as the level. A name that resolves to nothing, or to more than one reading
+#' within the winning class, is an error. Interactions win because their factor-first form
+#' ("t1fb:t2") would otherwise also read as factor t1f with level "b:t2". The one name that stays
+#' unrecoverable from text alone is a main-effect level spelling ":<derived name>" of a variable that
+#' also has that interaction; it reads as the interaction.
 #' @param coef_names character vector of coefficient names (without the intercept)
 #' @param coef_map the `coef_map` of sr_terms_code()
 #' @return data.frame(coef, source_var, kind, level). `level` is the factor level of a factor
@@ -214,10 +221,10 @@ sr_coef_source <- function(coef_names, coef_map) {
     if (base$kind[row] == "factor") substring(p, nchar(base$coef[row]) + 1L) else NA_character_
   }
   one <- function(nm) {
-    cand <- list()
-    h <- hits(nm)
-    for (r in h) {
-      cand[[length(cand) + 1L]] <- list(source_var = base$source_var[r], kind = base$kind[r], level = level_of(r, nm))
+    inter_c <- list()
+    direct_c <- list()
+    for (r in hits(nm)) {
+      direct_c[[length(direct_c) + 1L]] <- list(source_var = base$source_var[r], kind = base$kind[r], level = level_of(r, nm))
     }
     pos <- gregexpr(":", nm, fixed = TRUE)[[1L]]
     for (k in pos[pos > 0L]) {
@@ -230,9 +237,10 @@ sr_coef_source <- function(coef_names, coef_map) {
       if (length(ii) != 1L) next
       lv <- c(level_of(hl, left), level_of(hr, right))
       lv <- lv[!is.na(lv)]
-      cand[[length(cand) + 1L]] <- list(source_var = inter$source_var[ii], kind = "interaction",
-                                        level = if (length(lv)) paste(lv, collapse = ":") else NA_character_)
+      inter_c[[length(inter_c) + 1L]] <- list(source_var = inter$source_var[ii], kind = "interaction",
+                                              level = if (length(lv)) paste(lv, collapse = ":") else NA_character_)
     }
+    cand <- if (length(inter_c)) inter_c else direct_c
     if (length(cand) == 0L) stop("coefficient '", nm, "' does not belong to any term of the model", call. = FALSE)
     if (length(cand) > 1L) stop("coefficient '", nm, "' matches more than one term", call. = FALSE)
     cand[[1L]]
@@ -331,6 +339,7 @@ sr_terms_code <- function(spec) {
   list(setup = paste(setup, collapse = "\n"), design = design, rhs = rhs,
        coef_map = .sr_coef_map(plan, ia))
 }
+
 #' Code adding the outcome to the design frame `des` (the value of .h_design(...)):
 #'   binary     .y  0/1 integer: `outcome == event_value`, or the outcome itself when it is logical or 0/1
 #'   continuous .y  numeric
