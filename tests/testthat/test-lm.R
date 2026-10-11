@@ -133,7 +133,7 @@ test_that("sr_spec_cols reads outcome, exposure, terms and cluster", {
   expect_identical(sr_spec_cols(.lm_spec(se = "cluster", cluster = "cyl")), c("mpg", "am", "wt", "hp", "cyl"))
 })
 
-test_that("validation refuses what lm cannot do: cluster SE without a cluster, marginal effects", {
+test_that("validation refuses what lm cannot do: cluster SE without a cluster, unknown standardisation", {
   r <- .lm_route()
   v <- sr_spec_validate(.lm_spec(se = "cluster"), r)
   expect_false(v$ok)
@@ -143,12 +143,13 @@ test_that("validation refuses what lm cannot do: cluster SE without a cluster, m
   s$layers$clustered <- FALSE
   expect_false(sr_spec_validate(s, r)$ok)
   expect_true(sr_spec_validate(.lm_spec(se = "cluster", cluster = "cyl"), r)$ok)
-  # R3: marginal = TRUE is refused until g-computation lands
-  m <- sr_spec_validate(.lm_spec(marginal = TRUE), r)
-  expect_false(m$ok)
-  expect_match(paste(m$errors, collapse = " "), "marginal effects for lm arrive with g-computation", fixed = TRUE)
+  # R3: marginal effects are implemented since g-computation landed (Task 7); the refusal is gone
+  expect_true(sr_spec_validate(.lm_spec(marginal = TRUE), r)$ok)
+  expect_true(sr_spec_validate(.lm_spec(marginal = TRUE, standardize_over = "all"), r)$ok)
   expect_true(sr_spec_validate(.lm_spec(marginal = FALSE, standardize_over = "all"), r)$ok)
-  expect_error(sr_compile(r, .lm_spec(marginal = TRUE)), "g-computation")
+  expect_silent(sr_compile(r, .lm_spec(marginal = TRUE)))
+  # only the standardisations that exist are accepted
+  expect_false(sr_spec_validate(.lm_spec(marginal = TRUE, standardize_over = "exposed"), r)$ok)
   expect_false(sr_spec_validate(.lm_spec(se = "bootstrap"), r)$ok)
   expect_false(sr_spec_validate(modifyList(.lm_spec(), list(outcome = NULL)), r)$ok)
 })
@@ -390,8 +391,8 @@ test_that("lm runs through sr_sap_add, lock and sr_run; a hostile column name is
   # route validation runs at sr_sap_add
   bad1 <- .lm_spec(outcome = hostile, exposure = "a b", se = "cluster")
   expect_error(sr_sap_add(p, "bad1", "lm", bad1, "t", label = "primary"), "cluster")
-  bad2 <- .lm_spec(outcome = hostile, exposure = "a b", marginal = TRUE)
-  expect_error(sr_sap_add(p, "bad2", "lm", bad2, "t", label = "primary"), "g-computation")
+  bad2 <- .lm_spec(outcome = hostile, exposure = "a b", standardize_over = "exposed")
+  expect_error(sr_sap_add(p, "bad2", "lm", bad2, "t", label = "primary"), "standardize_over")
   p <- sr_sap_add(p, "m1", "lm", s, "t", label = "primary")
   p <- sr_sap_lock(p)
   p <- sr_run(p, "m1")

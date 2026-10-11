@@ -22,8 +22,15 @@
 # reference level).
 #
 # Not yet implemented (refused at compile, never silently ignored): multiple imputation, weights,
-# matching, the bootstrap and the bayesian framework. marginal = TRUE is refused at validation until
-# g-computation lands.
+# matching, the bootstrap and the bayesian framework.
+#
+# Marginal effect (marginal = TRUE, default FALSE): the standardised mean difference by g-computation
+# (routes/marginal.R), reported as an extra role-primary MD row "<exposure> (marginal)" and a
+# "marginal" table, with a delta-method interval (t on the same df as the coefficients). Without an
+# exposure interaction it equals the coefficient; with one it is the average effect, which the
+# coefficient row is not. standardize_over = "analysis" (default) averages over the rows the model
+# was fitted on, "all" also over the rows lost only to a missing outcome. The exposure must be binary
+# (0/1) or categorical (exposure_ref); a continuous exposure with marginal = TRUE is refused at run time.
 
 .sr_lm_ses <- c("model", "robust", "cluster")
 
@@ -41,9 +48,6 @@
   if (identical(spec[["outcome"]], spec[["exposure"]])) {
     stop("the outcome and the exposure must be different columns", call. = FALSE)
   }
-  if (isTRUE(spec[["marginal"]])) {
-    stop("marginal effects for lm arrive with g-computation", call. = FALSE)
-  }
   if (identical(.sr_lm_se(spec), "cluster")) {
     if (!one(spec[["cluster"]])) {
       stop("se = \"cluster\" needs a cluster column (spec$cluster)", call. = FALSE)
@@ -56,14 +60,17 @@
 }
 
 # The estimand, a function of the spec so that it follows the missing-data layer; it is evaluated by
-# sr_spec_validate() once the schema holds, which is where the cross-field checks run too.
+# sr_spec_validate() once the schema holds, which is where the cross-field checks run too (ruling R18:
+# the route cross-field validation lives in this function-form estimand, via .sr_lm_check()).
 .sr_lm_estimand <- function(spec) {
   .sr_lm_check(spec)
   mi <- identical(spec[["layers"]][["missing"]], "mi")
+  marg <- isTRUE(spec[["marginal"]])
   sr_estimand(population = if (mi) "all analysed (MI)" else "complete cases",
               variables = c(spec[["exposure"]], spec[["outcome"]]),
-              intercurrent = "not applicable", summary = "adjusted mean difference",
-              level = "conditional")
+              intercurrent = "not applicable",
+              summary = if (marg) "marginal (standardised) mean difference" else "adjusted mean difference",
+              level = if (marg) "marginal" else "conditional")
 }
 
 # Layers the route does not implement yet: stop rather than analyse as if they were absent.
@@ -91,15 +98,18 @@
   tc <- sr_terms_code(spec)
   cl <- if (identical(se, "cluster")) spec[["cluster"]] else NULL
   rhs_vars <- all.vars(stats::as.formula(paste("~", tc$rhs)))
+  mg <- .sr_marg_code(spec, rhs_vars, on = isTRUE(spec[["marginal"]]), strict = TRUE)
   used <- c(".y", rhs_vars, cl)
   cluster_arg <- if (is.null(cl)) "NULL" else sprintf("des[[%s]]", .sr_lit(cl))
   code <- c(
     tc$setup,
     .sr_inline(.sr_h_vcov, ".h_vcov"),
     .sr_inline(.sr_h_coef_table, ".h_coef_table"),
+    if (isTRUE(spec[["marginal"]])) .sr_inline(.sr_h_gcomp, ".h_gcomp"),
     tc$design,
     "des <- .h_design(sr_data)",
     sr_outcome_code(spec, "continuous"),
+    mg$pre,
     sprintf(".keep <- stats::complete.cases(des[%s])", .sr_lit(used)),
     "if (!any(.keep)) stop(\"no complete rows: every row has a missing value in the model\")",
     "des <- des[.keep, , drop = FALSE]",
@@ -118,11 +128,13 @@
       ".df <- min(.df, .ncl - 1)"
     ),
     sprintf(".V <- .h_vcov(fit, %s, %s)[.nm, .nm, drop = FALSE]", .sr_lit(se), cluster_arg),
+    mg$post,
     "tab <- .h_coef_table(.cf[.ok], .V, df = .df)",
     ".sm <- summary(fit)",
     paste0("list(coef = tab, aliased = names(.cf)[!.ok], n = nrow(des), n_total = nrow(sr_data), ",
            "df = .df, df_resid = fit$df.residual, sigma = .sm$sigma, r2 = .sm$r.squared, ",
            "adj_r2 = .sm$adj.r.squared, se_type = ", .sr_lit(se), ", n_clusters = .ncl, level = 0.95, ",
+           "marginal = ", mg$value, ", ",
            "levels = .sr_fixed$levels, ",
            "fig = data.frame(fitted = unname(stats::fitted(fit)), resid = unname(stats::residuals(fit)), ",
            "std_resid = unname(stats::rstandard(fit)), leverage = unname(stats::hatvalues(fit)), ",
@@ -240,7 +252,18 @@
     frag$lm_interaction <- paste("The exposure takes part in an interaction: its main-effect row is the effect",
                                  "where the interacting variable is 0 (or at its reference level), not an average effect.")
   }
-  list(tables = list(coefficients = coefs, model_fit = fit_tab), figures = list(resid_panel = value$fig),
+  tables <- list(coefficients = coefs, model_fit = fit_tab)
+  if (!is.null(value$marginal) && !is.null(value$marginal$rows)) {
+    ci_base <- c(model = "t_model", robust = "t_robust_hc3", cluster = "t_cluster_hc1")[[value$se_type]]
+    mp <- .sr_marg_present(value, exposure, "mean", ci_base)
+    effects <- rbind(effects, mp$effects)
+    rownames(effects) <- NULL
+    tables$marginal <- mp$table
+    frag$lm_marginal <- sprintf(
+      "Marginal mean difference by g-computation over %d row(s) (standardize_over = %s); delta-method interval.",
+      as.integer(round(value$marginal$n_over)), value$marginal$over)
+  }
+  list(tables = tables, figures = list(resid_panel = value$fig),
        fragments = frag, effects = effects)
 }
 
@@ -255,7 +278,7 @@
     se = list(type = "chr", required = FALSE, values = .sr_lm_ses),
     cluster = list(type = "chr", required = FALSE),
     marginal = list(type = "lgl", required = FALSE, default = FALSE),
-    standardize_over = list(type = "chr", required = FALSE, values = c("all", "exposed", "unexposed")),
+    standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )
