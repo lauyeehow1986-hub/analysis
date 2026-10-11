@@ -11,8 +11,10 @@
 #   * every other column (text, logical, factor, a numeric column with at most two distinct values
 #     such as 0/1) is categorical: n (%) per level, percentages of the non-missing values; more
 #     than 50 levels is refused (an identifier typed in `vars`), a date or time column is refused.
-# Rows with a missing grouping value are dropped (and counted in `n_excluded`); "Overall" is the
-# same set of rows.
+# Rows with a missing grouping value are dropped (counted in `n_excluded`, shown as the
+# "Excluded: missing <by>" row of the `missing` table and in the `table1_note` fragment); "Overall"
+# is the same set of rows. Groups and levels are ordered with sort(method = "radix") (C locale, so the
+# reference group is the same on every machine); a factor keeps its declared level order.
 #
 # SMD, group k against the first level of `by` (levels sorted):
 #   continuous   d = (m_k - m_0) / sqrt((s_k^2 + s_0^2) / 2)
@@ -99,7 +101,7 @@
 .h_t1_main <- function(dat, by, vars, nonnormal) {
   g <- dat[[by]]
   keep <- !is.na(g)
-  lv <- as.character(sort(unique(g[keep])))
+  lv <- as.character(sort(unique(g[keep]), method = "radix"))
   if (length(lv) < 2L) {
     stop("the grouping column needs at least two observed groups (found ", length(lv), ")")
   }
@@ -134,7 +136,7 @@
                        smd_method = "continuous")
     } else {
       xc <- as.character(x)
-      lvl <- as.character(sort(unique(x[!is.na(x)])))
+      lvl <- as.character(sort(unique(x[!is.na(x)]), method = "radix"))
       if (length(lvl) > 50L) {
         stop("column '", vars[i], "' has ", length(lvl), " distinct values; a categorical variable ",
              "may have at most 50 levels")
@@ -264,13 +266,18 @@
   mat <- matrix(unlist(rows), ncol = nc, byrow = TRUE)
   tb <- as.data.frame(mat, stringsAsFactors = FALSE)
   names(tb) <- col_names
-  mt <- data.frame(Variable = vapply(value$vars, function(v) v$var, ""), miss,
+  n_excl <- as.integer(value$n_excluded)
+  by_name <- as.character(value$by)
+  mt <- data.frame(Variable = c(vapply(value$vars, function(v) v$var, ""), paste0("Excluded: missing ", by_name)),
+                   rbind(miss, c(n_excl, rep(NA_integer_, ng))),
                    stringsAsFactors = FALSE, check.names = FALSE)
   names(mt) <- make.unique(c("Variable", "Overall", lv))
   rownames(mt) <- NULL
   effects <- if (length(eff)) do.call(rbind, eff) else sr_effects_empty()
   rownames(effects) <- NULL
-  list(tables = list(table1 = tb, missing = mt), figures = list(), fragments = list(),
+  note <- sprintf("%d row(s) excluded because the grouping column %s is missing; %d row(s) analysed.",
+                  n_excl, by_name, as.integer(round(value$n[ng + 1L])))
+  list(tables = list(table1 = tb, missing = mt), figures = list(), fragments = list(table1_note = note),
        effects = effects)
 }
 

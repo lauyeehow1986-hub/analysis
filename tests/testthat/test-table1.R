@@ -288,9 +288,9 @@ test_that("the display table formats mean (SD), median [IQR], n (%) and the miss
   expect_false(grepl("to", tb$SMD[j], fixed = TRUE))
   expect_identical(tb$SMD[j], sr_fmt_num(.t1_var(val, "smoke")$smd))
   mt <- r$present(val, .t1_spec())$tables$missing
-  expect_identical(mt$Variable, c("age", "bmi", "sex", "smoke", "stage"))
+  expect_identical(mt$Variable, c("age", "bmi", "sex", "smoke", "stage", "Excluded: missing grp"))
   expect_identical(mt$Overall, c(sum(is.na(df$age)), sum(is.na(df$bmi)), sum(is.na(df$sex)),
-                                 sum(is.na(df$smoke)), 0L))
+                                 sum(is.na(df$smoke)), 0L, 0L))
 })
 
 test_that("rows with a missing grouping value are excluded and counted", {
@@ -343,4 +343,120 @@ test_that("Table 1 runs end to end through sr_run on a locked project", {
   # the second run is a cache hit
   p2 <- sr_run(p, "t1")
   expect_true(p2$state$runs$t1$cached)
+})
+
+# ---- fix round 1 ---------------------------------------------------------------------------------
+
+test_that("rows excluded for a missing grouping value are shown in the presented output", {
+  df <- .t1_frame()
+  df$grp[c(3, 9, 40)] <- NA
+  r <- .t1_route()
+  pr <- r$present(.t1_value(df), .t1_spec())
+  mt <- pr$tables$missing
+  i <- which(mt$Variable == "Excluded: missing grp")
+  expect_length(i, 1L)
+  expect_identical(mt$Overall[i], sum(is.na(df$grp)))
+  expect_true(all(is.na(mt[i, c("A", "B")])))
+  expect_match(paste(unlist(pr$fragments), collapse = " "), "3 row(s) excluded", fixed = TRUE)
+  expect_match(paste(unlist(pr$fragments), collapse = " "), "grp", fixed = TRUE)
+  # nothing excluded: the row is still there, with 0
+  pr0 <- r$present(.t1_value(.t1_frame()), .t1_spec())
+  expect_identical(pr0$tables$missing$Overall[pr0$tables$missing$Variable == "Excluded: missing grp"], 0L)
+  expect_silent(sr_result_check(pr, r))
+})
+
+test_that("group and level order is the C-locale (radix) order, not the session locale's", {
+  df <- data.frame(g = rep(c("b", "B", "a"), 10), v = rep(c("x", "X", "w", "W", "x", "w"), 5),
+                   m = as.numeric(seq_len(30)), stringsAsFactors = FALSE)
+  spec <- list(purpose = "describe", by = "g", vars = c("v", "m"), layers = .t1_layers(), seed = 1L)
+  val <- .t1_value(df, spec)
+  expect_identical(val$groups, c("B", "a", "b"))
+  expect_identical(.t1_var(val, "v")$levels, c("W", "X", "w", "x"))
+  expect_identical(sort(c("b", "B", "a"), method = "radix"), c("B", "a", "b"))
+  # a factor keeps its declared level order
+  df$g <- factor(df$g, levels = c("b", "a", "B"))
+  expect_identical(.t1_value(df, spec)$groups, c("b", "a", "B"))
+})
+
+test_that("a group with one observation gives an NA SMD, not an error", {
+  df <- data.frame(g = c("A", rep("B", 9)), age = c(5, 1:9 + 0.5), stringsAsFactors = FALSE)
+  spec <- list(purpose = "describe", by = "g", vars = "age", layers = .t1_layers(), seed = 1L)
+  val <- .t1_value(df, spec)
+  v <- .t1_var(val, "age")
+  expect_equal(v$n[1:2], c(1, 9))
+  expect_true(is.na(v$sd[1]))
+  expect_true(is.na(v$smd) && is.na(v$smd_lo) && is.na(v$smd_hi))
+  r <- .t1_route()
+  pr <- sr_result_check(r$present(val, spec), r)
+  expect_identical(pr$effects$ci_method, "none")
+  expect_identical(pr$tables$table1$SMD, "NA")
+})
+
+test_that("zero pooled SD, a binary level absent from both groups and all-NA variables give NA", {
+  df <- data.frame(g = rep(c("A", "B"), each = 6), k = rep(c(5, 7), each = 6),
+                   one = "u", allna = NA_real_, chrna = NA_character_,
+                   flag = rep(c(0, 1), each = 6), stringsAsFactors = FALSE)
+  spec <- list(purpose = "describe", by = "g", vars = c("k", "one", "allna", "chrna", "flag"),
+               layers = .t1_layers(), seed = 1L)
+  val <- .t1_value(df, spec)
+  # both groups constant: the pooled SD is 0, the SMD is undefined
+  expect_true(is.na(.t1_var(val, "k")$smd))
+  # one level only: identical groups, a multivariate distance of 0 and no CI
+  one <- .t1_var(val, "one")
+  expect_equal(one$smd, 0)
+  expect_true(is.na(one$smd_lo))
+  # all-NA numeric: continuous, no observations; all-NA text: categorical with no levels
+  an <- .t1_var(val, "allna")
+  expect_identical(an$kind, "continuous")
+  expect_equal(an$n, c(0, 0, 0))
+  expect_equal(an$n_miss, c(6, 6, 12))
+  expect_true(is.na(an$smd))
+  cn <- .t1_var(val, "chrna")
+  expect_identical(cn$kind, "categorical")
+  expect_length(cn$levels, 0L)
+  expect_true(is.na(cn$smd))
+  # 0/1 flag perfectly separated: p = 0 and 1, both variances 0, the SMD is undefined
+  expect_true(is.na(.t1_var(val, "flag")$smd))
+  r <- .t1_route()
+  pr <- sr_result_check(r$present(val, spec), r)
+  expect_true(all(is.na(pr$effects$est[pr$effects$term %in% c("k", "allna", "chrna", "flag")])))
+  expect_identical(pr$effects$ci_method[pr$effects$term == "flag"], "none")
+  expect_true(any(grepl("allna", pr$tables$table1$Characteristic)))
+})
+
+test_that("a fully separated multi-level variable has an undefined (NA) multivariate SMD", {
+  # two groups: A all "a", B "b" and "c" mixed (S is singular, the difference is outside its range)
+  df <- data.frame(g = rep(c("A", "B"), each = 8),
+                   v = c(rep("a", 8), rep(c("b", "c"), 4)), stringsAsFactors = FALSE)
+  spec <- list(purpose = "describe", by = "g", vars = "v", layers = .t1_layers(), seed = 1L)
+  v <- .t1_var(.t1_value(df, spec), "v")
+  expect_true(is.na(v$smd))
+  # three groups, each with its own single level: no within-group variance at all
+  df3 <- data.frame(g = rep(c("A", "B", "C"), each = 5), v = rep(c("a", "b", "c"), each = 5),
+                    stringsAsFactors = FALSE)
+  val3 <- .t1_value(df3, spec)
+  v3 <- .t1_var(val3, "v")
+  expect_length(v3$smd, 2L)
+  expect_true(all(is.na(v3$smd)))
+  r <- .t1_route()
+  pr <- sr_result_check(r$present(val3, spec), r)
+  expect_true(all(pr$effects$ci_method == "none"))
+  expect_true(all(is.na(pr$effects$est)))
+})
+
+test_that("a reference level empty in both compared groups still gives the right multivariate SMD", {
+  set.seed(7)
+  g <- rep(c("A", "B", "C"), each = 40)
+  v <- c(sample(c("b", "c", "d"), 40, TRUE, prob = c(0.5, 0.3, 0.2)),
+         sample(c("b", "c", "d"), 40, TRUE, prob = c(0.2, 0.3, 0.5)),
+         sample(c("a", "b", "c", "d"), 40, TRUE))
+  df <- data.frame(g = g, v = v, stringsAsFactors = FALSE)
+  spec <- list(purpose = "describe", by = "g", vars = "v", layers = .t1_layers(), seed = 1L)
+  out <- .t1_var(.t1_value(df, spec), "v")
+  expect_identical(out$levels, c("a", "b", "c", "d"))
+  cb <- as.numeric(table(factor(df$v[df$g == "B"], c("b", "c", "d"))))
+  ca <- as.numeric(table(factor(df$v[df$g == "A"], c("b", "c", "d"))))
+  # the distance does not depend on which level is dropped; here the first present level is
+  expect_equal(out$smd[1], .t1_yd(cb, ca), tolerance = 1e-8)
+  expect_true(is.finite(out$smd[2]))
 })
