@@ -187,6 +187,63 @@
                        .sr_lit(.sr_marg_over(spec))))
 }
 
+#' The marginal block under multiple imputation (sr_mi_code): g-computation in every completed dataset,
+#' the difference (keys rd<j>) and, when `ratio`, the log ratio (keys lrr<j>) pooled by Rubin's rules
+#' and the standardised means averaged (p1_<j>, p0_<j>), j indexing the exposed levels. Every row is
+#' analysed under MI, so both standardisations are the rows of the completed dataset. Returns
+#' list(pre, fit, post, value, helpers): lines run on the observed rows before the imputation (the
+#' binary / categorical check), lines run in the fit of each completed dataset after `.V` (they set
+#' `.sc` and `.num`), lines run after the pooling (they set `.mg`), the expression of the `marginal`
+#' field, and the inlined helpers.
+.sr_marg_mi_code <- function(spec, on, strict, ratio) {
+  if (!isTRUE(on)) {
+    return(list(pre = c(".mg_on <- FALSE", ".mg_note <- NULL"), fit = c(".sc <- NULL", ".num <- NULL"),
+                post = ".mg <- NULL", value = "NULL", helpers = NULL))
+  }
+  fac <- identical(.sr_term_plan(spec)[[1L]]$type, "factor")
+  keys <- if (isTRUE(ratio)) "c(\"rd\", \"lrr\")" else "\"rd\""
+  vals <- if (isTRUE(ratio)) "c(.g$rd, .g$log_rr)" else ".g$rd"
+  ses <- if (isTRUE(ratio)) "c(.g$rd_se, .g$log_rr_se)" else ".g$rd_se"
+  one <- function(j, call) {
+    c(sprintf("  .g <- %s", call),
+      sprintf("  .sc <- rbind(.sc, data.frame(key = paste0(%s, %s), est = %s, se = %s, prim = TRUE, stringsAsFactors = FALSE))",
+              keys, j, vals, ses),
+      sprintf("  .num <- c(.num, stats::setNames(c(.g$p1, .g$p0), paste0(c(\"p1_\", \"p0_\"), %s)))", j))
+  }
+  pre <- if (fac) {
+    c(".mg_on <- TRUE", ".mg_note <- NULL")
+  } else {
+    c(".mg_on <- TRUE", ".mg_note <- NULL",
+      ".ev <- sort(unique(des[[\"t1\"]]))",
+      "if (!(length(.ev) == 2L && all(.ev == c(0, 1)))) {",
+      if (isTRUE(strict)) {
+        paste0("  stop(\"marginal effects need a binary (0/1) or categorical exposure; the exposure has \", ",
+               "length(.ev), \" distinct values\")")
+      } else {
+        c(paste0("  .mg_note <- paste0(\"marginal effects were not computed: the exposure is not binary (0/1) ",
+                 "or categorical (\", length(.ev), \" distinct values)\")"),
+          "  .mg_on <- FALSE")
+      },
+      "}")
+  }
+  fit <- c(".sc <- NULL", ".num <- NULL", "if (.mg_on) {",
+    if (fac) {
+      c("  .lv <- .sr_fixed$levels[[\"t1\"]]",
+        "  for (.j in seq_along(.lv)[-1L]) {",
+        paste0("  ", one(".j - 1L", ".h_gcomp(fit, des, \"t1f\", c(.lv[.j], .lv[1L]), .V, over = des)")),
+        "  }")
+    } else {
+      one("1L", ".h_gcomp(fit, des, \"t1\", c(1, 0), .V, over = des)")
+    },
+    "}")
+  lev <- if (fac) ".sr_fixed$levels[[\"t1\"]][-1L]" else "NA_character_"
+  list(pre = pre, fit = fit,
+       post = c(".mg <- NULL", sprintf("if (.mg_on) .mg <- .h_mi_marg(.mi$scal, .mi$num, %s)", lev)),
+       value = sprintf("if (.mg_on) list(rows = .mg, n_over = nrow(des), over = %s, note = .mg_note) else list(rows = NULL, n_over = NA_real_, over = %s, note = .mg_note)",
+                       .sr_lit(.sr_marg_over(spec)), .sr_lit(.sr_marg_over(spec))),
+       helpers = c(.sr_inline(.sr_h_gcomp, ".h_gcomp"), .sr_inline(.sr_h_mi_marg, ".h_mi_marg")))
+}
+
 # ---- the rows and the table of a marginal block ---------------------------------------------------
 
 #' Effects rows and the marginal table from `value$marginal$rows` (one row per exposed level).
@@ -211,9 +268,12 @@
   }
   ev <- if (is.null(value$events)) NA_real_ else value$events
   method <- paste0("delta_", ci_base)
-  row <- function(term, measure, est, lo, hi, p, scale, level, role, method) {
+  # under multiple imputation the block carries the pooled bounds, p and Monte Carlo error (rubin)
+  mi <- !is.null(mg$rd_lo)
+  if (mi) method <- "rubin"
+  row <- function(term, measure, est, lo, hi, p, scale, level, role, method, mcse = NA_real_) {
     data.frame(term = term, measure = measure, est = est, lo = lo, hi = hi, p = p, scale = scale,
-               level = level, mcse = NA_real_, role = role, conditional = FALSE, ci_method = method,
+               level = level, mcse = mcse, role = role, conditional = FALSE, ci_method = method,
                n = value$n, events = ev, stringsAsFactors = FALSE)
   }
   role_of <- function(...) if (all(is.finite(c(...)))) "primary" else "descriptive"
@@ -223,21 +283,35 @@
     g <- mg[i, , drop = FALSE]
     lo <- g$rd - crit * g$rd_se
     hi <- g$rd + crit * g$rd_se
+    rd_p <- pz(g$rd / g$rd_se)
+    rr_p <- pz(g$log_rr / g$log_rr_se)
+    rd_mc <- NA_real_
+    rr_mc <- NA_real_
+    rlo <- exp(g$log_rr - crit * g$log_rr_se)
+    rhi <- exp(g$log_rr + crit * g$log_rr_se)
+    if (mi) {
+      lo <- g$rd_lo
+      hi <- g$rd_hi
+      rd_p <- g$rd_p
+      rr_p <- g$log_rr_p
+      rd_mc <- g$rd_mcse
+      rr_mc <- g$log_rr_mcse
+      rlo <- exp(g$log_rr_lo)
+      rhi <- exp(g$log_rr_hi)
+    }
     if (kind == "mean") {
-      out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal)"), "MD", g$rd, lo, hi, pz(g$rd / g$rd_se),
-                                     "difference", g$level, role_of(g$rd, lo, hi), method)
+      out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal)"), "MD", g$rd, lo, hi, rd_p,
+                                     "difference", g$level, role_of(g$rd, lo, hi), method, rd_mc)
       tab[[length(tab) + 1L]] <- data.frame(
         Contrast = lab[i], `Mean, exposed` = sr_fmt_num(g$p1), `Mean, reference` = sr_fmt_num(g$p0),
         `Difference (95% CI)` = sr_fmt_ci(g$rd, lo, hi), check.names = FALSE, stringsAsFactors = FALSE)
       next
     }
-    rlo <- exp(g$log_rr - crit * g$log_rr_se)
-    rhi <- exp(g$log_rr + crit * g$log_rr_se)
     rr <- exp(g$log_rr)
-    out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal RD)"), "RD", g$rd, lo, hi, pz(g$rd / g$rd_se),
-                                   "difference", g$level, role_of(g$rd, lo, hi), method)
+    out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal RD)"), "RD", g$rd, lo, hi, rd_p,
+                                   "difference", g$level, role_of(g$rd, lo, hi), method, rd_mc)
     out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal RR)"), "RR", rr, rlo, rhi,
-                                   pz(g$log_rr / g$log_rr_se), "ratio", g$level, role_of(rr, rlo, rhi), method)
+                                   rr_p, "ratio", g$level, role_of(rr, rlo, rhi), method, rr_mc)
     nt <- if (all(is.finite(c(g$rd, lo, hi)))) {
       .sr_h_nnt(g$rd, lo, hi, level = lev)
     } else {

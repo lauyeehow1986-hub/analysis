@@ -27,8 +27,15 @@
 # strata, time, surv, lower, upper, n.risk, n.event, n.censor; km_risk is the number at risk at the
 # pretty() times of the time range that do not exceed the longest follow-up (strata, time, n.risk).
 #
-# Not implemented (refused at compile, never silently ignored): multiple imputation, weights, matching,
-# the bootstrap and the bayesian framework.
+# Multiple imputation (layers$missing = "mi" with spec$mi; impute/impute.R): rows with a missing time or
+# status are dropped (never imputed) and counted; the event indicator and the Nelson-Aalen cumulative
+# hazard enter the imputation model (the time itself does not), the strata are imputed as factors, the
+# Cox model is fitted in every completed dataset and the log hazard ratios are pooled by Rubin's rules
+# with normal intervals. The Kaplan-Meier data use the rows with an observed exposure. MI with
+# clustered data is refused.
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
+# the bayesian framework.
 
 .sr_cox_ties_of <- function(spec) if (is.null(spec[["ties"]])) "efron" else spec[["ties"]]
 
@@ -117,6 +124,7 @@
 .sr_cox_compile <- function(spec) {
   .sr_cox_check(spec)
   .sr_glm_layers_check(spec, "cox")   # the layer stack is the one of the other model routes
+  if (.sr_mi_on(spec)) return(.sr_cox_mi_compile(spec))
   tc <- sr_terms_code(spec)
   plan <- .sr_term_plan(spec)
   ties <- .sr_cox_ties_of(spec)
@@ -180,6 +188,54 @@
   paste(code, collapse = "\n")
 }
 
+# The compile under multiple imputation: one coxph per completed dataset inside sr_mi_code() (kind
+# "surv": the time and the event are never imputed; the strata columns .s1, ... come from the imputed
+# frame).
+.sr_cox_mi_compile <- function(spec) {
+  .sr_mi_check(spec, "cox")
+  tc <- sr_terms_code(spec)
+  plan <- .sr_term_plan(spec)
+  ties <- .sr_cox_ties_of(spec)
+  st <- .sr_spec_chr(spec[["strata"]])
+  st_names <- if (length(st)) paste0(".s", seq_along(st)) else character()
+  rhs <- paste(c(tc$rhs, if (length(st)) sprintf("strata(%s)", paste(st_names, collapse = ", "))),
+               collapse = " + ")
+  fac <- identical(plan[[1L]]$type, "factor")
+  pre <- c(
+    "if (sum(des[[\".event\"]]) == 0L) {",
+    "  stop(\"the outcome has no events among the \", nrow(des), \" rows with a time and a status\")",
+    "}",
+    sprintf(".kmd <- des[!is.na(des[[%s]]), , drop = FALSE]", .sr_lit(if (fac) "t1f" else "t1")),
+    if (fac) {
+      ".kmg <- .kmd[[\"t1f\"]]"
+    } else {
+      ".kmg <- if (length(unique(.kmd[[\"t1\"]])) <= 8L) .kmd[[\"t1\"]] else NULL"
+    },
+    ".kmo <- .h_km(.kmd[[\".time\"]], .kmd[[\".event\"]], .kmg)")
+  fit <- c(
+    ".wrn <- character()",
+    sprintf("fit <- withCallingHandlers(survival::coxph(survival::Surv(.time, .event) ~ %s, data = des, ties = %s),",
+            rhs, .sr_lit(ties)),
+    "  warning = function(w) {",
+    "    .wrn <<- c(.wrn, conditionMessage(w))",
+    "    invokeRestart(\"muffleWarning\")",
+    "  })",
+    ".cf <- stats::coef(fit)",
+    ".ok <- !is.na(.cf)",
+    ".nm <- names(.cf)[.ok]",
+    ".V <- stats::vcov(fit)[.nm, .nm, drop = FALSE]",
+    paste0("list(est = .cf[.ok], vcov = .V, dfcom = Inf, aliased = names(.cf)[!.ok], scal = NULL, ",
+           "num = NULL, flags = NULL, notes = .wrn)"))
+  code <- c(
+    sr_mi_code(spec, fit, "surv", helpers = .sr_inline(.sr_h_km, ".h_km"), pre = pre),
+    paste0("list(coef = .mi$coef, aliased = .mi$aliased, n = nrow(des), n_total = nrow(sr_data), ",
+           "events = sum(des[[\".event\"]]), level = 0.95, se_type = \"model\", n_clusters = NA_real_, ",
+           "ties = ", .sr_lit(ties), ", strata = ", .sr_lit(st), ", levels = .sr_fixed$levels, warnings = .mi$notes, ",
+           "km_by = if (is.null(.kmg)) \"overall\" else \"exposure\", km = .kmo$km, km_risk = .kmo$risk, ",
+           "mi = .mi_info)"))
+  paste(code, collapse = "\n")
+}
+
 # ---- present ------------------------------------------------------------------------------------
 
 .sr_cox_se_text <- function(value) {
@@ -213,6 +269,7 @@
   }
   src <- if (nrow(tab)) sr_coef_source(tab$term, tc$coef_map) else NULL
   ci_base <- if (identical(value$se_type, "cluster")) "z_cluster_robust" else "z_model"
+  mi <- !is.null(value$mi)
   if (nrow(tab)) {
     lab <- .sr_lm_labels(tab$term, src, ref_of)
     prim <- src$source_var == exposure & src$kind %in% c("linear", "factor")
@@ -220,8 +277,8 @@
     effects <- data.frame(
       term = lab, measure = "HR", est = exp(tab$est), lo = exp(tab$lo), hi = exp(tab$hi), p = tab$p,
       scale = "ratio", level = ifelse(is.na(src$level), NA_character_, src$level),
-      mcse = NA_real_, role = ifelse(prim, "primary", "covariate"),
-      conditional = adjusted | has_ia, ci_method = ci_base,
+      mcse = if (mi) tab$mcse else NA_real_, role = ifelse(prim, "primary", "covariate"),
+      conditional = adjusted | has_ia, ci_method = if (mi) "rubin" else ci_base,
       n = value$n, events = value$events, stringsAsFactors = FALSE)
   } else {
     effects <- sr_effects_empty()
@@ -259,6 +316,24 @@
     as.integer(round(value$n_total - value$n)),
     if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
     .sr_cox_se_text(value)))
+  if (mi) {
+    tables$model_fit <- data.frame(
+      Statistic = c("Rows analysed", "Rows excluded (missing time or status)", "Events", "Censored",
+                    "Imputed datasets (m)"),
+      Value = c(sprintf("%d", as.integer(round(value$n))),
+                sprintf("%d", as.integer(round(value$n_total - value$n))),
+                sprintf("%d", as.integer(round(value$events))),
+                sprintf("%d", as.integer(round(value$n - value$events))),
+                sprintf("%d", as.integer(round(value$mi$m)))),
+      stringsAsFactors = FALSE)
+    frag$cox_note <- sprintf(
+      paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s, in each of %d imputed datasets; ",
+             "%d row(s) analysed (%d events), %d excluded for a missing time or status%s; %s; pooled by Rubin's rules on the log scale."),
+      spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$mi$m)), as.integer(round(value$n)),
+      as.integer(round(value$events)), as.integer(round(value$n_total - value$n)),
+      if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
+      .sr_cox_se_text(value))
+  }
   if (length(value$aliased)) {
     alab <- .sr_lm_labels(value$aliased, asrc, ref_of)
     frag$cox_aliased <- sprintf("Dropped as perfectly collinear with the other terms: %s.", paste(alab, collapse = ", "))
@@ -275,6 +350,11 @@
     frag$cox_km_overall <- sprintf(
       "The exposure \"%s\" is continuous (or has more than 8 distinct values), so the Kaplan-Meier figure shows one overall curve.",
       exposure)
+  }
+  if (mi) {
+    mp <- .sr_mi_present(value, "cox")
+    tables$imputation <- mp$table
+    frag <- c(frag, mp$fragments)
   }
   list(tables = tables,
        figures = list(km = value$km, km_risk = value$km_risk),

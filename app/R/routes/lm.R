@@ -21,8 +21,13 @@
 # exposure row is marked conditional (it is the effect where the interacting variable is 0 or at its
 # reference level).
 #
-# Not yet implemented (refused at compile, never silently ignored): multiple imputation, weights,
-# matching, the bootstrap and the bayesian framework.
+# Multiple imputation (layers$missing = "mi" with spec$mi; impute/impute.R): the model is fitted in
+# every completed dataset (the outcome is imputed too and those rows are analysed) and pooled by
+# Rubin's rules, t intervals on the Barnard-Rubin df (complete-data df = the residual df). There is no
+# R-squared, residual SD or residual figure under MI. MI with clustered data is refused.
+#
+# Not yet implemented (refused at compile, never silently ignored): weights, matching, the bootstrap
+# and the bayesian framework.
 #
 # Marginal effect (marginal = TRUE, default FALSE): the standardised mean difference by g-computation
 # (routes/marginal.R), reported as an extra role-primary MD row "<exposure> (marginal)" and a
@@ -77,7 +82,7 @@
 .sr_lm_layers_check <- function(spec) {
   L <- spec[["layers"]]
   todo <- c(
-    if (!is.null(L[["missing"]]) && !identical(L[["missing"]], "cc")) "missing = mi (multiple imputation)",
+    .sr_mi_layer_todo(spec),
     if (!is.null(L[["weights"]]) && !identical(L[["weights"]], "none")) paste0("weights = ", L[["weights"]]),
     if (isTRUE(L[["matching"]])) "matching",
     if (!is.null(L[["resampling"]]) && !identical(L[["resampling"]], "none")) paste0("resampling = ", L[["resampling"]]),
@@ -94,6 +99,7 @@
 .sr_lm_compile <- function(spec) {
   .sr_lm_check(spec)
   .sr_lm_layers_check(spec)
+  if (.sr_mi_on(spec)) return(.sr_lm_mi_compile(spec))
   se <- .sr_lm_se(spec)
   tc <- sr_terms_code(spec)
   cl <- if (identical(se, "cluster")) spec[["cluster"]] else NULL
@@ -140,6 +146,37 @@
            "std_resid = unname(stats::rstandard(fit)), leverage = unname(stats::hatvalues(fit)), ",
            "cooks = unname(stats::cooks.distance(fit)), stringsAsFactors = FALSE))")
   )
+  paste(code, collapse = "\n")
+}
+
+# The compile under multiple imputation: the wrapper of sr_mi_code() around one lm fit per completed
+# dataset; the pooled table has the columns of .h_rubin (est, se, lo, hi, p, df, riv, lambda, fmi, mcse).
+.sr_lm_mi_compile <- function(spec) {
+  .sr_mi_check(spec, "lm")
+  se <- .sr_lm_se(spec)
+  tc <- sr_terms_code(spec)
+  marg <- isTRUE(spec[["marginal"]])
+  mg <- .sr_marg_mi_code(spec, on = marg, strict = TRUE, ratio = FALSE)
+  fit <- c(
+    sprintf("fit <- stats::lm(.y ~ %s, data = des)", tc$rhs),
+    "if (fit$df.residual < 1) {",
+    "  stop(\"no residual degrees of freedom: \", nrow(des), \" rows for \", length(stats::coef(fit)), \" coefficients\")",
+    "}",
+    ".cf <- stats::coef(fit)",
+    ".ok <- !is.na(.cf)",
+    ".nm <- names(.cf)[.ok]",
+    sprintf(".V <- .h_vcov(fit, %s, NULL)[.nm, .nm, drop = FALSE]", .sr_lit(se)),
+    mg$fit,
+    paste0("list(est = .cf[.ok], vcov = .V, dfcom = fit$df.residual, aliased = names(.cf)[!.ok], ",
+           "scal = .sc, num = .num, flags = NULL, notes = character())"))
+  code <- c(
+    sr_mi_code(spec, fit, "continuous", helpers = c(.sr_inline(.sr_h_vcov, ".h_vcov"), if (marg) mg$helpers),
+               pre = mg$pre),
+    mg$post,
+    paste0("list(coef = .mi$coef, aliased = .mi$aliased, n = nrow(des), n_total = nrow(sr_data), ",
+           "df = .mi$dfcom, df_resid = .mi$dfcom, sigma = NA_real_, r2 = NA_real_, adj_r2 = NA_real_, ",
+           "se_type = ", .sr_lit(se), ", n_clusters = NA_real_, level = 0.95, marginal = ", mg$value, ", ",
+           "levels = .sr_fixed$levels, fig = NULL, mi = .mi_info)"))
   paste(code, collapse = "\n")
 }
 
@@ -203,14 +240,15 @@
   is_int <- tab$term == "(Intercept)"
   b <- tab[!is_int, , drop = FALSE]
   src <- if (nrow(b)) sr_coef_source(b$term, tc$coef_map) else NULL
+  mi <- !is.null(value$mi)
   if (nrow(b)) {
     lab <- .sr_lm_labels(b$term, src, ref_of)
     prim <- src$source_var == exposure & src$kind %in% c("linear", "factor")
     effects <- data.frame(
       term = lab, measure = ifelse(prim, "MD", "coef"), est = b$est, lo = b$lo, hi = b$hi, p = b$p,
       scale = "difference", level = ifelse(is.na(src$level), NA_character_, src$level),
-      mcse = NA_real_, role = ifelse(prim, "primary", "covariate"), conditional = prim & has_ia,
-      ci_method = c(model = "t_model", robust = "t_robust_hc3", cluster = "t_cluster_hc1")[[value$se_type]],
+      mcse = if (mi) b$mcse else NA_real_, role = ifelse(prim, "primary", "covariate"), conditional = prim & has_ia,
+      ci_method = if (mi) "rubin" else c(model = "t_model", robust = "t_robust_hc3", cluster = "t_cluster_hc1")[[value$se_type]],
       n = value$n, events = NA_real_, stringsAsFactors = FALSE)
   } else {
     effects <- sr_effects_empty()
@@ -243,6 +281,16 @@
     "Linear regression of %s on %s, adjusted for the other terms of the model; %d row(s) analysed, %d excluded for a missing value; %s.",
     spec[["outcome"]], exposure, as.integer(round(value$n)), as.integer(round(value$n_total - value$n)),
     .sr_lm_se_text(value)))
+  if (mi) {
+    fit_tab <- data.frame(
+      Statistic = c("Rows analysed", "Imputed datasets (m)", "Complete-data residual df"),
+      Value = c(sprintf("%d", as.integer(round(value$n))), sprintf("%d", as.integer(round(value$mi$m))),
+                format(value$df_resid)),
+      stringsAsFactors = FALSE)
+    frag$lm_note <- sprintf(
+      "Linear regression of %s on %s, adjusted for the other terms of the model, in each of %d imputed datasets of %d row(s); %s; pooled by Rubin's rules.",
+      spec[["outcome"]], exposure, as.integer(round(value$mi$m)), as.integer(round(value$n)), .sr_lm_se_text(value))
+  }
   if (length(value$aliased)) {
     alab <- .sr_lm_labels(value$aliased, asrc, ref_of)
     frag$lm_aliased <- sprintf("Dropped as perfectly collinear with the other terms: %s.",
@@ -262,6 +310,17 @@
     frag$lm_marginal <- sprintf(
       "Marginal mean difference by g-computation over %d row(s) (standardize_over = %s); delta-method interval.",
       as.integer(round(value$marginal$n_over)), value$marginal$over)
+    if (mi) {
+      frag$lm_marginal <- sprintf(
+        "Marginal mean difference by g-computation in each imputed dataset over its %d row(s), delta-method variance, pooled by Rubin's rules.",
+        as.integer(round(value$marginal$n_over)))
+    }
+  }
+  if (mi) {
+    mp <- .sr_mi_present(value, "lm")
+    tables$imputation <- mp$table
+    frag <- c(frag, mp$fragments)
+    return(list(tables = tables, figures = list(), fragments = frag, effects = effects))
   }
   list(tables = tables, figures = list(resid_panel = value$fig),
        fragments = frag, effects = effects)

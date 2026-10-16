@@ -22,8 +22,16 @@
 # group (the difference rows those of the analysis). figures$km and figures$km_risk are the Kaplan-Meier
 # data by level, as for the Cox route.
 #
-# Not implemented (refused at compile, never silently ignored): multiple imputation, weights, matching,
-# the bootstrap and the bayesian framework.
+# Multiple imputation (layers$missing = "mi" with spec$mi; impute/impute.R): rows with a missing time or
+# status are dropped (never imputed) and counted; a missing exposure is imputed from the event indicator
+# and the Nelson-Aalen cumulative hazard. In every completed dataset each group's RMST and SE and the
+# differences against the reference (variance se_j^2 + se_ref^2) are computed; the differences and
+# the per-group RMSTs are pooled by Rubin's rules on the identity scale, normal intervals. The group
+# sizes, events and numbers at risk are means over the imputations. The horizon check and the
+# Kaplan-Meier data use the rows with an observed exposure.
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
+# the bayesian framework.
 
 # tau: one finite number above zero. Stops with the reason.
 .sr_rmst_tau_check <- function(tau) {
@@ -45,7 +53,7 @@
 
 .sr_rmst_estimand <- function(spec) {
   .sr_rmst_check(spec)
-  sr_estimand(population = "complete cases",
+  sr_estimand(population = if (identical(spec[["layers"]][["missing"]], "mi")) "all analysed (MI)" else "complete cases",
               variables = c(spec[["exposure"]], spec[["time"]], spec[["status"]]),
               intercurrent = "other reasons for censoring are treated as non-informative censoring",
               summary = sprintf("restricted mean survival time difference up to tau = %s", format(spec[["tau"]])),
@@ -64,6 +72,7 @@
 .sr_rmst_compile <- function(spec) {
   .sr_rmst_check(spec)
   .sr_glm_layers_check(spec, "rmst")
+  if (.sr_mi_on(spec)) return(.sr_rmst_mi_compile(spec))
   cols <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   ref <- spec[["exposure_ref"]]
   has_ref <- length(ref) == 1L && !is.na(ref) && nzchar(as.character(ref))
@@ -111,9 +120,127 @@
   paste(code, collapse = "\n")
 }
 
+# The compile under multiple imputation: the exposure is the one (factor) term of an internal spec for
+# sr_mi_code(); in every completed dataset the group RMSTs and the differences are computed and pooled.
+.sr_rmst_mi_compile <- function(spec) {
+  .sr_mi_check(spec, "rmst")
+  isp <- list(time = spec[["time"]], status = spec[["status"]], status_event = spec[["status_event"]],
+              terms = list(list(var = spec[["exposure"]], type = "factor", ref = spec[["exposure_ref"]])),
+              layers = spec[["layers"]], mi = spec[["mi"]])
+  pre <- c(
+    sprintf(".tau <- %s", .sr_lit(spec[["tau"]])),
+    ".lv <- .sr_fixed$levels[[\"t1\"]]",
+    sprintf(".exn <- %s", .sr_lit(spec[["exposure"]])),
+    "if (length(.lv) > 8L) {",
+    "  stop(\"RMST compares groups: exposure '\", .exn, \"' has \", length(.lv), \" distinct values; categorise it first\")",
+    "}",
+    "if (sum(des[[\".event\"]]) == 0L) {",
+    "  stop(\"the outcome has no events among the \", nrow(des), \" rows with a time and a status\")",
+    "}",
+    ".kmd <- des[!is.na(des[[\"t1f\"]]), , drop = FALSE]",
+    ".kgrp <- as.character(.kmd[[\"t1f\"]])",
+    ".mx <- vapply(.lv, function(l) if (any(.kgrp == l)) max(.kmd[[\".time\"]][.kgrp == l]) else -Inf, numeric(1))",
+    ".far <- which(.mx < .tau)",
+    "if (length(.far)) {",
+    paste0("  stop(\"tau = \", .tau, \" exceeds the follow-up of group '\", .lv[.far[1L]], \"' (max time \", ",
+           ".mx[.far[1L]], \")\")"),
+    "}",
+    ".kmo <- .h_km(.kmd[[\".time\"]], .kmd[[\".event\"]], factor(.kgrp, levels = .lv))")
+  fit <- c(
+    ".g <- as.character(des[[\"t1f\"]])",
+    ".r <- lapply(.lv, function(l) {",
+    "  i <- .g == l",
+    paste0("  c(.h_rmst(des[[\".time\"]][i], des[[\".event\"]][i], .tau), n = sum(i), ",
+           "e = sum(des[[\".event\"]][i]), r = sum(des[[\".time\"]][i] >= .tau))"),
+    "})",
+    ".k <- length(.lv)",
+    ".est <- vapply(.r, function(x) x[[\"rmst\"]], numeric(1))",
+    ".se <- vapply(.r, function(x) x[[\"se\"]], numeric(1))",
+    ".d <- stats::setNames(.est[-1L] - .est[1L], paste0(\"d\", seq_len(.k)[-1L]))",
+    ".dv <- diag(.se[-1L]^2 + .se[1L]^2, nrow = .k - 1L)",
+    "dimnames(.dv) <- list(names(.d), names(.d))",
+    ".sc <- data.frame(key = paste0(\"g\", seq_len(.k)), est = .est, se = .se, prim = FALSE, stringsAsFactors = FALSE)",
+    paste0(".num <- stats::setNames(unlist(lapply(.r, function(x) x[c(\"n\", \"e\", \"r\")])), ",
+           "paste0(rep(c(\"n\", \"e\", \"r\"), .k), rep(seq_len(.k), each = 3L)))"),
+    paste0("list(est = .d, vcov = .dv, dfcom = Inf, aliased = character(), scal = .sc, num = .num, ",
+           "flags = NULL, notes = character())"))
+  helpers <- c(.sr_inline(.sr_h_km, ".h_km"), .sr_inline(.sr_h_rmst, ".h_rmst"))
+  code <- c(
+    sr_mi_code(isp, fit, "surv", helpers = helpers, pre = pre, group = TRUE),
+    ".j <- seq_along(.lv)",
+    paste0(".groups <- data.frame(level = .lv, rmst = .mi$scal$est, se = .mi$scal$se, lo = .mi$scal$lo, ",
+           "hi = .mi$scal$hi, mcse = .mi$scal$mcse, n = unname(.mi$num[paste0(\"n\", .j)]), ",
+           "events = unname(.mi$num[paste0(\"e\", .j)]), at_risk = unname(.mi$num[paste0(\"r\", .j)]), ",
+           "stringsAsFactors = FALSE)"),
+    paste0(".diffs <- data.frame(level = .lv[-1L], est = .mi$coef$est, se = .mi$coef$se, lo = .mi$coef$lo, ",
+           "hi = .mi$coef$hi, p = .mi$coef$p, mcse = .mi$coef$mcse, stringsAsFactors = FALSE)"),
+    paste0("list(groups = .groups, diffs = .diffs, tau = .tau, n = nrow(des), n_total = nrow(sr_data), ",
+           "events = sum(des[[\".event\"]]), level = 0.95, km = .kmo$km, km_risk = .kmo$risk, ",
+           "coef = .mi$coef, mi = .mi_info)"))
+  paste(code, collapse = "\n")
+}
+
+# The present step under multiple imputation: the pooled RMSTs and differences (Rubin, identity scale).
+.sr_rmst_mi_present <- function(value, spec) {
+  g <- value$groups
+  d <- value$diffs
+  exposure <- spec[["exposure"]]
+  fmt_tau <- format(value$tau)
+  gl <- g$level
+  ref <- gl[1L]
+  per_group <- data.frame(
+    term = sprintf("RMST up to %s (%s = %s)", fmt_tau, exposure, gl), measure = "RMST",
+    est = g$rmst, lo = g$lo, hi = g$hi, p = NA_real_,
+    scale = NA_character_, level = gl, mcse = g$mcse, role = "descriptive", conditional = FALSE,
+    ci_method = "rubin", n = g$n, events = g$events, stringsAsFactors = FALSE)
+  diffs <- data.frame(
+    term = sprintf("%s: %s vs %s", exposure, d$level, ref), measure = "RMST_diff",
+    est = d$est, lo = d$lo, hi = d$hi, p = d$p,
+    scale = "difference", level = d$level, mcse = d$mcse, role = "primary", conditional = FALSE,
+    ci_method = "rubin", n = value$n, events = value$events, stringsAsFactors = FALSE)
+  bad <- diffs[!is.finite(diffs$est) | !is.finite(diffs$lo) | !is.finite(diffs$hi), , drop = FALSE]
+  if (nrow(bad)) {
+    stop("The RMST difference for \"", bad$term[1L], "\" is not finite: the standard error of a group's restricted ",
+         "mean could not be computed (a group with too few subjects or events), so the comparison cannot be reported.",
+         call. = FALSE)
+  }
+  effects <- rbind(diffs, per_group)
+  rownames(effects) <- NULL
+  tab <- data.frame(
+    Group = gl, `N (mean)` = sr_fmt_num(g$n, digits = 1L), `Events (mean)` = sr_fmt_num(g$events, digits = 1L),
+    `At risk at tau (mean)` = sr_fmt_num(g$at_risk, digits = 1L),
+    `RMST (95% CI)` = sr_fmt_ci(g$rmst, g$lo, g$hi),
+    `SE` = .sr_lm_num(g$se), check.names = FALSE, stringsAsFactors = FALSE)
+  dtab <- data.frame(
+    Comparison = diffs$term,
+    `RMST difference (95% CI)` = sr_fmt_ci(diffs$est, diffs$lo, diffs$hi),
+    SE = .sr_lm_num(d$se),
+    P = sr_fmt_p(pmin(pmax(diffs$p, 0), 1)),
+    check.names = FALSE, stringsAsFactors = FALSE)
+  tables <- list(rmst = tab, rmst_difference = dtab)
+  frag <- list(rmst_note = sprintf(
+    paste0("Restricted mean survival time up to tau = %s by %s (reference %s), in each of %d imputed datasets; each ",
+           "group is its own Kaplan-Meier curve and the differences treat the groups as independent; %d row(s) ",
+           "analysed (%d events), %d excluded for a missing time or status; pooled by Rubin's rules, normal intervals."),
+    fmt_tau, exposure, ref, as.integer(round(value$mi$m)), as.integer(round(value$n)),
+    as.integer(round(value$events)), as.integer(round(value$n_total - value$n))))
+  thin <- g$at_risk < 10
+  if (any(thin)) {
+    frag$rmst_few_at_risk <- sprintf(
+      "Fewer than 10 subjects (mean over the imputations) are still at risk at tau = %s in group(s) %s (%s): the RMST there rests on the thin tail of the curve and is imprecise.",
+      fmt_tau, paste(gl[thin], collapse = ", "), paste(sr_fmt_num(g$at_risk[thin], digits = 1L), collapse = ", "))
+  }
+  mp <- .sr_mi_present(value, "rmst")
+  tables$imputation <- mp$table
+  frag <- c(frag, mp$fragments)
+  list(tables = tables, figures = list(km = value$km, km_risk = value$km_risk), fragments = frag,
+       effects = effects)
+}
+
 # ---- present ------------------------------------------------------------------------------------
 
 .sr_rmst_present <- function(value, spec) {
+  if (!is.null(value$mi)) return(.sr_rmst_mi_present(value, spec))
   g <- value$groups
   exposure <- spec[["exposure"]]
   tau <- value$tau

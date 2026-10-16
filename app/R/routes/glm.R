@@ -26,8 +26,14 @@
 # was asked for explicitly, which is then an error. The observed risk by exposure level, with Wilson
 # intervals, is a table.
 #
-# Not implemented (refused at compile, never silently ignored): multiple imputation, weights, matching,
-# the bootstrap and the bayesian framework.
+# Multiple imputation (layers$missing = "mi" with spec$mi; impute/impute.R): the glm is fitted in every
+# completed dataset (the outcome is imputed too and those rows are analysed), the coefficients are pooled
+# by Rubin's rules on the log scale and the marginal RD (identity) and log RR are computed by
+# g-computation in each completed dataset and pooled; normal intervals. The observed-risk table uses
+# the rows with an observed exposure and outcome. MI with clustered data or the Firth penalty is refused.
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
+# the bayesian framework.
 
 .sr_glm_ses <- c("model", "robust", "cluster")
 
@@ -107,7 +113,7 @@
 .sr_glm_layers_check <- function(spec, id) {
   L <- spec[["layers"]]
   todo <- c(
-    if (!is.null(L[["missing"]]) && !identical(L[["missing"]], "cc")) "missing = mi (multiple imputation)",
+    .sr_mi_layer_todo(spec),
     if (!is.null(L[["weights"]]) && !identical(L[["weights"]], "none")) paste0("weights = ", L[["weights"]]),
     if (isTRUE(L[["matching"]])) "matching",
     if (!is.null(L[["resampling"]]) && !identical(L[["resampling"]], "none")) paste0("resampling = ", L[["resampling"]]),
@@ -122,18 +128,18 @@
 # ---- compile ------------------------------------------------------------------------------------
 
 # The lines that count events and Wilson-interval the observed risk at each exposure level (a factor
-# exposure, or a 0/1 one; a continuous exposure gives an empty table).
-.sr_glm_obs_code <- function(spec) {
+# exposure, or a 0/1 one; a continuous exposure gives an empty table). d is the name of the data frame.
+.sr_glm_obs_code <- function(spec, d = "des") {
   fac <- identical(.sr_term_plan(spec)[[1L]]$type, "factor")
   c(".obs <- NULL",
     if (fac) {
       c(".exl <- .sr_fixed$levels[[\"t1\"]]", ".exc <- \"t1f\"")
     } else {
-      c(".exl <- if (all(des[[\"t1\"]] %in% c(0, 1))) c(0, 1)", ".exc <- \"t1\"")
+      c(sprintf(".exl <- if (all(%s[[\"t1\"]] %%in%% c(0, 1))) c(0, 1)", d), ".exc <- \"t1\"")
     },
     "for (.l in .exl) {",
-    "  .i <- des[[.exc]] == .l",
-    "  .e <- sum(des[[\".y\"]][.i])",
+    sprintf("  .i <- %s[[.exc]] == .l", d),
+    sprintf("  .e <- sum(%s[[\".y\"]][.i])", d),
     "  .w <- .h_wilson(.e, sum(.i))",
     paste0("  .obs <- rbind(.obs, data.frame(level = as.character(.l), n = sum(.i), events = .e, ",
            "est = .w[[\"est\"]], lo = .w[[\"lo\"]], hi = .w[[\"hi\"]], stringsAsFactors = FALSE))"),
@@ -146,6 +152,7 @@
   function(spec) {
     .sr_glm_check(spec, kind)
     .sr_glm_layers_check(spec, id)
+    if (.sr_mi_on(spec)) return(.sr_glm_mi_compile(spec, kind))
     firth <- .sr_glm_firth(spec)
     se <- .sr_glm_se(spec, kind)
     tc <- sr_terms_code(spec)
@@ -218,6 +225,55 @@
   }
 }
 
+# The compile under multiple imputation: one glm per completed dataset inside sr_mi_code(); the
+# marginal RD and log RR of each dataset are pooled next to the coefficients (.sr_marg_mi_code).
+.sr_glm_mi_compile <- function(spec, kind) {
+  .sr_mi_check(spec, kind)
+  se <- .sr_glm_se(spec, kind)
+  tc <- sr_terms_code(spec)
+  marg_on <- .sr_glm_marg_on(spec)
+  mg <- .sr_marg_mi_code(spec, on = marg_on, strict = isTRUE(spec[["marginal"]]), ratio = TRUE)
+  family <- if (identical(kind, "modpois")) "stats::poisson(link = \"log\")" else "stats::binomial()"
+  fac <- identical(.sr_term_plan(spec)[[1L]]$type, "factor")
+  pre <- c(
+    ".yo <- des[[\".y\"]][!is.na(des[[\".y\"]])]",
+    "if (!length(.yo) || sum(.yo) == 0L || all(.yo == 1L)) {",
+    "  stop(\"the outcome has no events or no non-events among the \", length(.yo), \" rows with an observed outcome\")",
+    "}",
+    mg$pre,
+    sprintf(".od <- des[!is.na(des[[\".y\"]]) & !is.na(des[[%s]]), , drop = FALSE]", .sr_lit(if (fac) "t1f" else "t1")),
+    .sr_glm_obs_code(spec, ".od"))
+  fit <- c(
+    "if (sum(des[[\".y\"]]) == 0L || all(des[[\".y\"]] == 1L)) {",
+    "  stop(\"the outcome has no events or no non-events in an imputed dataset of \", nrow(des), \" rows\")",
+    "}",
+    sprintf("fit <- suppressWarnings(stats::glm(.y ~ %s, data = des, family = %s))", tc$rhs, family),
+    ".cf <- stats::coef(fit)",
+    ".ok <- !is.na(.cf)",
+    ".nm <- names(.cf)[.ok]",
+    sprintf(".V <- .h_vcov(fit, %s, NULL)[.nm, .nm, drop = FALSE]", .sr_lit(se)),
+    mg$fit,
+    paste0(".fl <- c(not_converged = !isTRUE(fit$converged), near_separation = ",
+           if (identical(kind, "modpois")) "FALSE" else "any(fit$fitted.values < 1e-08 | fit$fitted.values > 1 - 1e-08)",
+           ", risk_above_one = ",
+           if (identical(kind, "modpois")) "any(fit$fitted.values > 1)" else "FALSE", ")"),
+    paste0("list(est = .cf[.ok], vcov = .V, dfcom = Inf, aliased = names(.cf)[!.ok], scal = .sc, ",
+           "num = c(events = sum(des[[\".y\"]]), .num), flags = .fl, notes = character())"))
+  helpers <- c(.sr_inline(.sr_h_vcov, ".h_vcov"), .sr_inline(.sr_h_wilson, ".h_wilson"),
+               if (marg_on) mg$helpers)
+  code <- c(
+    sr_mi_code(spec, fit, "binary", helpers = helpers, pre = pre),
+    mg$post,
+    paste0("list(coef = .mi$coef, aliased = .mi$aliased, n = nrow(des), n_total = nrow(sr_data), ",
+           "events = .mi$num[[\"events\"]], df = Inf, se_type = ", .sr_lit(se), ", n_clusters = NA_real_, level = 0.95, ",
+           "levels = .sr_fixed$levels, penalty = \"none\", family = ",
+           .sr_lit(if (identical(kind, "modpois")) "poisson" else "binomial"),
+           ", converged = !.mi$flags[[\"not_converged\"]], near_separation = .mi$flags[[\"near_separation\"]], ",
+           "risk_above_one = .mi$flags[[\"risk_above_one\"]], obs = if (is.null(.obs)) data.frame() else .obs, ",
+           "marginal = ", mg$value, ", mi = .mi_info)"))
+  paste(code, collapse = "\n")
+}
+
 # ---- present ------------------------------------------------------------------------------------
 
 .sr_glm_se_text <- function(value) {
@@ -276,6 +332,7 @@
   src <- if (nrow(b)) sr_coef_source(b$term, tc$coef_map) else NULL
   ci_base <- if (firth) "profile_firth" else c(model = "z_model", robust = "z_robust_hc0",
                                                 cluster = "z_cluster_hc1")[[value$se_type]]
+  mi <- !is.null(value$mi)
   if (nrow(b)) {
     lab <- .sr_lm_labels(b$term, src, ref_of)
     prim <- src$source_var == exposure & src$kind %in% c("linear", "factor")
@@ -283,8 +340,8 @@
     effects <- data.frame(
       term = lab, measure = measure, est = exp(b$est), lo = exp(b$lo), hi = exp(b$hi), p = b$p,
       scale = "ratio", level = ifelse(is.na(src$level), NA_character_, src$level),
-      mcse = NA_real_, role = ifelse(prim, "primary", "covariate"),
-      conditional = prim & (has_ia | (odds & adjusted)), ci_method = ci_base,
+      mcse = if (mi) b$mcse else NA_real_, role = ifelse(prim, "primary", "covariate"),
+      conditional = prim & (has_ia | (odds & adjusted)), ci_method = if (mi) "rubin" else ci_base,
       n = value$n, events = value$events, stringsAsFactors = FALSE)
   } else {
     effects <- sr_effects_empty()
@@ -320,6 +377,17 @@
     "%s of %s on %s, adjusted for the other terms of the model; %d row(s) analysed (%d events), %d excluded for a missing value; %s.",
     what, spec[["outcome"]], exposure, as.integer(round(value$n)), as.integer(round(value$events)),
     as.integer(round(value$n_total - value$n)), .sr_glm_se_text(value)))
+  if (mi) {
+    tables$model_fit <- data.frame(
+      Statistic = c("Rows analysed", "Events (mean over the imputations)", "Imputed datasets (m)"),
+      Value = c(sprintf("%d", as.integer(round(value$n))), sr_fmt_num(value$events, digits = 1L),
+                sprintf("%d", as.integer(round(value$mi$m)))),
+      stringsAsFactors = FALSE)
+    frag$glm_note <- sprintf(
+      "%s of %s on %s, adjusted for the other terms of the model, in each of %d imputed datasets of %d row(s) (mean %s events); %s; pooled by Rubin's rules on the log scale.",
+      what, spec[["outcome"]], exposure, as.integer(round(value$mi$m)), as.integer(round(value$n)),
+      sr_fmt_num(value$events, digits = 1L), .sr_glm_se_text(value))
+  }
   if (length(value$aliased)) {
     alab <- .sr_lm_labels(value$aliased, asrc, ref_of)
     frag$glm_aliased <- sprintf("Dropped as perfectly collinear with the other terms: %s.",
@@ -365,8 +433,18 @@
     frag$glm_marginal <- sprintf(
       "Marginal risk difference and ratio by g-computation over %d row(s) (standardize_over = %s); delta-method intervals; NNT from the risk difference (Altman).",
       as.integer(round(mgv$n_over)), mgv$over)
+    if (mi) {
+      frag$glm_marginal <- sprintf(
+        "Marginal risk difference and ratio by g-computation in each imputed dataset over its %d row(s), delta-method variances, pooled by Rubin's rules (the risk ratio on the log scale); NNT from the pooled risk difference (Altman).",
+        as.integer(round(mgv$n_over)))
+    }
   }
   if (!is.null(mgv) && is.null(mgv$rows) && !is.null(mgv$note)) frag$glm_marginal_skipped <- mgv$note
+  if (mi) {
+    mp <- .sr_mi_present(value, "glm")
+    tables$imputation <- mp$table
+    frag <- c(frag, mp$fragments)
+  }
   .sr_glm_nonfinite_stop(effects, value, exposure)
   list(tables = tables, figures = list(), fragments = frag, effects = effects)
 }
