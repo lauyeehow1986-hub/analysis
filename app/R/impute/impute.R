@@ -219,6 +219,9 @@
 sr_mi_code <- function(spec, fit_code, kind = c("continuous", "binary", "surv"), helpers = NULL,
                        pre = NULL, group = FALSE) {
   kind <- match.arg(kind)
+  # impute_then_boot (resample/boot.R): every completed dataset is bootstrapped by .h_boot_within
+  bw <- spec[[".sr_boot_within"]]
+  ix <- if (is.null(bw)) "" else "[i]"
   if (!is.character(fit_code) || !length(fit_code) || anyNA(fit_code)) {
     stop("sr_mi_code: fit_code must be the lines that fit one completed dataset", call. = FALSE)
   }
@@ -259,7 +262,8 @@ sr_mi_code <- function(spec, fit_code, kind = c("continuous", "binary", "surv"),
       ".mi_d[[\".event\"]] <- as.numeric(des[[\".event\"]])",
       paste0(".mi_d[[\".na\"]] <- mice::nelsonaalen(data.frame(.time = des[[\".time\"]], ",
              ".event = des[[\".event\"]]), .time, .event)"))
-    after <- c(after, "  out[[\".time\"]] <- des[[\".time\"]]", "  out[[\".event\"]] <- des[[\".event\"]]")
+    after <- c(after, paste0("  out[[\".time\"]] <- des[[\".time\"]]", ix),
+               paste0("  out[[\".event\"]] <- des[[\".event\"]]", ix))
     col <- c(col, ".event", ".na")
     src <- c(src, spec[["status"]], "(Nelson-Aalen cumulative hazard)")
     role <- c(role, "event", "nelson_aalen")
@@ -330,17 +334,32 @@ sr_mi_code <- function(spec, fit_code, kind = c("continuous", "binary", "surv"),
     ".mi_d <- list()",
     frame,
     ".mi_d <- data.frame(.mi_d, check.names = FALSE, stringsAsFactors = FALSE)",
-    ".h_mi_des <- function(ci) {",
-    "  raw <- .mi_base",
+    if (is.null(bw)) {
+      c(".h_mi_des <- function(ci) {",
+        "  raw <- .mi_base")
+    } else {
+      c(".h_mi_des <- function(ci, i = seq_len(nrow(ci))) {",
+        "  ci <- ci[i, , drop = FALSE]",
+        "  raw <- .mi_base[i, , drop = FALSE]")
+    },
     back,
     "  out <- .h_design(raw)",
     after,
     "  out",
     "}",
-    ".h_mi_fit <- function(ci) {",
-    "  des <- .h_mi_des(ci)",
+    if (is.null(bw)) {
+      c(".h_mi_fit <- function(ci) {",
+        "  des <- .h_mi_des(ci)")
+    } else {
+      c(".h_mi_fit1 <- function(ci, i = seq_len(nrow(ci))) {",
+        "  des <- .h_mi_des(ci, i)")
+    },
     paste0("  ", fit_code),
     "}",
+    if (!is.null(bw)) {
+      sprintf(".h_mi_fit <- function(ci) .h_boot_within(ci, .h_mi_fit1, %s, .mi_prim, .h_boot)",
+              .sr_lit(as.integer(bw[["B"]])))
+    },
     sprintf(".mi_need <- %s", .sr_lit(col[role != "aux"])),
     sprintf(".mi_prim <- %s", prim),
     if (auto) {
@@ -360,7 +379,11 @@ sr_mi_code <- function(spec, fit_code, kind = c("continuous", "binary", "surv"),
            "fmi_max = .mi_auto$fmi_max, m_final = .mi_auto$m_final, m_capped = .mi_auto$m_capped, ",
            "columns = .mi_cols, predictors = .mi$predictors, coef_names = .mi$coef_names, ",
            "knots = .sr_fixed$knots, n_dropped = .mi_dropped, n_logged = .mi$n_logged, ",
-           "dfcom = .mi$dfcom, aux = ", .sr_lit(aux), ")")
+           "dfcom = .mi$dfcom, aux = ", .sr_lit(aux), ")"),
+    if (!is.null(bw)) {
+      paste0(".mi_info$boot <- c(failed = .mi$num[[\".boot_failed\"]] * .mi$m, ",
+             "finite = .mi$num[[\".boot_finite\"]] * .mi$m)")
+    }
   )
   paste(code, collapse = "\n")
 }

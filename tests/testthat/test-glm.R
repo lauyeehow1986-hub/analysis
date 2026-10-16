@@ -153,7 +153,7 @@ test_that("event_value must be one value; a missing one on a non-0/1 outcome is 
 test_that("unimplemented layers are refused at compile", {
   r <- .gl_route("logistic")
   for (lay in list(list(missing = "mi"), list(weights = "ipw"), list(matching = TRUE),
-                   list(resampling = "bootstrap"), list(framework = "bayesian"))) {
+                   list(framework = "bayesian"))) {
     s <- .gl_spec(layers = modifyList(.gl_layers(), lay))
     expect_error(sr_compile(r, s), "layer", info = names(lay))
     expect_error(sr_compile(.gl_route("modpois"), s), "layer", info = names(lay))

@@ -32,8 +32,11 @@
 # g-computation in each completed dataset and pooled; normal intervals. The observed-risk table uses
 # the rows with an observed exposure and outcome. MI with clustered data or the Firth penalty is refused.
 #
-# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
-# the bayesian framework.
+# The bootstrap (layers$resampling = "bootstrap", spec$boot) is resample/boot.R: the primary rows take
+# bootstrap intervals (OR / RR on the log scale; NNT from the bootstrap RD bounds).
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching and the bayesian
+# framework.
 
 .sr_glm_ses <- c("model", "robust", "cluster")
 
@@ -116,7 +119,7 @@
     .sr_mi_layer_todo(spec),
     if (!is.null(L[["weights"]]) && !identical(L[["weights"]], "none")) paste0("weights = ", L[["weights"]]),
     if (isTRUE(L[["matching"]])) "matching",
-    if (!is.null(L[["resampling"]]) && !identical(L[["resampling"]], "none")) paste0("resampling = ", L[["resampling"]]),
+    if (!is.null(L[["resampling"]]) && !(L[["resampling"]] %in% c("none", "bootstrap"))) paste0("resampling = ", L[["resampling"]]),
     if (!is.null(L[["framework"]]) && !identical(L[["framework"]], "frequentist")) paste0("framework = ", L[["framework"]])
   )
   if (length(todo)) {
@@ -149,9 +152,10 @@
 .sr_glm_compile_fn <- function(kind) {
   force(kind)
   id <- kind
-  function(spec) {
+  f <- function(spec) {
     .sr_glm_check(spec, kind)
     .sr_glm_layers_check(spec, id)
+    if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, f, id, "glm"))
     if (.sr_mi_on(spec)) return(.sr_glm_mi_compile(spec, kind))
     firth <- .sr_glm_firth(spec)
     se <- .sr_glm_se(spec, kind)
@@ -223,6 +227,7 @@
     )
     paste(code, collapse = "\n")
   }
+  f
 }
 
 # The compile under multiple imputation: one glm per completed dataset inside sr_mi_code(); the
@@ -469,6 +474,9 @@
   s
 }
 
+# The present step of the glm routes: the bootstrap bounds when the value has them (resample/boot.R).
+.sr_glm_present_boot <- function(value, spec) .sr_boot_present(value, spec, .sr_glm_present, "glm")
+
 # One estimand / compile function per kind, shared by a route and its describe twin.
 .sr_glm_fns <- list(logistic = list(estimand = .sr_glm_estimand_fn("logistic"), compile = .sr_glm_compile_fn("logistic")),
                     modpois = list(estimand = .sr_glm_estimand_fn("modpois"), compile = .sr_glm_compile_fn("modpois")))
@@ -476,19 +484,19 @@
 .sr_logistic_route <- function() {
   sr_route(id = "logistic", version = 1L, family = "regression", purpose = "explain-causal",
            estimand = .sr_glm_fns$logistic$estimand, spec_schema = .sr_glm_schema(TRUE),
-           compile = .sr_glm_fns$logistic$compile, present = .sr_glm_present)
+           compile = .sr_glm_fns$logistic$compile, present = .sr_glm_present_boot)
 }
 
 .sr_logistic_describe_route <- function() {
   sr_route(id = "logistic_describe", version = 1L, family = "regression", purpose = "describe",
            estimand = .sr_glm_fns$logistic$estimand, spec_schema = .sr_glm_schema(TRUE),
-           compile = .sr_glm_fns$logistic$compile, present = .sr_glm_present)
+           compile = .sr_glm_fns$logistic$compile, present = .sr_glm_present_boot)
 }
 
 .sr_modpois_route <- function() {
   sr_route(id = "modpois", version = 1L, family = "regression", purpose = "explain-causal",
            estimand = .sr_glm_fns$modpois$estimand, spec_schema = .sr_glm_schema(FALSE),
-           compile = .sr_glm_fns$modpois$compile, present = .sr_glm_present)
+           compile = .sr_glm_fns$modpois$compile, present = .sr_glm_present_boot)
 }
 
 if (!(.sr_route_key("logistic", 1L) %in% ls(.sr_routes, all.names = TRUE))) {

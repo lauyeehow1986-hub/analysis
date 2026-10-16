@@ -30,8 +30,11 @@
 # sizes, events and numbers at risk are means over the imputations. The horizon check and the
 # Kaplan-Meier data use the rows with an observed exposure.
 #
-# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
-# the bayesian framework.
+# The bootstrap (layers$resampling = "bootstrap", spec$boot) is resample/boot.R: the RMST differences
+# take bootstrap intervals (clustered RMST stays refused).
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching and the bayesian
+# framework.
 
 # tau: one finite number above zero. Stops with the reason.
 .sr_rmst_tau_check <- function(tau) {
@@ -72,6 +75,7 @@
 .sr_rmst_compile <- function(spec) {
   .sr_rmst_check(spec)
   .sr_glm_layers_check(spec, "rmst")
+  if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_rmst_compile, "rmst", "rmst"))
   if (.sr_mi_on(spec)) return(.sr_rmst_mi_compile(spec))
   cols <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   ref <- spec[["exposure_ref"]]
@@ -122,11 +126,19 @@
 
 # The compile under multiple imputation: the exposure is the one (factor) term of an internal spec for
 # sr_mi_code(); in every completed dataset the group RMSTs and the differences are computed and pooled.
-.sr_rmst_mi_compile <- function(spec) {
-  .sr_mi_check(spec, "rmst")
+# The internal spec of the MI code: the exposure as the one factor term (and the bootstrap-within marker
+# of impute_then_boot, resample/boot.R).
+.sr_rmst_isp <- function(spec) {
   isp <- list(time = spec[["time"]], status = spec[["status"]], status_event = spec[["status_event"]],
               terms = list(list(var = spec[["exposure"]], type = "factor", ref = spec[["exposure_ref"]])),
               layers = spec[["layers"]], mi = spec[["mi"]])
+  if (!is.null(spec[[".sr_boot_within"]])) isp[[".sr_boot_within"]] <- spec[[".sr_boot_within"]]
+  isp
+}
+
+.sr_rmst_mi_compile <- function(spec) {
+  .sr_mi_check(spec, "rmst")
+  isp <- .sr_rmst_isp(spec)
   pre <- c(
     sprintf(".tau <- %s", .sr_lit(spec[["tau"]])),
     ".lv <- .sr_fixed$levels[[\"t1\"]]",
@@ -316,10 +328,13 @@
   )
 }
 
+# The present step of the rmst route: the bootstrap bounds when the value has them (resample/boot.R).
+.sr_rmst_present_boot <- function(value, spec) .sr_boot_present(value, spec, .sr_rmst_present, "rmst")
+
 .sr_rmst_route <- function() {
   sr_route(id = "rmst", version = 1L, family = "survival", purpose = "explain-causal",
            estimand = .sr_rmst_estimand, spec_schema = .sr_rmst_schema(),
-           compile = .sr_rmst_compile, present = .sr_rmst_present)
+           compile = .sr_rmst_compile, present = .sr_rmst_present_boot)
 }
 
 if (!(.sr_route_key("rmst", 1L) %in% ls(.sr_routes, all.names = TRUE))) {

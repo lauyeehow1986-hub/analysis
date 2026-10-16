@@ -34,8 +34,11 @@
 # with normal intervals. The Kaplan-Meier data use the rows with an observed exposure. MI with
 # clustered data is refused.
 #
-# Not implemented (refused at compile, never silently ignored): weights, matching, the bootstrap and
-# the bayesian framework.
+# The bootstrap (layers$resampling = "bootstrap", spec$boot) is resample/boot.R: the primary HR takes
+# a bootstrap interval of the log HR.
+#
+# Not implemented (refused at compile, never silently ignored): weights, matching and the bayesian
+# framework.
 
 .sr_cox_ties_of <- function(spec) if (is.null(spec[["ties"]])) "efron" else spec[["ties"]]
 
@@ -124,6 +127,7 @@
 .sr_cox_compile <- function(spec) {
   .sr_cox_check(spec)
   .sr_glm_layers_check(spec, "cox")   # the layer stack is the one of the other model routes
+  if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_cox_compile, "cox", "cox"))
   if (.sr_mi_on(spec)) return(.sr_cox_mi_compile(spec))
   tc <- sr_terms_code(spec)
   plan <- .sr_term_plan(spec)
@@ -379,16 +383,19 @@
   )
 }
 
+# The present step of both cox routes: the bootstrap bounds when the value has them (resample/boot.R).
+.sr_cox_present_boot <- function(value, spec) .sr_boot_present(value, spec, .sr_cox_present, "cox")
+
 .sr_cox_route <- function() {
   sr_route(id = "cox", version = 1L, family = "survival", purpose = "explain-causal",
            estimand = .sr_cox_estimand, spec_schema = .sr_cox_schema(),
-           compile = .sr_cox_compile, present = .sr_cox_present)
+           compile = .sr_cox_compile, present = .sr_cox_present_boot)
 }
 
 .sr_cox_describe_route <- function() {
   sr_route(id = "cox_describe", version = 1L, family = "survival", purpose = "describe",
            estimand = .sr_cox_estimand, spec_schema = .sr_cox_schema(),
-           compile = .sr_cox_compile, present = .sr_cox_present)
+           compile = .sr_cox_compile, present = .sr_cox_present_boot)
 }
 
 if (!(.sr_route_key("cox", 1L) %in% ls(.sr_routes, all.names = TRUE))) {

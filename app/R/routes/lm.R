@@ -26,8 +26,11 @@
 # Rubin's rules, t intervals on the Barnard-Rubin df (complete-data df = the residual df). There is no
 # R-squared, residual SD or residual figure under MI. MI with clustered data is refused.
 #
-# Not yet implemented (refused at compile, never silently ignored): weights, matching, the bootstrap
-# and the bayesian framework.
+# The bootstrap (layers$resampling = "bootstrap", spec$boot) is resample/boot.R: the primary rows take
+# bootstrap intervals; with clustered data spec$boot_type = "cluster" resamples whole clusters.
+#
+# Not yet implemented (refused at compile, never silently ignored): weights, matching and the
+# bayesian framework.
 #
 # Marginal effect (marginal = TRUE, default FALSE): the standardised mean difference by g-computation
 # (routes/marginal.R), reported as an extra role-primary MD row "<exposure> (marginal)" and a
@@ -85,7 +88,7 @@
     .sr_mi_layer_todo(spec),
     if (!is.null(L[["weights"]]) && !identical(L[["weights"]], "none")) paste0("weights = ", L[["weights"]]),
     if (isTRUE(L[["matching"]])) "matching",
-    if (!is.null(L[["resampling"]]) && !identical(L[["resampling"]], "none")) paste0("resampling = ", L[["resampling"]]),
+    if (!is.null(L[["resampling"]]) && !(L[["resampling"]] %in% c("none", "bootstrap"))) paste0("resampling = ", L[["resampling"]]),
     if (!is.null(L[["framework"]]) && !identical(L[["framework"]], "frequentist")) paste0("framework = ", L[["framework"]])
   )
   if (length(todo)) {
@@ -99,6 +102,7 @@
 .sr_lm_compile <- function(spec) {
   .sr_lm_check(spec)
   .sr_lm_layers_check(spec)
+  if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_lm_compile, "lm", "lm"))
   if (.sr_mi_on(spec)) return(.sr_lm_mi_compile(spec))
   se <- .sr_lm_se(spec)
   tc <- sr_terms_code(spec)
@@ -343,16 +347,19 @@
   )
 }
 
+# The present step of both lm routes: the bootstrap bounds when the value has them (resample/boot.R).
+.sr_lm_present_boot <- function(value, spec) .sr_boot_present(value, spec, .sr_lm_present, "lm")
+
 .sr_lm_route <- function() {
   sr_route(id = "lm", version = 1L, family = "regression", purpose = "explain-causal",
            estimand = .sr_lm_estimand, spec_schema = .sr_lm_schema(),
-           compile = .sr_lm_compile, present = .sr_lm_present)
+           compile = .sr_lm_compile, present = .sr_lm_present_boot)
 }
 
 .sr_lm_describe_route <- function() {
   sr_route(id = "lm_describe", version = 1L, family = "regression", purpose = "describe",
            estimand = .sr_lm_estimand, spec_schema = .sr_lm_schema(),
-           compile = .sr_lm_compile, present = .sr_lm_present)
+           compile = .sr_lm_compile, present = .sr_lm_present_boot)
 }
 
 if (!(.sr_route_key("lm", 1L) %in% ls(.sr_routes, all.names = TRUE))) {

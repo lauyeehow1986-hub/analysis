@@ -157,7 +157,7 @@ test_that("validation refuses what lm cannot do: cluster SE without a cluster, u
 test_that("compile refuses layers that lm@1 does not implement instead of ignoring them", {
   r <- .lm_route()
   for (lay in list(list(missing = "mi"), list(weights = "ipw"), list(matching = TRUE),
-                   list(resampling = "bootstrap"), list(framework = "bayesian"))) {
+                   list(framework = "bayesian"))) {
     s <- .lm_spec(layers = modifyList(.lm_layers(), lay))
     expect_error(sr_compile(r, s), "layer", info = names(lay))
   }

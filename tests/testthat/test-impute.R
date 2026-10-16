@@ -225,7 +225,7 @@ test_that("spec$mi is validated at compile: m, maxit, aux", {
   expect_silent(sr_compile(r, .im_lm_spec(mi = list(m = 2, maxit = 1, aux = "hyp"))))
   # the other unimplemented layers stay refused under MI
   expect_error(sr_compile(r, .im_lm_spec(layers = .im_layers(weights = "ipw"))), "does not implement")
-  expect_error(sr_compile(r, .im_lm_spec(layers = .im_layers(resampling = "bootstrap"))), "does not implement")
+  expect_error(sr_compile(r, .im_lm_spec(layers = .im_layers(resampling = "bootstrap"))), "mi_x_boot")
 })
 
 test_that("MI with clustered data or with the Firth penalty is refused at compile, naming the combination", {

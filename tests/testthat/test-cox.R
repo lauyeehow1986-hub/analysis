@@ -85,8 +85,8 @@ test_that("cluster and layers$clustered go together; unsupported layers are refu
   L$weights <- "ipw"
   expect_error(sr_compile(r, .cx_spec(layers = L)), "weights")
   L <- .cx_layers()
-  L$resampling <- "bootstrap"
-  expect_error(sr_compile(r, .cx_spec(layers = L)), "bootstrap")
+  L$resampling <- "bootstrap"   # implemented by resample/boot.R; its settings are validated
+  expect_error(sr_compile(r, .cx_spec(layers = L, boot = list(B = 5))), "spec$boot$B", fixed = TRUE)
 })
 
 # ---- the hazard ratio ---------------------------------------------------------------------------
