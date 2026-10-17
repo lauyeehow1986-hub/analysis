@@ -151,7 +151,8 @@ test_that("library snapshot records R, snapshot date and core package versions",
   expect_identical(names(snap), c("r", "snapshot_date", "pkgs"))
   expect_identical(snap$r, R.version.string)
   expect_true(is.na(snap$snapshot_date))
-  expect_identical(.sr_core_pkgs(), c("jsonlite", "openssl", "callr", "processx", "ps", "shiny", "bslib"))
+  expect_identical(.sr_core_pkgs(), c("jsonlite", "openssl", "callr", "processx", "ps", "shiny", "bslib",
+                                       "survival", "mice", "sandwich", "boot", "Hmisc", "logistf", "ggplot2", "ragg"))
   expect_identical(names(snap$pkgs), .sr_core_pkgs())
   expect_type(snap$pkgs, "character")
   expect_identical(snap$pkgs[["jsonlite"]], as.character(utils::packageVersion("jsonlite")))

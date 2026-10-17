@@ -11,6 +11,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
 | 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. final-review fixes (I1 torn/failed audit writes, I2 parse_json only, I3 events/audit cross-check on open, M1 atomic rewrites). 2295 tests pass, `LINT OK` |
 | 2026-10-10 | P1b data layer done (branch `p1b-data`, Tasks 1-23): DuckDB ingest to a Parquet store (chunked, resumable, external mode, pre-flight), dictionaries (CSV, REDCap CSV / ODM), join and cohort builder, profiling, the DQ check library (6 domains), Data Action Suggestor, recipe, readiness panel and the Data tab; `docs/data.md` user guide; `tools/scale_test.R`. Full suite 6558 pass, 0 fail, 2 skip (no fst package, no sas7bdat fixture), `LINT OK (41 files)`. Scale smoke 2M x 20 on the laptop and with `--profile=locked16`: PASS (peak RSS 1.07 GB / 0.83 GB) |
+| 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Final review fixed: `sr_sap_add` compiles every spec and checks binary event coding before the lock. Full suite 9967 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -18,7 +19,17 @@ design; this file holds *what has happened* and *what we learned*.
    - **User hand-off (locked16 PC):** run the FULL scale test (`Rscript tools/scale_test.R 20000000 60 <dir on the data drive> --profile=locked16`, about 8 GB CSV, needs the free space the pre-flight reports) next to the P0 Task 8 hand-off (run `sr_spike.zip` on the locked PC). Paste the printed report back; expect `PASS` (peak RSS under 8 GB = DuckDB cap 6 + 2). Only a 2M x 20 smoke has been run (on the laptop).
 3. ~~Execute P1a in a worktree (branch `p1a-foundation`)~~ done 2026-10-03; review and merge the branch.
 4. ~~P1b data layer~~ done 2026-10-10 (branch `p1b-data`); review and merge the branch.
-5. **Next: write the P1c plan** (analysis routes), then the P1d plan (router + writer + freeze + UI), and execute them in that order.
+5. ~~P1c analysis~~ done 2026-10-18 (branch `p1c-analysis`); review and merge the branch.
+6. **Next: write the P1d plan** (router + writer + freeze + UI), then the new **P1e scale** plan
+   (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
+   them in that order.
+   - P1d also owns: the SAP_v1.docx and lock UI, Methods/Results prose from the P1c fragment inputs,
+     chunk-level checkpoint/cancel and parallel workers for the bootstrap and MI (ExtendedTask).
+   - Open P1c limitations to carry: interactions accept only linear and factor terms (no interaction
+     with a quadratic or spline term); the censoring check ignores strata and uses Efron ties; a
+     logical (Yes/No) outcome given a text `event_value` such as "Yes" is not caught at add time and fails
+     at run with "no events" (refuse it at `sr_sap_add` in P1d); `sr_analysis_add` has no event-value
+     check (the run refuses instead).
 
 ## Decisions (with the user)
 | Topic | Decision |
@@ -113,6 +124,22 @@ design; this file holds *what has happened* and *what we learned*.
 - **Measuring RSS of a process blocked in DuckDB:** a `later::later()` poll cannot fire while R is inside
   a DuckDB call, so `tools/scale_test.R` samples the parent from a separate `callr::r_bg` watcher via
   `ps::ps_memory_info()` and cross-checks with the OS peak working set (`peak_wset`).
+- **The SAP lock lives in P1c and every run needs it.** `sr_run` refuses an unlocked SAP; tests that
+  run an analysis must add, lock, then run (see the `.fx_ready_project` fixture).
+- **`cache_inputs` keeps the run cache valid across moved projects:** the cache identity is the extract
+  SHA, route key + spec, seed, library snapshot and hardware fingerprint, never the project path; a
+  project moved to a machine with a different library or hardware fingerprint recomputes.
+- **Emitted analysis code never names a diagnostic,** and diagnostics live in `app/R/diagnostics/`,
+  outside `routes/`; the lint fails the build otherwise (no test-gated switching).
+- **`exclude_rows` positions** (the influence sensitivity) refer to the row order of the sorted extract
+  (`sr_extract` orders rows by the selected columns), not to store order.
+- **NHEFS needs `SR_NHEFS_CSV`:** the textbook test reads the CSV from that path and skips when it is
+  unset; the dataset is never committed. Recorded values are in `docs/validation.md`.
+- **Coverage simulation:** `Rscript tools/coverage_sim.R [cells] [reps_scale]` takes about 40 minutes
+  on the laptop with parallel workers (`SR_COVERAGE_WORKERS`; results do not depend on the worker
+  count) and hours serially. A failing cell is a finding; never widen the tolerance.
+- **Claude Code subagents and docs:** a hook can refuse a subagent's Write of a `.md` deliverable as a
+  "report file"; write such docs from the main session.
 - **Claude Code Bash tool and big heredocs:** a very large single heredoc can be rejected with
   "unexpected EOF while looking for matching quote". Write files in small `cat >> file <<'EOF'` chunks
   and keep commands such as `grep -P` out of the same call.

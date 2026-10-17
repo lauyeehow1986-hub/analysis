@@ -213,13 +213,7 @@ test_that("sr_blind is TRUE on a new project and FALSE once a sap.locked event i
   withr::defer(sr_duck_close(p))
   expect_true(sr_blind(p))
   expect_true(sr_blind(list(state = list())))
-  expect_false(exists("sap.locked", envir = .sr_reducers, inherits = FALSE))   # P1d owns the real one
-  sr_reducer_register("sap.locked", function(state, event) {
-    state$sap$locked <- TRUE
-    state
-  })
-  withr::defer(rm(list = "sap.locked", envir = .sr_reducers))
-  p <- sr_project_append(p, "sap.locked", list())
+  p <- sr_project_append(p, "sap.locked", list())                             # the real reducer (sap/sap.R)
   expect_false(sr_blind(p))
   expect_true(isTRUE(p$state$sap$locked))
 })

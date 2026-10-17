@@ -157,8 +157,10 @@ sr_exec <- function(code, inputs = list(), seed, timeout = 3600) {
 #' sr_exec behind the project's fits/ cache. A hit needs fits/<key_hash>.rds to be readable and
 #' to hold the same code_run and inputs hash; otherwise the code runs and an ok result replaces
 #' the file (never in a read-only project). Returns the sr_exec list plus `cached` (the stored
-#' inputs_hash is not returned). `...` goes to sr_exec.
-sr_exec_cached <- function(project, key_hash, code, inputs = list(), seed, ...) {
+#' inputs_hash is not returned). `...` goes to sr_exec. The inputs hash is that of `cache_inputs`
+#' (default: `inputs`); a caller whose inputs hold something that is not part of the result's identity
+#' (a project folder path) passes only the identifying part there.
+sr_exec_cached <- function(project, key_hash, code, inputs = list(), seed, ..., cache_inputs = inputs) {
   if (!is.character(key_hash) || length(key_hash) != 1L || is.na(key_hash) ||
       !grepl("^[0-9a-f]{64}$", key_hash)) {
     stop("key_hash must be a 64-character lowercase hex string", call. = FALSE)
@@ -167,7 +169,7 @@ sr_exec_cached <- function(project, key_hash, code, inputs = list(), seed, ...) 
   .sr_check_exec_args(code, inputs, seed, if ("timeout" %in% names(dots)) dots$timeout else 3600)
   fits <- project$paths$fits
   code_run <- paste(sr_rng_preamble(seed), code, sep = "\n")
-  inputs_hash <- .sr_inputs_hash(inputs)
+  inputs_hash <- .sr_inputs_hash(cache_inputs)
   hit <- .sr_cache_read(file.path(fits, paste0(key_hash, ".rds")), code_run, inputs_hash)
   if (!is.null(hit)) return(c(hit, list(cached = TRUE)))
   res <- sr_exec(code, inputs, seed, ...)
