@@ -350,3 +350,24 @@ test_that("a failed cache write leaves no temp file and no warning, even under w
   options(old)
   expect_identical(list.files(p$paths$fits, pattern = "[.]tmp$"), character(0))
 })
+
+test_that("cache_inputs, not inputs, decides cache validity when it is given", {
+  p <- new_proj()
+  k <- key("ci")
+  a <- sr_exec_cached(p, k, "sum(x)", inputs = list(x = 1:3), seed = 1, cache_inputs = list(k = 1))
+  expect_false(a$cached)
+  expect_equal(a$value, 6L)
+  # other inputs, same cache_inputs: a hit (the stored value is returned, the code is not re-run)
+  b <- sr_exec_cached(p, k, "sum(x)", inputs = list(x = 1:10), seed = 1, cache_inputs = list(k = 1))
+  expect_true(b$cached)
+  expect_equal(b$value, 6L)
+  # another cache_inputs misses and re-runs with the inputs it is given
+  d <- sr_exec_cached(p, k, "sum(x)", inputs = list(x = 1:10), seed = 1, cache_inputs = list(k = 2))
+  expect_false(d$cached)
+  expect_equal(d$value, 55L)
+  # the default is unchanged: changed inputs miss
+  k2 <- key("ci2")
+  expect_false(sr_exec_cached(p, k2, "sum(x)", list(x = 1:3), 1)$cached)
+  expect_true(sr_exec_cached(p, k2, "sum(x)", list(x = 1:3), 1)$cached)
+  expect_false(sr_exec_cached(p, k2, "sum(x)", list(x = 1:4), 1)$cached)
+})

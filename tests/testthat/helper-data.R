@@ -92,3 +92,39 @@ local({
   attr(out, "row.names") <- seq_len(nrow(out))
   out
 }
+
+# The project with the SAP marked as locked, in memory only: no event is written, so nothing is
+# audited and nothing is replayed. For tests that need the unblinded view without drafting a SAP.
+.fx_unblind <- function(p) {
+  p$state$sap <- list(locked = TRUE)
+  p
+}
+
+# A project whose table `table` (from `df`) is analysis-ready: ingested, roles confirmed, the DQ
+# checks run, and every warn / block finding decided with the action the suggestor proposes -- except
+# keep_sensitivity, which would demand a sensitivity analysis and is decided as recheck instead.
+# Stops, printing the readiness table, if any readiness row is still block. The project stays blind.
+.fx_ready_project <- function(df, table = "t", roles, env = parent.frame()) {
+  p <- .fx_project(env = env)
+  withr::defer(sr_duck_close(p), envir = env)
+  csv <- file.path(dirname(p$paths$dir), paste0(table, ".csv"))
+  .fx_write_csv(df, csv)
+  p <- sr_ingest(p, csv, table = table,
+                 options = list(drive_info = function(path) list(free_bytes = 1e13, remote = FALSE, warnings = character())))
+  p <- sr_roles_set(p, table, roles)
+  p <- sr_dq_run(p, table)
+  sg <- sr_suggest(p, table)
+  for (i in seq_len(nrow(sg))) {
+    if (identical(sg$action[i], "keep_sensitivity")) {
+      p <- sr_action_decide(p, sg$finding_id[i], "recheck", reason = "test fixture", table = table)
+    } else {
+      p <- sr_action_decide(p, sg$finding_id[i], sg$action[i], table = table)
+    }
+  }
+  rd <- sr_readiness(p, table)
+  if (any(rd$status == "block")) {
+    print(rd)
+    stop(".fx_ready_project: the table is still not ready", call. = FALSE)
+  }
+  p
+}
