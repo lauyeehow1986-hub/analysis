@@ -56,6 +56,7 @@
   if (identical(spec[["outcome"]], spec[["exposure"]])) {
     stop("the outcome and the exposure must be different columns", call. = FALSE)
   }
+  .sr_exclude_check(spec)
   if (identical(.sr_lm_se(spec), "cluster")) {
     if (!one(spec[["cluster"]])) {
       stop("se = \"cluster\" needs a cluster column (spec$cluster)", call. = FALSE)
@@ -285,6 +286,7 @@
     "Linear regression of %s on %s, adjusted for the other terms of the model; %d row(s) analysed, %d excluded for a missing value; %s.",
     spec[["outcome"]], exposure, as.integer(round(value$n)), as.integer(round(value$n_total - value$n)),
     .sr_lm_se_text(value)))
+  frag$exclude_rows <- .sr_exclude_fragment(spec)
   if (mi) {
     fit_tab <- data.frame(
       Statistic = c("Rows analysed", "Imputed datasets (m)", "Complete-data residual df"),
@@ -342,6 +344,7 @@
     cluster = list(type = "chr", required = FALSE),
     marginal = list(type = "lgl", required = FALSE, default = FALSE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
+    exclude_rows = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

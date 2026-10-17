@@ -333,3 +333,20 @@ test_that("cox_describe compiles, runs and presents HR rows, the same numbers as
   expect_true(any(a$flags$flag == "table2") || nrow(a$flags) == 0L)
   expect_false(any(b$flags$flag == "table2"))
 })
+
+# ---- exclude_rows (the influence sensitivity analysis) ------------------------------------------
+
+test_that("cox exclude_rows drop those positions; fragment counts them; bad values refused", {
+  d <- survival::lung
+  s <- .cx_spec(exclude_rows = c(1L, 3L, 50L))
+  expect_true(sr_spec_validate(s, .cx_route())$ok)
+  val <- .cx_value(d, s)
+  fit <- survival::coxph(survival::Surv(time, status) ~ sex, data = d[-c(1, 3, 50), ])
+  expect_equal(val$coef$est, unname(stats::coef(fit)), tolerance = 1e-8)
+  expect_equal(val$n, 225)
+  pr <- .cx_present(val, s)
+  expect_match(pr$fragments$exclude_rows, "3 row(s) excluded by position", fixed = TRUE)
+  for (bad in list(0L, c(4L, 4L), 2.5, NA_real_, "x")) {
+    expect_false(sr_spec_validate(.cx_spec(exclude_rows = bad), .cx_route())$ok, info = format(bad))
+  }
+})

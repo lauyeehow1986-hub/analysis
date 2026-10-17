@@ -103,7 +103,7 @@ test_that("lm@1 and lm_describe@1 are registered with the documented schema and 
   expect_identical(r$version, 1L)
   sc <- r$spec_schema
   expect_setequal(names(sc), c("outcome", "exposure", "terms", "interactions", "se", "cluster", "marginal",
-                               "standardize_over", "layers", "seed"))
+                               "standardize_over", "exclude_rows", "layers", "seed"))
   expect_true(sc$outcome$required)
   expect_true(sc$exposure$required)
   expect_true(sc$layers$required)
@@ -410,4 +410,53 @@ test_that("lm runs through sr_sap_add, lock and sr_run; a hostile column name is
   expect_true(grepl("system", code, fixed = TRUE))             # present, but only inside a string
   p2 <- sr_run(p, "m1")
   expect_true(p2$state$runs$m1$cached)
+})
+
+# ---- exclude_rows (the influence sensitivity analysis) ------------------------------------------
+
+test_that("exclude_rows drops those row positions before the model, and the fragment states the count", {
+  r <- .lm_route()
+  s <- .lm_spec(exclude_rows = c(1L, 5L, 9L))
+  expect_true(sr_spec_validate(s, r)$ok)
+  val <- .lm_value(mtcars, s)
+  fit <- stats::lm(mpg ~ am + wt + hp, data = mtcars[-c(1, 5, 9), ])
+  expect_equal(val$coef$est, unname(stats::coef(fit)), tolerance = 1e-10)
+  expect_equal(val$n, 29)
+  expect_equal(val$n_total, 29)
+  pr <- .lm_present(val, s)
+  expect_match(pr$fragments$exclude_rows, "3 row(s) excluded by position", fixed = TRUE)
+  expect_null(.lm_present(.lm_value(mtcars), .lm_spec())$fragments$exclude_rows)
+  # an excluded row and a missing value are counted apart
+  df <- mtcars
+  df$mpg[2] <- NA
+  v2 <- .lm_value(df, .lm_spec(exclude_rows = 1L))
+  expect_equal(v2$n_total, 31)
+  expect_equal(v2$n, 30)
+  # a position beyond the data is refused at run time
+  expect_error(.lm_value(mtcars, .lm_spec(exclude_rows = 40L)), "exclude_rows")
+})
+
+test_that("exclude_rows must be positive unique whole numbers and survives the JSON round trip", {
+  r <- .lm_route()
+  for (bad in list(0L, -1L, c(2L, 2L), 1.5, NA_real_, Inf, numeric(), "3")) {
+    expect_false(sr_spec_validate(.lm_spec(exclude_rows = bad), r)$ok, info = paste(format(bad), collapse = ","))
+  }
+  expect_true(sr_spec_validate(.lm_spec(exclude_rows = c(3, 7)), r)$ok)
+  s <- .lm_spec(exclude_rows = c(3L, 7L))
+  back <- .sr_spec_from_state(jsonlite::fromJSON(jsonlite::toJSON(s, auto_unbox = TRUE), simplifyVector = FALSE))
+  expect_identical(back$exclude_rows, c(3L, 7L))
+  expect_identical(sr_compile(r, back), sr_compile(r, s))
+  one <- .lm_spec(exclude_rows = 3L)
+  back1 <- .sr_spec_from_state(jsonlite::fromJSON(jsonlite::toJSON(one, auto_unbox = TRUE), simplifyVector = FALSE))
+  expect_identical(sr_compile(r, back1), sr_compile(r, one))
+  expect_silent(.sr_emit_check(sr_compile(r, s), "analysis"))
+  # under the bootstrap and MI layers the rows are excluded once, before resampling / imputing
+  sb <- .lm_spec(exclude_rows = c(3L, 7L), boot = list(B = 20L, type = "percentile"),
+                 layers = modifyList(.lm_layers(), list(resampling = "bootstrap")))
+  withr::local_preserve_seed()
+  old <- RNGkind()
+  withr::defer(RNGkind(old[1L], old[2L], old[3L]))
+  eval(parse(text = sr_rng_preamble(sb$seed)))
+  vb <- .lm_value(mtcars, sb)
+  expect_equal(vb$n, 30)
 })

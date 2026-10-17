@@ -65,6 +65,7 @@
   if (!is.null(spec[["event_value"]]) && !one(spec[["event_value"]])) {
     stop("event_value must be one non-empty value (the outcome value that counts as the event)", call. = FALSE)
   }
+  .sr_exclude_check(spec)
   se <- .sr_glm_se(spec, kind)
   if (identical(kind, "modpois")) {
     if (identical(se, "model")) {
@@ -382,6 +383,7 @@
     "%s of %s on %s, adjusted for the other terms of the model; %d row(s) analysed (%d events), %d excluded for a missing value; %s.",
     what, spec[["outcome"]], exposure, as.integer(round(value$n)), as.integer(round(value$events)),
     as.integer(round(value$n_total - value$n)), .sr_glm_se_text(value)))
+  frag$exclude_rows <- .sr_exclude_fragment(spec)
   if (mi) {
     tables$model_fit <- data.frame(
       Statistic = c("Rows analysed", "Events (mean over the imputations)", "Imputed datasets (m)"),
@@ -467,6 +469,7 @@
     cluster = list(type = "chr", required = FALSE),
     marginal = list(type = "lgl", required = FALSE, default = TRUE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
+    exclude_rows = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

@@ -669,3 +669,30 @@ test_that("logistic and modpois run through sr_sap_add, lock and sr_run; hostile
   p2 <- sr_run(p, "m1")
   expect_true(p2$state$runs$m1$cached)
 })
+
+# ---- exclude_rows (the influence sensitivity analysis) ------------------------------------------
+
+test_that("logistic and modpois exclude_rows drop those positions; fragment counts them; bad values refused", {
+  d <- .gl_df()
+  s <- .gl_spec(marginal = FALSE, exclude_rows = c(2L, 10L))
+  val <- .gl_value(d, s)
+  fit <- stats::glm(y ~ a + x1 + x2, data = d[-c(2, 10), ], family = stats::binomial())
+  expect_equal(unname(val$coef$est), unname(stats::coef(fit)), tolerance = 1e-10)
+  expect_identical(as.integer(val$n), 498L)
+  pr <- .gl_present(val, s)
+  expect_match(pr$fragments$exclude_rows, "2 row(s) excluded by position", fixed = TRUE)
+  m <- .gl_spec(se = "robust", marginal = FALSE, exclude_rows = 1L)
+  vm <- .gl_value(d, m, "modpois")
+  fm <- stats::glm(y ~ a + x1 + x2, data = d[-1, ], family = stats::poisson(link = "log"))
+  expect_equal(unname(vm$coef$est), unname(stats::coef(fm)), tolerance = 1e-8)
+  expect_match(.gl_present(vm, m, "modpois")$fragments$exclude_rows, "1 row(s) excluded", fixed = TRUE)
+  for (id in c("logistic", "modpois")) {
+    r <- .gl_route(id)
+    base <- if (id == "modpois") .gl_spec(se = "robust") else .gl_spec()
+    for (bad in list(0L, c(4L, 4L), 2.5, NA_real_, "x")) {
+      b <- base
+      b$exclude_rows <- bad
+      expect_false(sr_spec_validate(b, r)$ok, info = paste(id, format(bad)))
+    }
+  }
+})

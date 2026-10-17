@@ -2,7 +2,7 @@
 #
 # sr_terms_code() turns the exposure and spec$terms into three pieces of R code text plus a map from
 # coefficients back to the user's variables:
-#   setup  - run once on `sr_data` (the observed table): fixes RCS knots and factor levels into
+#   setup  - run once on `sr_data` (the observed table): drops spec$exclude_rows, then fixes RCS knots and factor levels into
 #            `.sr_fixed`, so every later design (a subset, a bootstrap resample, an imputed copy) has
 #            the same columns and the same coefficient names;
 #   design - defines `.h_design(d)`: the passthrough columns plus derived columns t1, t2, ... (t<i>f for a
@@ -285,8 +285,10 @@ sr_terms_code <- function(spec) {
   }
   needed <- unique(c(pass, vapply(plan, function(i) i$var, character(1))))
 
-  # setup: the column check, helpers, then .sr_fixed (factor levels, RCS knots) from the observed table
+  # setup: the excluded rows (spec$exclude_rows) dropped, the column check, helpers, then .sr_fixed
+  # (factor levels, RCS knots) from the observed table
   setup <- c(
+    .sr_exclude_code(spec),
     if (length(needed)) c(
       sprintf(".miss <- setdiff(%s, names(sr_data))", .sr_lit(needed)),
       "if (length(.miss)) stop(\"column(s) not in the data: \", paste(.miss, collapse = \", \"))"
@@ -372,4 +374,55 @@ sr_outcome_code <- function(spec, kind = c("binary", "continuous", "surv")) {
       sprintf("des[[\".time\"]] <- .h_num(%s, %s)", col("time"), .sr_lit(spec[["time"]])),
       sprintf("des[[\".event\"]] <- %s", ev("status", "status_event")), sep = "\n")
   )
+}
+
+# ---- exclude_rows (a sensitivity analysis without some rows) ------------------------------------
+#
+# spec$exclude_rows (lm, logistic, modpois, cox): 1-based row positions of the analysis table, in the
+# order the run extract holds it (sr_data). The influence sensitivity analysis of the diagnostics
+# (sap/deviations.R) fills it with the flagged rows. The setup of sr_terms_code() drops those rows
+# first, so the design, the factor levels, the knots, the bootstrap, MI and the diagnostics all see
+# the reduced table, and n_total counts what is left.
+
+#' The rows a spec excludes as an integer vector, NULL when none.
+.sr_exclude_rows <- function(spec) {
+  x <- spec[["exclude_rows"]]
+  if (is.null(x)) NULL else as.integer(x)
+}
+
+#' Refuse an exclude_rows field that is not one or more positive unique whole numbers.
+.sr_exclude_check <- function(spec) {
+  x <- spec[["exclude_rows"]]
+  if (is.null(x)) return(invisible(TRUE))
+  if (!is.numeric(x) || !length(x) || anyNA(x) || !all(is.finite(x)) || any(x != round(x)) ||
+        any(x < 1) || anyDuplicated(x)) {
+    stop("exclude_rows must be one or more positive unique whole numbers (1-based row positions)", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+#' Refuse exclude_rows on a route that does not apply it (rather than silently ignoring it).
+.sr_exclude_refuse <- function(spec, route) {
+  if (!is.null(spec[["exclude_rows"]])) {
+    stop("exclude_rows is not supported by route ", route, call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+#' The emitted lines that drop the excluded rows from sr_data (character(0) when none).
+.sr_exclude_code <- function(spec) {
+  ex <- .sr_exclude_rows(spec)
+  if (!length(ex)) return(character())
+  c(sprintf(".sr_excl <- %s", .sr_lit(sort(ex))),
+    "if (max(.sr_excl) > nrow(sr_data)) stop(\"exclude_rows names row \", max(.sr_excl), \" but the data have \", nrow(sr_data), \" rows\")",
+    "sr_data <- sr_data[-.sr_excl, , drop = FALSE]",
+    "rm(.sr_excl)")
+}
+
+#' The Methods sentence for exclude_rows, NULL when the spec excludes nothing.
+.sr_exclude_fragment <- function(spec) {
+  ex <- .sr_exclude_rows(spec)
+  if (!length(ex)) return(NULL)
+  sprintf(paste0("Sensitivity analysis: %d row(s) excluded by position (exclude_rows) before the analysis, ",
+                 "ahead of any row dropped for a missing value."), length(ex))
 }

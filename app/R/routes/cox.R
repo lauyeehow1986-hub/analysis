@@ -66,6 +66,7 @@
 # Cross-field validation of a cox spec (the schema has been checked already); stops with the reason.
 .sr_cox_check <- function(spec) {
   .sr_surv_check(spec)
+  .sr_exclude_check(spec)
   base <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   cl <- spec[["cluster"]]
   if (.sr_cox_clustered(spec)) {
@@ -320,6 +321,7 @@
     as.integer(round(value$n_total - value$n)),
     if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
     .sr_cox_se_text(value)))
+  frag$exclude_rows <- .sr_exclude_fragment(spec)
   if (mi) {
     tables$model_fit <- data.frame(
       Statistic = c("Rows analysed", "Rows excluded (missing time or status)", "Events", "Censored",
@@ -378,6 +380,7 @@
     strata = list(type = "chr", required = FALSE),
     cluster = list(type = "chr", required = FALSE),
     ties = list(type = "chr", required = FALSE, values = c("efron", "breslow")),
+    exclude_rows = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )
