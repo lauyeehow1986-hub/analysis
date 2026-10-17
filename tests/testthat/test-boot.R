@@ -497,3 +497,31 @@ test_that("boot_then_impute: the marginal fragment describes the bootstrap perce
   expect_false(grepl("delta-method|Rubin", f))
   expect_match(f, "bootstrap percentile", fixed = TRUE)
 })
+
+test_that("impute_then_boot: the marginal fragment describes the bootstrap variances pooled by Rubin's rules", {
+  df <- .bt_df()
+  df$z[c(3L, 9L, 17L, 30L, 44L, 61L)] <- NA
+  s <- .bt_lm_spec(layers = .bt_layers(missing = "mi"), mi = list(m = 2, maxit = 2), marginal = TRUE,
+                   choices = list(mi_x_boot = "impute_then_boot"), boot = list(B = 20))
+  res <- .bt_present(.bt_value(df, s, "lm"), s, "lm")
+  f <- res$fragments$lm_marginal
+  expect_true(is.character(f) && length(f) == 1L)
+  expect_false(grepl("delta-method", f, fixed = TRUE))
+  expect_match(f, "bootstrap", fixed = TRUE)
+  expect_match(f, "B = 20", fixed = TRUE)
+  expect_match(f, "Rubin", fixed = TRUE)
+  expect_match(f, "each imputed dataset", fixed = TRUE)
+  for (id in c("logistic", "modpois")) {
+    s <- list(purpose = "explain-causal", outcome = "yb", exposure = "x", terms = list(list(var = "z")),
+              layers = .bt_layers(missing = "mi"), mi = list(m = 2, maxit = 2),
+              choices = list(mi_x_boot = "impute_then_boot"), boot = list(B = 20), seed = 9L)
+    res <- .bt_present(.bt_value(df, s, id), s, id)
+    f <- res$fragments$glm_marginal
+    expect_true(is.character(f) && length(f) == 1L, info = id)
+    expect_false(grepl("delta-method", f, fixed = TRUE), info = id)
+    expect_match(f, "bootstrap", fixed = TRUE, info = id)
+    expect_match(f, "B = 20", fixed = TRUE, info = id)
+    expect_match(f, "Rubin", fixed = TRUE, info = id)
+    expect_match(f, "each imputed dataset", fixed = TRUE, info = id)
+  }
+})

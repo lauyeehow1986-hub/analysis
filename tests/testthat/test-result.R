@@ -124,3 +124,18 @@ test_that("unknown measure, scale or role values and p-value columns are refused
   ok <- list(coef = data.frame(term = "a", p = 0.1))
   expect_no_error(sr_result_check(fx_pres(fx_eff(), ok), fx_route()))
 })
+
+test_that("a bootstrap primary row may exclude its estimate; other rows and non-finite bounds still stop", {
+  # the bootstrap interval lies wholly above the estimate (a strongly biased bootstrap distribution)
+  boot <- fx_eff(lo = c(0.9, 1.00), hi = c(1.2, 1.04), ci_method = c("boot_percentile", "wald"))
+  out <- sr_result_check(fx_pres(boot), fx_route())
+  expect_identical(out$effects$ci_method[1L], "boot_percentile")
+  # the same values without a bootstrap ci_method violate lo <= est <= hi
+  expect_error(sr_result_check(fx_pres(fx_eff(lo = c(0.9, 1.00), hi = c(1.2, 1.04))), fx_route()),
+               "violates lo <= est <= hi", fixed = TRUE)
+  # a bootstrap row still needs a finite estimate and interval
+  for (bad in list(c(NA, 1.00), c(Inf, 1.00))) {
+    e <- fx_eff(lo = bad, hi = c(1.2, 1.04), ci_method = c("boot_percentile", "wald"))
+    expect_error(sr_result_check(fx_pres(e), fx_route()), "finite estimate and CI", fixed = TRUE)
+  }
+})

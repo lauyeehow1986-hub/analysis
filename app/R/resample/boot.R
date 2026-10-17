@@ -522,6 +522,20 @@
 
 # ---- present ------------------------------------------------------------------------------------
 
+# The marginal fragment under impute_then_boot (it replaces the MI wording of the route, whose variance
+# is the delta method): what ran, with the bootstrap variance of each imputed dataset in Rubin's rules.
+.sr_boot_itb_marginal <- function(nm, bt, m) {
+  how <- sprintf(paste0("by g-computation in each imputed dataset (m = %d), its variance from a bootstrap of ",
+                        "that dataset (B = %d replicates of its rows), pooled by Rubin's rules with those ",
+                        "bootstrap variances"), as.integer(round(m)), as.integer(bt$B))
+  if (identical(nm, "lm_marginal")) {
+    paste0("Marginal mean difference ", how, ".")
+  } else {
+    paste0("Marginal risk difference and ratio ", how, " (the risk ratio on the log scale); NNT from the ",
+           "pooled risk difference and its bounds (Altman).")
+  }
+}
+
 # The marginal fragment under boot_then_impute (it replaces the MI wording of the route): what ran.
 .sr_boot_bti_marginal <- function(nm, bt) {
   how <- sprintf("by g-computation in every imputed dataset of each of the B = %d bootstrap samples (m = %d imputations each)",
@@ -617,6 +631,11 @@
     i <- e$role == "primary" & e$ci_method == "rubin"
     e$ci_method[i] <- "rubin_bootvar"
     res$effects <- e
+    for (nm in c("lm_marginal", "glm_marginal")) {
+      if (is.character(res$fragments[[nm]])) {
+        res$fragments[[nm]] <- .sr_boot_itb_marginal(nm, bt, value$mi$m)
+      }
+    }
     res$fragments$impute_then_boot <- sprintf(paste0(
       "Impute, then bootstrap: each of the %d imputed datasets was bootstrapped (B = %d replicates of its rows); ",
       "the bootstrap variance replaced the model variance of the primary effects in Rubin's rules ",
