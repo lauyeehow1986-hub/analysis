@@ -95,7 +95,8 @@ test_that("sr_diag_checks pins the catalogue and its thresholds", {
   expect_identical(row("separation")$fail, 1)
   expect_identical(row("separation")$routes, "logistic")
   expect_identical(c(row("few_clusters")$warn, row("few_clusters")$fail), c(50, 30))
-  expect_identical(c(row("inf_censoring")$warn, row("inf_censoring")$fail), c(0.1, 0.2))
+  expect_equal(c(row("inf_censoring")$warn, row("inf_censoring")$fail), c(log(1.25), log(1.5)))
+  expect_match(row("inf_censoring")$metric, "Cox model for censoring")
   expect_identical(row("inf_censoring")$routes, "cox,rmst")
   expect_identical(c(row("linearity")$warn, row("linearity")$fail), c(0.1, 0.25))
   expect_identical(row("linearity")$routes, "lm,logistic,modpois,cox")
@@ -121,7 +122,8 @@ test_that("sr_diag_applicable follows the route and the spec", {
   expect_false("few_clusters" %in% ap("lm", lm1))
   expect_setequal(ap("logistic", lm1), c("influence", "separation", "linearity"))
   expect_setequal(ap("logistic_describe", .dg_mod(lm1, purpose = "describe")), ap("logistic", lm1))
-  expect_false("separation" %in% ap("logistic", .dg_mod(lm1, penalty = "firth", marginal = FALSE)))
+  # Firth: the unpenalised ML fit is not the analysis model, so no model-fit check applies
+  expect_identical(ap("logistic", .dg_mod(lm1, penalty = "firth", marginal = FALSE)), character())
   expect_setequal(ap("modpois", lm1), c("influence", "linearity"))
   # a factor-only model has no linear term to scan
   expect_false("linearity" %in% ap("lm", .dg_lm(exposure_ref = "0")))
@@ -134,9 +136,32 @@ test_that("sr_diag_applicable follows the route and the spec", {
   t1 <- list(purpose = "describe", by = "x", vars = c("y", "z"), layers = .dg_layers(), seed = 1L)
   expect_identical(ap("table1", t1), character())
   firth <- .dg_an("logistic", .dg_mod(lm1, penalty = "firth", marginal = FALSE))
-  expect_error(sr_diag_compile("separation", firth), "does not apply")
+  for (ck in c("separation", "influence", "linearity")) {
+    expect_error(sr_diag_compile(ck, firth), "does not apply.*Firth.*not the analysis model")
+  }
   expect_error(sr_diag_compile("ph", .dg_an("lm", lm1)), "does not apply")
   expect_error(sr_diag_compile("nope", .dg_an("lm", lm1)), "unknown diagnostic")
+})
+
+test_that("the verdict meets each threshold with exactly its comparator, and NA is a warning", {
+  v <- .sr_h_diag_verdict
+  # gt: a value equal to a threshold does not exceed it
+  expect_identical(v(0.5, 0.5, 1, "gt"), "ok")
+  expect_identical(v(1, 0.5, 1, "gt"), "warn")
+  expect_identical(v(1 + 1e-12, 0.5, 1, "gt"), "fail")
+  # ge: a value equal to a threshold meets it
+  expect_identical(v(0.5, 0.5, 1, "ge"), "warn")
+  expect_identical(v(1, 0.5, 1, "ge"), "fail")
+  expect_identical(v(0.5 - 1e-12, 0.5, 1, "ge"), "ok")
+  # lt: a value equal to a threshold is not below it
+  expect_identical(v(50, 50, 30, "lt"), "ok")
+  expect_identical(v(30, 50, 30, "lt"), "warn")
+  expect_identical(v(29, 50, 30, "lt"), "fail")
+  # no warn threshold (separation): only the fail threshold counts
+  expect_identical(v(0, NA_real_, 1, "ge"), "ok")
+  expect_identical(v(1, NA_real_, 1, "ge"), "fail")
+  # a value that could not be computed
+  for (cmp in c("gt", "ge", "lt")) expect_identical(v(NA_real_, 0.5, 1, cmp), "warn")
 })
 
 # ---- proportional hazards -----------------------------------------------------------------------
@@ -320,36 +345,122 @@ test_that("linearity fails for a quadratic truth fitted linearly and names the t
   expect_identical(rc$var, "z")
 })
 
+test_that("linearity says that terms in an interaction are not scanned", {
+  s <- .dg_lm(terms = list(list(var = "z"), list(var = "w")), interactions = list(c("x", "z")))
+  d <- .dg_lin(1000, 75)
+  d$w <- rnorm(1000)
+  r <- .dg_eval("linearity", "lm", s, d)
+  expect_match(r$detail, "interaction terms are not scanned")
+  expect_match(r$detail, "1 term(s) scanned", fixed = TRUE)
+  expect_identical(unique(r$plot_data$var), "w")
+  # also when nothing is left to scan
+  rb <- .dg_eval("linearity", "cox", .dg_cox(), .dg_surv(500, 2, 2, 73))
+  expect_match(rb$detail, "interaction terms are not scanned")
+})
+
+test_that("linearity warns and names the terms whose spline cannot be computed", {
+  # x has 11 distinct values but 990 of 1000 tied at 0: four distinct knots cannot be placed
+  set.seed(76)
+  tied <- sample(c(rep(0, 990), 1:10))
+  # every candidate skipped: the value is NA and the verdict a warning, not a silent ok
+  d <- data.frame(x = tied, y = rnorm(1000))
+  r <- .dg_eval("linearity", "lm", .dg_lm(), d)
+  expect_true(is.na(r$value))
+  expect_identical(r$verdict, "warn")
+  expect_match(r$detail, "could not be computed")
+  expect_match(r$detail, "x")
+  expect_false(grepl("no continuous", r$detail))
+  expect_true(is.na(r$var))
+  # mixed: z is scanned (a linear truth, so ok by value) but the skipped x forces at least warn
+  d$z <- rnorm(1000)
+  d$y <- 1 + 0.3 * d$z + rnorm(1000)
+  m <- .dg_eval("linearity", "lm", .dg_lm(terms = list(list(var = "z"))), d)
+  expect_true(is.finite(m$value))
+  expect_lt(m$value, 0.1)
+  expect_identical(m$verdict, "warn")
+  expect_identical(m$var, "z")
+  expect_match(m$detail, "could not be computed for x")
+  expect_identical(unique(m$plot_data$var), "z")
+  # a failing computed term stays a fail
+  d$y <- 1 + 2 * d$z^2 + rnorm(1000)
+  f <- .dg_eval("linearity", "lm", .dg_lm(terms = list(list(var = "z"))), d)
+  expect_identical(f$verdict, "fail")
+  expect_match(f$detail, "could not be computed for x")
+})
+
 # ---- informative censoring ----------------------------------------------------------------------
 
-test_that("inf_censoring fails when early censoring depends on a baseline term, not when it is random", {
-  mk <- function(n, seed, informative) {
-    set.seed(seed)
-    x <- rbinom(n, 1, 0.5)
-    z <- rnorm(n)
-    t <- rexp(n, 0.5 * exp(0.3 * x))
-    c <- if (informative) ifelse(z > 0.5, runif(n, 0, 0.5), 10) else runif(n, 0, 6)
-    c <- pmin(c, 5)
-    data.frame(time = pmin(t, c), status = as.integer(t <= c), x = x, z = z)
-  }
+# Event times with hazard 0.3 exp(bx x + bz z) (x binary, z standard normal); censoring times with
+# hazard 0.2 * cz^z (independent of the event time given x and z), administrative censoring at 6.
+.dg_cens <- function(n, seed, bx, bz, cz = 1) {
+  set.seed(seed)
+  x <- rbinom(n, 1, 0.5)
+  z <- rnorm(n)
+  t <- rexp(n, 0.3 * exp(bx * x + bz * z))
+  c <- pmin(rexp(n, 0.2 * cz^z), 6)
+  data.frame(time = pmin(t, c), status = as.integer(t <= c), x = x, z = z)
+}
+
+test_that("inf_censoring is ok for independent censoring however strong the event effect", {
   s <- .dg_cox(terms = list(list(var = "z")))
-  r <- .dg_eval("inf_censoring", "cox", s, mk(2000, 81, TRUE))
+  # event HR 4 for x and 3 per SD of z; censoring independent of both
+  r <- .dg_eval("inf_censoring", "cox", s, .dg_cens(4000, 81, log(4), log(3)))
+  expect_identical(r$verdict, "ok")
+  expect_lt(r$value, log(1.25))
+  # the reported table is the censoring model's coefficients, one row per baseline term
+  expect_true(is.data.frame(r$reported))
+  expect_true(all(c("term", "scale", "log_hr", "se", "hr") %in% names(r$reported)))
+  expect_identical(r$reported$term, c("x", "z"))
+  expect_equal(r$value, max(abs(r$reported$log_hr)))
+  expect_match(r$reported$scale[2L], "per SD")
+  expect_true(all(c("term", "log_hr", "lower", "upper") %in% names(r$plot_data)))
+  expect_match(r$detail, "Cox model for censoring")
+  expect_match(r$detail, "covariate-dependent censoring")
+  expect_match(r$detail, "cannot be tested")
+  # only administrative censoring at a fixed time, with an event HR of 4: ok
+  a <- .dg_eval("inf_censoring", "cox", .dg_cox(), .dg_surv(2000, 4, 4, 84))
+  expect_identical(a$verdict, "ok")
+  # no censored row at all: nothing to screen
+  dn <- .dg_cens(500, 85, log(2), 0)
+  dn$status <- 1L
+  n0 <- .dg_eval("inf_censoring", "cox", s, dn)
+  expect_identical(n0$verdict, "ok")
+  expect_identical(n0$value, 0)
+  expect_match(n0$detail, "no censored row")
+})
+
+test_that("inf_censoring fails when the censoring hazard depends on a baseline term", {
+  s <- .dg_cox(terms = list(list(var = "z")))
+  # the censoring hazard doubles per SD of z; no event effect at all
+  d <- .dg_cens(4000, 86, 0, 0, cz = 2)
+  r <- .dg_eval("inf_censoring", "cox", s, d)
   expect_identical(r$verdict, "fail")
-  expect_true(all(c("term", "smd") %in% names(r$plot_data)))
-  expect_identical(r$plot_data$term[which.max(abs(r$plot_data$smd))], "z")
-  expect_null(r$reported)
-  ok <- .dg_eval("inf_censoring", "cox", s, mk(4000, 82, FALSE))
-  expect_identical(ok$verdict, "ok")
+  expect_gt(r$value, log(1.5))
+  zr <- r$reported[r$reported$term == "z", ]
+  # per SD of the observed z (about 1)
+  want <- unname(stats::coef(survival::coxph(survival::Surv(time, 1L - status) ~ x + I(z / stats::sd(z)), data = d))[2L])
+  expect_equal(zr$log_hr, want, tolerance = 1e-6)
+  expect_equal(zr$log_hr, log(2), tolerance = 0.15)
+  expect_match(r$detail, "worst term z")
+  # a factor exposure is screened per coefficient
+  d$g <- ifelse(d$x == 1L, "b", "a")
+  rf <- .dg_eval("inf_censoring", "cox", .dg_cox(exposure = "g", exposure_ref = "a", terms = list(list(var = "z"))), d)
+  expect_identical(rf$reported$term, c("g: b", "z"))
+  expect_identical(rf$verdict, "fail")
   # rmst: the exposure is the only baseline term
-  set.seed(83)
+  set.seed(87)
   n <- 2000
   x <- rbinom(n, 1, 0.5)
   t <- rexp(n, 0.5)
-  c <- pmin(ifelse(x == 1L, runif(n, 0, 1), 10), 5)
-  d <- data.frame(time = pmin(t, c), status = as.integer(t <= c), x = x)
-  rr <- .dg_eval("inf_censoring", "rmst", .dg_rmst(tau = 0.9), d)
+  c <- pmin(rexp(n, ifelse(x == 1L, 0.6, 0.2)), 5)
+  dr <- data.frame(time = pmin(t, c), status = as.integer(t <= c), x = x)
+  rr <- .dg_eval("inf_censoring", "rmst", .dg_rmst(tau = 0.9), dr)
   expect_identical(rr$verdict, "fail")
-  expect_identical(rr$plot_data$term, "x: 1")
+  expect_identical(rr$reported$term, "x: 1")
+  expect_equal(rr$reported$log_hr, log(3), tolerance = 0.2)
+  ri <- .dg_eval("inf_censoring", "rmst", .dg_rmst(tau = 0.9, exposure_ref = "1"), dr)
+  expect_identical(ri$reported$term, "x: 0")
+  expect_match(ri$detail, "only baseline term")
 })
 
 # ---- layers and the plot cap --------------------------------------------------------------------

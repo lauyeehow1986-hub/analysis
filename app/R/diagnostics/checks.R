@@ -10,8 +10,8 @@
 #
 # The checks fit the analysis model ONCE on the analysis data (the complete cases of the analysis
 # columns, as the route does): a bootstrap layer is ignored and, under multiple imputation, the check
-# runs on the complete cases; `detail` says so. A Firth model is diagnosed through its unpenalised
-# fit (separation does not apply to it). plot_data is capped at 5000 points by a seeded sample that
+# runs on the complete cases; `detail` says so. A Firth model gets no model-fit check (separation,
+# influence, linearity): the unpenalised fit they would use is not the analysis model. plot_data is capped at 5000 points by a seeded sample that
 # keeps the flagged rows, also stated in `detail`.
 #
 # sr_diag_run() runs the applicable checks of an analysis that has run successfully, through the
@@ -34,11 +34,12 @@
       "max |scaled dfbeta| of the exposure",
       "refit with maxit = 100, epsilon = 1e-12: some |beta| grows by > 1 and some fitted p is within 1e-8 of 0 or 1 (1 = yes)",
       "number of clusters",
-      "max |SMD| of the baseline terms, censored before the median follow-up vs not",
+      paste("max |log HR| of a cause-specific Cox model for censoring (censored = event, events censored) on the",
+            "baseline terms: continuous per SD, factor / binary per coefficient (rmst: the exposure only)"),
       "max |linear - RCS(4) partial prediction| over the 5th-95th centile (outcome SD for lm, else the linear-predictor scale)",
       "robust (HC3) SE / model SE of the exposure"),
-    warn = c(log(1.25), 0.5, 0.5, NA_real_, 50, 0.1, 0.1, 1.2),
-    fail = c(log(1.5), 1, 1, 1, 30, 0.2, 0.25, 1.5),
+    warn = c(log(1.25), 0.5, 0.5, NA_real_, 50, log(1.25), 0.1, 1.2),
+    fail = c(log(1.5), 1, 1, 1, 30, log(1.5), 0.25, 1.5),
     cmp = c("ge", "gt", "ge", "ge", "lt", "gt", "gt", "gt"),
     sensitivity = c(
       "rmst: tau = the pre-specified tau, else tau_suggest (the 75th centile of the event times)",
@@ -88,16 +89,28 @@ sr_diag_checks <- function() {
   base <- .sr_diag_base(route)
   if (!(base %in% .sr_diag_routes)) return(character())
   model <- base %in% c("lm", "logistic", "modpois", "cox")
+  firth <- base == "logistic" && .sr_glm_firth(spec)
   out <- c(
+    character(),
     if (base == "cox") "ph",
-    if (model) "influence",
-    if (base == "logistic" && !.sr_glm_firth(spec)) "separation",
+    if (model && !firth) "influence",
+    if (base == "logistic" && !firth) "separation",
     if (model && length(.sr_spec_chr(spec[["cluster"]]))) "few_clusters",
     if (base %in% c("cox", "rmst")) "inf_censoring",
-    if (model && nrow(.sr_diag_lin_cands(spec))) "linearity",
+    if (model && !firth && nrow(.sr_diag_lin_cands(spec))) "linearity",
     if (base == "lm" && identical(.sr_lm_se(spec), "model")) "heteroscedasticity"
   )
   out
+}
+
+# Why a check does not apply to a route id and spec: one clause for the refusal messages.
+.sr_diag_why_not <- function(check, route, spec) {
+  if (check %in% c("separation", "influence", "linearity") && .sr_diag_base(route) == "logistic" &&
+      .sr_glm_firth(spec)) {
+    return(paste0("a Firth (penalised) model: the unpenalised maximum-likelihood fit the check would use ",
+                  "is not the analysis model"))
+  }
+  paste0("route ", .sr_sap_q(route))
 }
 
 #' The ids of the diagnostics that apply to an analysis (list(route, route_version, spec)), in
@@ -153,18 +166,19 @@ sr_diag_applicable <- function(analysis) {
 
 #' The linear and the RCS(4) partial prediction of one linear term `col` (label `var`) over a grid of
 #' 100 points from its 5th to its 95th centile, both centred, and their absolute difference divided
-#' by `scale`. NULL when the term has fewer than 10 distinct values, its knots cannot be placed or
-#' the spline refit fails. `dfit(d, rhs)` refits the model on d with the right-hand side rhs.
+#' by `scale`. NULL when the term has fewer than 10 distinct values (not a candidate); the reason as
+#' one string when the spline cannot be computed (its knots cannot be placed or the spline refit
+#' fails). `dfit(d, rhs)` refits the model on d with the right-hand side rhs.
 .sr_h_diag_lin <- function(d, fit, col, var, rhs, dfit, scale) {
   x <- d[[col]]
   if (length(unique(x)) < 10L) return(NULL)
-  k <- tryCatch(Hmisc::rcspline.eval(x, nk = 4, knots.only = TRUE), error = function(e) NULL)
-  if (length(k) != 4L) return(NULL)
+  k <- tryCatch(suppressWarnings(Hmisc::rcspline.eval(x, nk = 4, knots.only = TRUE)), error = function(e) NULL)
+  if (length(k) != 4L) return("four distinct knots cannot be placed")
   b <- Hmisc::rcspline.eval(x, knots = k, inclx = FALSE)
   d[[".lr1"]] <- as.numeric(b[, 1L])
   d[[".lr2"]] <- as.numeric(b[, 2L])
   f2 <- tryCatch(dfit(d, paste(rhs, "+ .lr1 + .lr2")), error = function(e) NULL)
-  if (is.null(f2)) return(NULL)
+  if (is.null(f2)) return("the spline refit failed")
   g <- seq(unname(stats::quantile(x, 0.05)), unname(stats::quantile(x, 0.95)), length.out = 100L)
   bg <- Hmisc::rcspline.eval(g, knots = k, inclx = FALSE)
   c1 <- stats::coef(fit)
@@ -177,14 +191,31 @@ sr_diag_applicable <- function(analysis) {
              stringsAsFactors = FALSE)
 }
 
-#' Standardised mean differences of each column of the named list `cols` between the rows where
-#' `grp` is TRUE and the others (pooled SD; 0 when both groups are constant).
-.sr_h_diag_smd <- function(cols, grp) {
-  vapply(cols, function(v) {
-    s <- sqrt((stats::var(v[grp]) + stats::var(v[!grp])) / 2)
-    m <- mean(v[grp]) - mean(v[!grp])
-    if (is.na(s) || s == 0) 0 else m / s
-  }, numeric(1))
+#' The design of the censoring model from the named list of baseline columns `cols`: a column with
+#' more than two distinct values enters per SD, one with two values as a 0/1 indicator of its larger
+#' value (a factor level, a binary term), a constant one not at all. list(x = data.frame of the
+#' columns .c1, .c2, ..., term = their labels, scale = how each enters).
+.sr_h_diag_cens_cols <- function(cols) {
+  x <- list()
+  term <- character()
+  scale <- character()
+  for (nm in names(cols)) {
+    v <- as.numeric(cols[[nm]])
+    u <- sort(unique(v))
+    if (length(u) < 2L) next
+    if (length(u) == 2L) {
+      z <- as.numeric(v == u[2L])
+      sc <- sprintf("%s vs %s", format(u[2L]), format(u[1L]))
+    } else {
+      s <- stats::sd(v)
+      z <- (v - mean(v)) / s
+      sc <- sprintf("per SD (%.4g)", s)
+    }
+    x[[paste0(".c", length(term) + 1L)]] <- z
+    term <- c(term, nm)
+    scale <- c(scale, sc)
+  }
+  list(x = as.data.frame(x), term = term, scale = scale)
 }
 
 # ---- the code builders --------------------------------------------------------------------------
@@ -241,9 +272,6 @@ sr_diag_applicable <- function(analysis) {
       paste0(".h_dfit <- function(d, rhs, control = stats::glm.control()) suppressWarnings(stats::glm(",
              "stats::as.formula(paste(\".y ~\", rhs)), data = d, family = ", family, ", control = control))")
     }
-    if (base == "logistic" && .sr_glm_firth(spec)) {
-      notes <- c(notes, "Firth model: diagnosed through its unpenalised maximum-likelihood fit")
-    }
   }
   fac <- identical(plan[[1L]]$type, "factor")
   ex_var <- .sr_lit(plan[[1L]]$var)
@@ -275,10 +303,12 @@ sr_diag_applicable <- function(analysis) {
 }
 
 # The closing lines: the verdict, the detail and the result list. `main` is code giving the main
-# sentence of the detail; `extra` named code strings for the extra fields.
-.sr_diag_close <- function(row, main, extra = character(), reported = "NULL") {
+# sentence(s) of the detail; `extra` named code strings for the extra fields; `floor` optional code
+# that may raise an ok verdict to warn (never on a reported statistic).
+.sr_diag_close <- function(row, main, extra = character(), reported = "NULL", floor = NULL) {
   c(sprintf(".verdict <- .h_diag_verdict(.value, %s, %s, %s)", .sr_lit(row$warn), .sr_lit(row$fail),
             .sr_lit(row$cmp)),
+    floor,
     sprintf(".detail <- paste(c(%s, .notes), collapse = \"; \")", main),
     paste0("list(value = .value, verdict = .verdict, detail = .detail, plot_data = .pd, reported = ", reported,
            if (length(extra)) paste0(", ", paste(names(extra), "=", extra, collapse = ", ")), ")"))
@@ -378,7 +408,7 @@ sr_diag_applicable <- function(analysis) {
     .sr_diag_close(row, ".main"))
 }
 
-# The baseline columns of the cox model for the SMD: each term's (first) numeric column, one 0/1
+# The baseline columns of the cox model for the censoring model: each term's (first) numeric column, one 0/1
 # indicator per non-reference level of a factor term.
 .sr_diag_baseline_code <- function(spec) {
   out <- ".bcol <- list()"
@@ -418,17 +448,25 @@ sr_diag_applicable <- function(analysis) {
     pre <- c(.sr_diag_model_prelude(spec, "cox", fit = FALSE)$code, .sr_diag_baseline_code(spec))
   }
   c(pre,
-    ".fu <- stats::median(des[[\".time\"]])",
-    ".ec <- des[[\".event\"]] == 0L & des[[\".time\"]] < .fu",
-    ".n1 <- sum(.ec)",
-    ".n0 <- sum(!.ec)",
-    ".small <- .n1 < 2L || .n0 < 2L",
-    ".smd <- if (.small) rep(NA_real_, length(.bcol)) else unname(.h_diag_smd(.bcol, .ec))",
-    ".value <- if (.small) 0 else if (any(is.finite(.smd))) max(abs(.smd[is.finite(.smd)])) else 0",
-    ".pd <- data.frame(term = names(.bcol), smd = .smd, stringsAsFactors = FALSE)",
-    paste0(".main <- if (.small) sprintf(\"too few rows to compare: %d censored before the median follow-up %.4g, %d not\", .n1, .fu, .n0) ",
-           "else sprintf(\"max |SMD| of the baseline terms = %.3f, %d row(s) censored before the median follow-up %.4g vs %d not\", .value, .n1, .fu, .n0)"),
-    .sr_diag_close(row, ".main"))
+    # a cause-specific Cox model for censoring: censored = 1, events censored
+    ".cc <- .h_diag_cens_cols(.bcol)",
+    ".nc <- sum(des[[\".event\"]] == 0L)",
+    ".nt <- length(.cc$term)",
+    ".ccd <- if (.nt == 0L) NULL else cbind(data.frame(.time = des[[\".time\"]], .cev = as.integer(des[[\".event\"]] == 0L)), .cc$x)",
+    ".cfit <- if (.nc == 0L || .nt == 0L) NULL else tryCatch(suppressWarnings(survival::coxph(stats::as.formula(paste(\"survival::Surv(.time, .cev) ~\", paste(names(.cc$x), collapse = \" + \"))), data = .ccd, ties = \"efron\")), error = function(e) NULL)",
+    ".cb <- if (is.null(.cfit)) rep(NA_real_, .nt) else unname(stats::coef(.cfit)[names(.cc$x)])",
+    ".cse <- if (is.null(.cfit)) rep(NA_real_, .nt) else sqrt(unname(diag(as.matrix(stats::vcov(.cfit))))[match(names(.cc$x), names(stats::coef(.cfit)))])",
+    ".fit_ok <- any(is.finite(.cb))",
+    ".value <- if (.nc == 0L || .nt == 0L) 0 else if (.fit_ok) max(abs(.cb[is.finite(.cb)])) else NA_real_",
+    ".cw <- if (.fit_ok) .cc$term[is.finite(.cb)][which.max(abs(.cb[is.finite(.cb)]))] else NA_character_",
+    ".crep <- data.frame(term = .cc$term, scale = .cc$scale, log_hr = .cb, se = .cse, hr = exp(.cb), stringsAsFactors = FALSE)",
+    ".pd <- data.frame(term = .cc$term, log_hr = .cb, lower = .cb - 1.959964 * .cse, upper = .cb + 1.959964 * .cse, stringsAsFactors = FALSE)",
+    paste0(".main <- c(if (.nc == 0L) sprintf(\"no censored row among the %d analysed: nothing to screen\", nrow(des)) ",
+           "else if (.nt == 0L) \"no baseline term varies: nothing to screen\" ",
+           "else if (!.fit_ok) sprintf(\"the censoring model could not be fitted (%d censored row(s))\", .nc) ",
+           "else sprintf(\"max |log HR| of censoring = %.3f (HR %.3f), worst term %s; cause-specific Cox model for censoring (censored = event, events censored) on %d baseline term(s) (continuous per SD), %d censored row(s)\", .value, exp(.value), .cw, .nt, .nc), ",
+           "\"this screens covariate-dependent censoring only: censoring that is informative given the covariates cannot be tested from the data\")"),
+    .sr_diag_close(row, ".main", reported = ".crep"))
 }
 
 .sr_diag_code_linearity <- function(spec, base, row) {
@@ -441,17 +479,25 @@ sr_diag_applicable <- function(analysis) {
     sprintf(".lvr <- %s", .sr_lit(cand$var)),
     sprintf(".lsc <- %s", scale),
     ".lin <- lapply(seq_along(.lid), function(j) .h_diag_lin(des, fit, .lid[[j]], .lvr[[j]], .rhs, .h_dfit, .lsc))",
-    ".lin <- .lin[!vapply(.lin, is.null, logical(1))]",
-    ".ldv <- vapply(.lin, function(z) if (any(is.finite(z$dev))) max(z$dev[is.finite(z$dev)]) else NA_real_, numeric(1))",
-    ".none <- length(.lin) == 0L",
-    sprintf(".value <- if (.none) 0 else %s", .sr_diag_max(".ldv")),
-    ".lw <- if (.none || all(is.na(.ldv))) NA_character_ else .lin[[which.max(.ldv)]]$var[1L]",
-    ".pd <- if (.none) data.frame(var = character(), x = numeric(), linear = numeric(), rcs = numeric()) else do.call(rbind, .lin)[c(\"var\", \"x\", \"linear\", \"rcs\")]",
+    # a candidate is a term with >= 10 distinct values; a candidate whose spline (or its deviation)
+    # cannot be computed is skipped, named in the detail and makes the verdict at least warn
+    ".lcd <- !vapply(.lin, is.null, logical(1))",
+    ".ldv <- vapply(.lin, function(z) if (is.data.frame(z) && any(is.finite(z$dev))) max(z$dev[is.finite(z$dev)]) else NA_real_, numeric(1))",
+    ".lok <- .lcd & !is.na(.ldv)",
+    ".lsk <- .lvr[.lcd & is.na(.ldv)]",
+    ".none <- !any(.lcd)",
+    ".value <- if (.none) 0 else if (any(.lok)) max(.ldv[.lok]) else NA_real_",
+    ".lw <- if (any(.lok)) .lvr[.lok][which.max(.ldv[.lok])] else NA_character_",
+    ".pd <- if (any(.lok)) do.call(rbind, .lin[.lok])[c(\"var\", \"x\", \"linear\", \"rcs\")] else data.frame(var = character(), x = numeric(), linear = numeric(), rcs = numeric())",
     "rownames(.pd) <- NULL",
-    sprintf(paste0(".main <- if (.none) \"no continuous term entered linearly (>= 10 distinct values) to scan\" ",
-                   "else sprintf(\"max |linear - RCS(4)| over the 5th-95th centile = %%.3f (%s), worst term %%s; %%d term(s) scanned\", .value, .lw, length(.lin))"),
+    sprintf(paste0(".main <- c(if (.none) \"no continuous term entered linearly (>= 10 distinct values) to scan\" ",
+                   "else if (any(.lok)) sprintf(\"max |linear - RCS(4)| over the 5th-95th centile = %%.3f (%s), worst term %%s; %%d term(s) scanned\", .value, .lw, sum(.lok)) ",
+                   "else \"no term could be scanned\", ",
+                   "if (length(.lsk)) paste0(\"the RCS(4) comparison could not be computed for \", paste(.lsk, collapse = \", \"), \" (at least warn)\"), ",
+                   "\"interaction terms are not scanned\")"),
             scale_txt),
-    .sr_diag_close(row, ".main", c(var = ".lw")))
+    .sr_diag_close(row, ".main", c(var = ".lw"),
+                   floor = "if (length(.lsk) && .verdict == \"ok\") .verdict <- \"warn\""))
 }
 
 .sr_diag_code_heteroscedasticity <- function(spec, row) {
@@ -481,8 +527,8 @@ sr_diag_compile <- function(check, analysis) {
   route <- sr_route_get(analysis$route, analysis$route_version)
   spec <- .sr_spec_from_state(analysis$spec)
   if (!(check %in% .sr_diag_applies(analysis$route, spec))) {
-    stop("diagnostic ", .sr_sap_q(check), " does not apply to this analysis (route ",
-         .sr_sap_q(analysis$route), ")", call. = FALSE)
+    stop("diagnostic ", .sr_sap_q(check), " does not apply to this analysis (",
+         .sr_diag_why_not(check, analysis$route, spec), ")", call. = FALSE)
   }
   v <- sr_spec_validate(spec, route)
   if (!v$ok) stop("the spec is not valid for route ", .sr_sap_q(analysis$route), ": ",
@@ -502,7 +548,7 @@ sr_diag_compile <- function(check, analysis) {
     .sr_inline(.sr_h_diag_cap, ".h_diag_cap"),
     if (check == "separation") .sr_inline(.sr_h_diag_label, ".h_diag_label"),
     if (check == "linearity") .sr_inline(.sr_h_diag_lin, ".h_diag_lin"),
-    if (check == "inf_censoring") .sr_inline(.sr_h_diag_smd, ".h_diag_smd"),
+    if (check == "inf_censoring") .sr_inline(.sr_h_diag_cens_cols, ".h_diag_cens_cols"),
     body), collapse = "\n")
   .sr_emit_check(code, "diagnostic")
   code
@@ -569,7 +615,8 @@ sr_diag_run <- function(project, analysis_id, checks = NULL, timeout = 3600) {
     if (length(unknown)) stop("unknown diagnostic ", .sr_sap_q(unknown[1L]), call. = FALSE)
     off <- setdiff(checks, ap)
     if (length(off)) {
-      stop("diagnostic ", .sr_sap_q(off[1L]), " does not apply to analysis ", .sr_sap_q(analysis_id), call. = FALSE)
+      stop("diagnostic ", .sr_sap_q(off[1L]), " does not apply to analysis ", .sr_sap_q(analysis_id), " (",
+           .sr_diag_why_not(off[1L], a$route, spec), ")", call. = FALSE)
     }
     checks <- unique(checks)
   }
