@@ -321,7 +321,7 @@
   list(
     time = list(type = "chr", required = TRUE),
     status = list(type = "chr", required = TRUE),
-    status_event = list(type = "num", required = FALSE),
+    status_event = list(type = "num|chr", required = FALSE),
     exposure = list(type = "chr", required = TRUE),
     tau = list(type = "num", required = TRUE),
     layers = list(type = "list", required = TRUE),

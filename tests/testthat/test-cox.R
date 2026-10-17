@@ -321,6 +321,69 @@ test_that("the note says adjusted only when the model has terms beyond the expos
   expect_match(strat, "stratified by ph.ecog", fixed = TRUE)
 })
 
+test_that("strata with no other terms say 'stratified by', keep the conditional label, and the estimand agrees", {
+  d <- survival::lung
+  s <- .cx_spec(strata = c("ph.ecog", "inst"))
+  out <- .cx_present(.cx_value(d, s), s)
+  note <- out$fragments$cox_note
+  expect_match(note, "stratified by ph.ecog, inst (no other model terms)", fixed = TRUE)
+  expect_false(grepl("unadjusted", note, fixed = TRUE))
+  expect_false(grepl("baseline hazard stratified", note, fixed = TRUE))
+  expect_true(all(out$effects$conditional[out$effects$measure == "HR"]))
+  est <- .cx_route("cox")$estimand(s)
+  expect_identical(est$summary, "hazard ratio stratified by ph.ecog, inst (no other model terms)")
+  # with other terms: adjusted, and the baseline hazard stratification is still named
+  s2 <- .cx_spec(strata = "ph.ecog", terms = list(list(var = "age")))
+  note2 <- .cx_present(.cx_value(d, s2), s2)$fragments$cox_note
+  expect_match(note2, "adjusted for the other terms of the model", fixed = TRUE)
+  expect_match(note2, "baseline hazard stratified by ph.ecog", fixed = TRUE)
+  expect_identical(.cx_route("cox")$estimand(s2)$summary, "adjusted hazard ratio")
+  expect_identical(.cx_route("cox")$estimand(.cx_spec())$summary, "hazard ratio")
+})
+
+test_that("a 1/2 status with no status_event is refused before the lock; with it set, it locks and runs", {
+  d <- survival::lung[c("time", "status", "sex", "age")]
+  d$id <- seq_len(nrow(d))
+  p <- .fx_ready_project(d, "t", c(id = "id", status = "outcome"))
+  .cx_route("cox")
+  s <- .cx_spec()
+  s$status_event <- NULL
+  expect_error(sr_sap_add(p, "m1", "cox", s, "t", label = "primary"),
+               "set event_value (status_event for a survival status)", fixed = TRUE)
+  expect_length(p$state$analyses, 0L)
+  p <- sr_sap_add(p, "m1", "cox", .cx_spec(), "t", label = "primary")
+  p <- sr_sap_lock(p)
+  p <- sr_run(p, "m1")
+  expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
+  fit <- survival::coxph(survival::Surv(time, status) ~ sex, data = survival::lung)
+  res <- sr_result(p, "m1")
+  expect_equal(res$effects$est[res$effects$term == "sex"], unname(exp(stats::coef(fit))), tolerance = 1e-8)
+})
+
+test_that("a character status works end to end with a character status_event", {
+  d <- survival::lung[c("time", "status", "sex", "age")]
+  d$id <- seq_len(nrow(d))
+  d$vital <- ifelse(d$status == 2L, "dead", "alive")
+  d$status <- NULL
+  r <- .cx_route("cox")
+  s <- .cx_spec(status = "vital", status_event = "dead")
+  expect_identical(r$spec_schema$status_event$type, "num|chr")
+  expect_true(sr_spec_validate(s, r)$ok)
+  expect_false(sr_spec_validate(.cx_spec(status_event = ""), r)$ok)
+  expect_match(sr_compile(r, s), "== \"dead\"", fixed = TRUE)
+  p <- .fx_ready_project(d, "t", c(id = "id", vital = "outcome"))
+  s0 <- s
+  s0$status_event <- NULL
+  expect_error(sr_sap_add(p, "m0", "cox", s0, "t"), "set event_value", fixed = TRUE)
+  p <- sr_sap_add(p, "m1", "cox", s, "t", label = "primary")
+  p <- sr_sap_lock(p)
+  p <- sr_run(p, "m1")
+  expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
+  fit <- survival::coxph(survival::Surv(time, status) ~ sex, data = survival::lung)
+  res <- sr_result(p, "m1")
+  expect_equal(res$effects$est[res$effects$term == "sex"], unname(exp(stats::coef(fit))), tolerance = 1e-8)
+})
+
 test_that("cox_describe compiles, runs and presents HR rows, the same numbers as cox", {
   d <- survival::lung
   sd <- .cx_spec(purpose = "describe")

@@ -626,6 +626,104 @@ test_that("a non-finite exposure estimate from modpois is reported without Firth
   expect_false(grepl("separation", conditionMessage(ef), ignore.case = TRUE))
 })
 
+test_that("Firth reports logistf's own convergence: TRUE on ordinary data, FALSE when maxit runs out", {
+  d <- .gl_df()
+  s <- .gl_spec(penalty = "firth", marginal = FALSE)
+  code <- sr_compile(.gl_route("logistic"), s)
+  expect_false(grepl(".conv <- TRUE", code, fixed = TRUE))
+  expect_true(.gl_value(d, s)$converged)
+  # the same emitted code with logistf held to one iteration (its own warning says maxit was exceeded)
+  starved <- gsub("logistf::logistf(", ".starved_logistf(", code, fixed = TRUE)
+  env <- new.env(parent = globalenv())
+  env$sr_data <- d
+  env$.starved_logistf <- function(...) logistf::logistf(..., control = logistf::logistf.control(maxit = 1))
+  val <- suppressWarnings(eval(parse(text = starved), envir = env))
+  expect_false(val$converged)
+  expect_true("glm_convergence" %in% names(.gl_present(val, s)$fragments))
+})
+
+test_that("a modpois fit that did not converge is refused, not reported with an absurd risk ratio", {
+  d <- .gl_df()[c("y", "a", "x1", "x2")]
+  d$a <- d$y                                                    # fully separated: the log-link fit runs off
+  s <- .gl_spec(se = "robust")
+  val <- .gl_value(d, s, "modpois")
+  expect_false(val$converged)
+  e <- tryCatch(.gl_present(val, s, "modpois"), error = function(e) conditionMessage(e))
+  expect_match(e, "log-link fit for the exposure \"a\" did not converge", fixed = TRUE)
+  expect_match(e, "risk ratio cannot be reported", fixed = TRUE)
+  # a converged fit presents as before; logistic keeps the convergence fragment rather than a refusal
+  ok <- .gl_value(.gl_df(), s, "modpois")
+  expect_true(ok$converged)
+  expect_true(is.list(.gl_present(ok, s, "modpois")))
+})
+
+test_that("sr_sap_add refuses a logistic spec the route cannot compile; a default bootstrap is accepted", {
+  d <- .gl_df()
+  d$id <- seq_len(nrow(d))
+  p <- .fx_ready_project(d[c("id", "y", "a", "x1", "x2", "cl")], "t", c(id = "id", y = "outcome"))
+  .gl_route("logistic")
+  lay <- function(...) {
+    s <- .gl_spec(marginal = FALSE)
+    m <- list(...)
+    for (nm in names(m)) s$layers[[nm]] <- m[[nm]]
+    s
+  }
+  refused <- list(
+    weights = list(lay(weights = "ipw"), "weights = ipw"),
+    matching = list(lay(matching = TRUE), "matching"),
+    bayesian = list(lay(framework = "bayesian"), "framework = bayesian"),
+    mi_no_m = list(lay(missing = "mi"), "spec$mi$m"),
+    mi_m1 = list(within(lay(missing = "mi"), mi <- list(m = 1L)), "at least 2"),
+    mi_clustered = list(within(lay(missing = "mi", clustered = TRUE), {
+      mi <- list(m = 5L)
+      se <- "cluster"
+      cluster <- "cl"
+    }), "clustered data"),
+    boot_b10 = list(within(lay(resampling = "bootstrap"), boot <- list(B = 10L)), "at least 20"))
+  for (nm in names(refused)) {
+    e <- tryCatch(sr_sap_add(p, nm, "logistic", refused[[nm]][[1]], "t", label = "primary"),
+                  error = function(e) conditionMessage(e))
+    expect_true(is.character(e), info = nm)
+    expect_match(e, paste0("analysis '", nm, "' cannot run on route 'logistic'"), fixed = TRUE, info = nm)
+    expect_match(e, refused[[nm]][[2]], fixed = TRUE, info = nm)
+  }
+  expect_length(p$state$analyses, 0L)
+  # a bootstrap layer with no spec$boot compiles with the default B (2000), so it is a valid analysis
+  p <- sr_sap_add(p, "boot_default", "logistic", lay(resampling = "bootstrap"), "t", label = "primary")
+  expect_true("boot_default" %in% names(p$state$analyses))
+})
+
+test_that("a text outcome with no event_value is refused before the lock; with it set, it locks and runs", {
+  d <- .gl_df()
+  d$id <- seq_len(nrow(d))
+  d$yn <- ifelse(d$y == 1L, "Yes", "No")
+  # status is "dead"/"alive" text (VARCHAR in the store); yn is "Yes"/"No", which the store types BOOLEAN
+  p <- .fx_ready_project(d[c("id", "status", "yn", "a", "x1", "x2")], "t", c(id = "id", status = "outcome"))
+  types <- vapply(sr_store_manifest(p, "t")$schema, function(s) s$type, "")
+  names(types) <- vapply(sr_store_manifest(p, "t")$schema, function(s) s$name, "")
+  expect_identical(unname(types[c("status", "yn")]), c("VARCHAR", "BOOLEAN"))
+  .gl_route("logistic")
+  s <- .gl_spec(outcome = "status", marginal = FALSE)
+  expect_error(sr_sap_add(p, "m1", "logistic", s, "t", label = "primary"),
+               "set event_value (status_event for a survival status)", fixed = TRUE)
+  expect_length(p$state$analyses, 0L)
+  s$event_value <- "dead"
+  p <- sr_sap_add(p, "m1", "logistic", s, "t", label = "primary")
+  # a logical outcome needs no event value: Yes is TRUE, the event
+  p <- sr_sap_add(p, "m2", "logistic", .gl_spec(outcome = "yn", marginal = FALSE), "t", label = "secondary")
+  p <- sr_sap_lock(p)
+  p <- sr_run(p, "m1")
+  p <- sr_run(p, "m2")
+  expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
+  expect_true(p$state$runs$m2$ok, info = p$state$runs$m2$error)
+  fit <- stats::glm(y ~ a + x1 + x2, data = d, family = stats::binomial())
+  for (id in c("m1", "m2")) {
+    res <- sr_result(p, id)
+    or <- res$effects[res$effects$measure == "OR" & res$effects$term == "a", ]
+    expect_equal(or$est, exp(unname(stats::coef(fit)["a"])), tolerance = 1e-8, info = id)
+  }
+})
+
 # ---- end to end -------------------------------------------------------------------------------
 
 test_that("logistic and modpois run through sr_sap_add, lock and sr_run; hostile names are data", {

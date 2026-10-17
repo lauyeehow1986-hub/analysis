@@ -11,12 +11,15 @@
 #' The three analysis purposes a route can serve.
 SR_PURPOSES <- c("describe", "predict", "explain-causal")
 
-# Field types a spec_schema may declare, and the predicate each one means.
+# Field types a spec_schema may declare, and the predicate each one means. "num|chr" is a value that
+# may be a number or a string (an event value compared with a status column of either type); a
+# string there is held to the "chr" rule (no NA, no blank).
 .sr_spec_types <- list(
   chr = is.character,
   num = is.numeric,
   lgl = is.logical,
-  list = is.list
+  list = is.list,
+  `num|chr` = function(x) is.numeric(x) || is.character(x)
 )
 
 .sr_routes <- new.env(parent = emptyenv())
@@ -235,7 +238,7 @@ sr_spec_validate <- function(spec, route) {
       add("field '", f, "' must be of type ", d[["type"]])
       next
     }
-    if (d[["type"]] == "chr" && (anyNA(x) || any(!nzchar(trimws(x))))) {
+    if (d[["type"]] %in% c("chr", "num|chr") && is.character(x) && (anyNA(x) || any(!nzchar(trimws(x))))) {
       add("field '", f, "'", if (isTRUE(d[["required"]])) " is required:" else "",
           " must not contain NA or blank values")
       next

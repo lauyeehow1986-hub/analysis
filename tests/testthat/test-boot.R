@@ -324,6 +324,22 @@ test_that("logistic: bootstrap of the log OR and of the marginal RD / log RR, th
   }
 })
 
+test_that("complete-case bootstrap: the marginal Methods fragment names the bootstrap interval, not the delta method", {
+  df <- .bt_df()
+  s <- list(purpose = "explain-causal", outcome = "yb", exposure = "x", terms = list(list(var = "z")),
+            layers = .bt_layers(), boot = list(B = 20, type = "percentile"), seed = 5L)
+  res <- .bt_present(.bt_value(df, s, "logistic"), s, "logistic")
+  expect_true(all(c("RD", "RR") %in% res$effects$measure))
+  f <- res$fragments$glm_marginal
+  expect_true(is.character(f) && length(f) == 1L)
+  expect_match(f, "bootstrap interval", fixed = TRUE)
+  expect_false(grepl("delta-method", f, fixed = TRUE))
+  sl <- .bt_lm_spec(marginal = TRUE, boot = list(B = 20, type = "percentile"))
+  fl <- .bt_present(.bt_value(df, sl, "lm"), sl, "lm")$fragments$lm_marginal
+  expect_match(fl, "bootstrap interval", fixed = TRUE)
+  expect_false(grepl("delta-method", fl, fixed = TRUE))
+})
+
 test_that("logistic with the Firth penalty and modified Poisson take the bootstrap", {
   df <- .bt_df()
   s <- list(purpose = "explain-causal", outcome = "yb", exposure = "x", terms = list(list(var = "z")),

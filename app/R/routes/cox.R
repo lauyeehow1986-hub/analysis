@@ -86,13 +86,19 @@
 
 .sr_cox_estimand <- function(spec) {
   .sr_cox_check(spec)
-  adjusted <- length(spec[["terms"]]) > 0L || length(.sr_spec_chr(spec[["strata"]])) > 0L
+  st <- .sr_spec_chr(spec[["strata"]])
   mi <- identical(spec[["layers"]][["missing"]], "mi")
+  summary <- if (length(spec[["terms"]]) > 0L) {
+    "adjusted hazard ratio"
+  } else if (length(st)) {
+    paste0("hazard ratio stratified by ", paste(st, collapse = ", "), " (no other model terms)")
+  } else {
+    "hazard ratio"
+  }
   sr_estimand(population = if (mi) "all analysed (MI)" else "complete cases",
               variables = c(spec[["exposure"]], spec[["time"]], spec[["status"]]),
               intercurrent = "other reasons for censoring are treated as non-informative censoring",
-              summary = if (adjusted) "adjusted hazard ratio" else "hazard ratio",
-              level = "conditional")
+              summary = summary, level = "conditional")
 }
 
 # ---- Kaplan-Meier -------------------------------------------------------------------------------
@@ -313,13 +319,22 @@
   tables <- list(coefficients = coefs, model_fit = fit_tab)
 
   n_other <- if (nrow(tab)) sum(!prim) else 0L
-  adj_text <- if (n_other > 0L) "adjusted for the other terms of the model" else "unadjusted (no model terms besides the exposure)"
+  st_text <- paste(strata, collapse = ", ")
+  # strata with no other term: the stratification is the whole adjustment, said once
+  adj_text <- if (n_other > 0L) {
+    "adjusted for the other terms of the model"
+  } else if (length(strata)) {
+    paste0("stratified by ", st_text, " (no other model terms)")
+  } else {
+    "unadjusted (no model terms besides the exposure)"
+  }
+  st_suffix <- if (length(strata) && n_other > 0L) paste0("; baseline hazard stratified by ", st_text) else ""
   frag <- list(cox_note = sprintf(
     paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
            "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
     spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
     as.integer(round(value$n_total - value$n)),
-    if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
+    st_suffix,
     .sr_cox_se_text(value)))
   frag$exclude_rows <- .sr_exclude_fragment(spec)
   if (mi) {
@@ -337,7 +352,7 @@
              "%d row(s) analysed (%d events), %d excluded for a missing time or status%s; %s; pooled by Rubin's rules on the log scale."),
       spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$mi$m)), as.integer(round(value$n)),
       as.integer(round(value$events)), as.integer(round(value$n_total - value$n)),
-      if (length(strata)) paste0("; baseline hazard stratified by ", paste(strata, collapse = ", ")) else "",
+      st_suffix,
       .sr_cox_se_text(value))
   }
   if (length(value$aliased)) {
@@ -373,7 +388,7 @@
   list(
     time = list(type = "chr", required = TRUE),
     status = list(type = "chr", required = TRUE),
-    status_event = list(type = "num", required = FALSE),
+    status_event = list(type = "num|chr", required = FALSE),
     exposure = list(type = "chr", required = TRUE),
     terms = list(type = "list", required = FALSE),
     interactions = list(type = "list", required = FALSE),

@@ -176,7 +176,9 @@
         paste0("tab <- data.frame(term = names(.cf), est = unname(.cf), se = sqrt(diag(fit$var)), ",
                "lo = unname(fit$ci.lower), hi = unname(fit$ci.upper), p = unname(fit$prob), ",
                "stringsAsFactors = FALSE)"),
-        ".conv <- TRUE",
+        # logistf reports no flag: it warns when the full model used every Newton-Raphson iteration
+        # (iter >= control$maxit), so that is the non-convergence it means
+        ".conv <- unname(fit$iter[[\"full\"]]) < fit$control$maxit",
         ".sep <- FALSE",
         ".rab <- FALSE",
         ".aliased <- character()")
@@ -312,10 +314,23 @@
   stop(msg, call. = FALSE)
 }
 
+# Stops when a modified Poisson (log-link) fit did not converge: the IRLS iterations of a log-link
+# model on a binary outcome can run off (fully separated data give a log RR near 27 with a finite
+# interval), so the primary result is refused rather than reported. A plain check of the fit's own
+# converged flag, not a diagnostic test.
+.sr_glm_conv_stop <- function(value, exposure) {
+  if (identical(value$family, "poisson") && isFALSE(value$converged)) {
+    stop(sprintf("The log-link fit for the exposure \"%s\" did not converge, so the risk ratio cannot be reported.",
+                 exposure), call. = FALSE)
+  }
+  invisible(NULL)
+}
+
 .sr_glm_present <- function(value, spec) {
   tc <- sr_terms_code(spec)
   tab <- value$coef
   exposure <- spec[["exposure"]]
+  .sr_glm_conv_stop(value, exposure)
   ia <- spec[["interactions"]]
   has_ia <- any(vapply(ia, function(x) exposure %in% x, logical(1)))
   odds <- identical(value$family, "binomial")

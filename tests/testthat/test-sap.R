@@ -136,6 +136,68 @@ test_that("sr_sap_add refuses what cannot be a pre-specified analysis, with the 
   expect_length(p$state$analyses, 0L)                          # nothing was written by any refusal
 })
 
+test_that("sr_sap_add refuses an id that does not match SR_ANALYSIS_ID_RE", {
+  .sap_route()
+  p <- .sap_project()
+  expect_error(sr_sap_add(p, "Bad Id With Spaces!", "stub_sap", .sap_spec(), "t"), "must match", fixed = TRUE)
+  expect_error(sr_sap_add(p, "1a", "stub_sap", .sap_spec(), "t"), "must match", fixed = TRUE)
+  expect_error(sr_sap_add(p, strrep("a", 41L), "stub_sap", .sap_spec(), "t"), "must match", fixed = TRUE)
+  expect_length(p$state$analyses, 0L)
+  p <- sr_sap_add(p, strrep("a", 40L), "stub_sap", .sap_spec(), "t")
+  expect_length(p$state$analyses, 1L)
+})
+
+test_that("sr_sap_add refuses a spec the route cannot compile, naming the analysis and the reason", {
+  est <- sr_estimand(population = "adults", variables = "died", intercurrent = "none",
+                     summary = "stub", level = "marginal")
+  r <- sr_route(id = "stub_nocompile", version = 1L, family = "stub", purpose = "explain-causal", estimand = est,
+                spec_schema = list(outcome = list(type = "chr", required = TRUE)),
+                compile = function(spec) stop("stub_nocompile@1 does not implement the layer(s): weights = ipw"),
+                present = function(result, spec) list(text = "stub"))
+  sr_route_register(r)
+  withr::defer(rm(list = .sr_route_key("stub_nocompile", 1L), envir = .sr_routes))
+  p <- .sap_project()
+  s <- .sap_spec()
+  s$layers$weights <- "ipw"
+  e <- tryCatch(sr_sap_add(p, "w1", "stub_nocompile", s, "t"), error = function(e) conditionMessage(e))
+  expect_match(e, "analysis 'w1' cannot run on route 'stub_nocompile'", fixed = TRUE)
+  expect_match(e, "weights = ipw", fixed = TRUE)
+  expect_length(p$state$analyses, 0L)
+})
+
+test_that("a binary outcome with no event value must be 0/1 or logical: refused at add, blocked at the lock", {
+  est <- sr_estimand(population = "adults", variables = "died", intercurrent = "none",
+                     summary = "stub", level = "marginal")
+  r <- sr_route(id = "stub_bin", version = 1L, family = "stub", purpose = "explain-causal", estimand = est,
+                spec_schema = list(outcome = list(type = "chr", required = TRUE),
+                                   event_value = list(type = "chr", required = FALSE)),
+                compile = function(spec) "1", present = function(result, spec) list(text = "stub"))
+  sr_route_register(r)
+  withr::defer(rm(list = .sr_route_key("stub_bin", 1L), envir = .sr_routes))
+  p <- .sap_project()
+  # died is 0/1 (fine); sex is "M"/"F" (needs an event value); ecog is 0-3 (needs one too)
+  p <- sr_sap_add(p, "b1", "stub_bin", .sap_spec(), "t", label = "primary")
+  e <- tryCatch(sr_sap_add(p, "b2", "stub_bin", .sap_spec(outcome = "sex"), "t"), error = function(e) conditionMessage(e))
+  expect_match(e, "b2", fixed = TRUE)
+  expect_match(e, "set event_value (status_event for a survival status)", fixed = TRUE)
+  expect_false(grepl("\"M\"|'M'", e))                                            # no data value in the message
+  expect_error(sr_sap_add(p, "b3", "stub_bin", .sap_spec(outcome = "ecog"), "t"), "set event_value", fixed = TRUE)
+  p <- sr_sap_add(p, "b2", "stub_bin", .sap_spec(outcome = "sex", event_value = "M"), "t")
+  expect_setequal(names(p$state$analyses), c("b1", "b2"))
+  ck <- sr_sap_check(p)
+  expect_false("event value" %in% ck$item)
+  # an analysis that reached the SAP without the check (data re-imported after the add) blocks the lock
+  p <- sr_project_append(p, "sap.analysis_set", list(
+    id = "b4", route = "stub_bin", route_version = 1L, spec = .sap_spec(outcome = "sex"), table = "t",
+    label = "secondary", family = NA_character_, parent = NA_character_, addresses = character()))
+  ck <- sr_sap_check(p)
+  row <- ck[ck$item == "event value", , drop = FALSE]
+  expect_identical(nrow(row), 1L)
+  expect_identical(row$status, "block")
+  expect_match(row$detail, "b4", fixed = TRUE)
+  expect_error(sr_sap_lock(p), "set event_value", fixed = TRUE)
+})
+
 test_that("an unresolved choice in the layer stack is refused too", {
   .sap_route()
   p <- .sap_project()

@@ -141,6 +141,58 @@ sr_reducer_register("sap.locked", function(state, event) {
   invisible(x)
 }
 
+# Refuses a spec the route cannot compile (R19): an analysis that can never run is refused when it is
+# added, not at its first run. Shared by sr_sap_add and sr_analysis_add.
+.sr_sap_compiles <- function(r, spec, id, route) {
+  bad <- tryCatch({
+    sr_compile(r, spec)
+    NULL
+  }, error = function(e) conditionMessage(e))
+  if (!is.null(bad)) {
+    stop("analysis ", .sr_sap_q(id), " cannot run on route ", .sr_sap_q(route), ": ", bad, call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+# The problem with a binary outcome or a survival status that has no event value, as a message, or NULL.
+# A route whose schema has event_value codes spec$outcome as 0/1, one with status_event codes
+# spec$status; with the value unset the emitted code (.h_bin) accepts only a logical column or one whose
+# values are all 0/1, and refuses anything else at run time. This finds that before the lock, from the
+# stored column type (BOOLEAN is fine, a numeric type is fine when no non-missing value is outside
+# {0, 1}, any other type is not) and one LIMIT 1 query; no value is put in the message. NULL as well
+# when the column or the table cannot be read (readiness and the run report those).
+.sr_sap_event_problem <- function(project, table, r, spec, id) {
+  sch <- r$spec_schema
+  field <- if (!is.null(sch[["event_value"]])) "outcome" else if (!is.null(sch[["status_event"]])) "status" else NULL
+  if (is.null(field)) return(NULL)
+  value <- if (identical(field, "outcome")) "event_value" else "status_event"
+  col <- spec[[field]]
+  if (!is.null(spec[[value]]) || !.sr_is_text1(col)) return(NULL)
+  ok <- tryCatch({
+    m <- sr_store_manifest(project, table)
+    types <- vapply(m$schema, function(s) as.character(s$type), "")
+    names(types) <- vapply(m$schema, function(s) as.character(s$name), "")
+    type <- toupper(types[[col]] %||% NA_character_)
+    if (is.na(type)) {
+      TRUE
+    } else if (identical(type, "BOOLEAN")) {
+      TRUE
+    } else if (.sr_prof_is_numeric(type)) {
+      view <- sr_store_view(project, table)
+      con <- sr_duck(project)
+      q <- DBI::dbQuoteIdentifier(con, col)
+      hit <- sr_duck_query(con, sprintf("SELECT 1 AS hit FROM %s WHERE %s IS NOT NULL AND %s NOT IN (0, 1) LIMIT 1",
+                                        DBI::dbQuoteIdentifier(con, view), q, q))
+      nrow(hit) == 0L
+    } else {
+      FALSE
+    }
+  }, error = function(e) TRUE)
+  if (ok) return(NULL)
+  sprintf("%s: column %s (spec$%s) is not 0/1 or logical: set event_value (status_event for a survival status)",
+          id, .sr_sap_q(col), field)
+}
+
 # The pre-specified analyses of a project, keyed by id.
 .sr_sap_analyses <- function(project) {
   Filter(function(a) isTRUE(a$prespecified), project$state$analyses %||% list())
@@ -160,9 +212,11 @@ sr_reducer_register("sap.locked", function(state, event) {
 
 # ---- drafting --------------------------------------------------------------------------------------
 
-#' Add (or replace, by id) a pre-specified analysis. Refused when the SAP is locked, the route is
-#' unknown, the spec does not validate for the route, the layer stack is refused or has an unresolved
-#' choice or requirement, the table is not in the store, or `parent` is not a pre-specified analysis.
+#' Add (or replace, by id) a pre-specified analysis. Refused when the SAP is locked, the id does not
+#' match SR_ANALYSIS_ID_RE, the route is unknown, the spec does not validate for the route, the layer
+#' stack is refused or has an unresolved choice or requirement, the route cannot compile the spec (an
+#' analysis that can never run), a binary outcome or survival status with no event value is not 0/1
+#' or logical in the data, the table is not in the store, or `parent` is not a pre-specified analysis.
 #' @param label primary, secondary or sensitivity; only the first two can be in a multiplicity family.
 #' @param family the family the analysis is meant to join (sr_sap_family makes the family itself).
 #' @param parent the analysis this one is a sensitivity analysis of.
@@ -173,6 +227,9 @@ sr_sap_add <- function(project, id, route, spec, table, label = c("primary", "se
                        family = NA, parent = NA, addresses = character(), version = NULL) {
   .sr_sap_open(project, "the SAP is locked; use sr_analysis_add")
   .sr_sap_id(id, "id")
+  if (!grepl(SR_ANALYSIS_ID_RE, id)) {
+    stop("id ", .sr_sap_q(id), " must match ", SR_ANALYSIS_ID_RE, call. = FALSE)
+  }
   label <- match.arg(label)
   .sr_sap_id(route, "route")
   if (!is.list(spec)) stop("spec must be a list", call. = FALSE)
@@ -192,6 +249,9 @@ sr_sap_add <- function(project, id, route, spec, table, label = c("primary", "se
          paste(c(cc$refused, cc$unmet, names(cc$choices)), collapse = ", "),
          " (", paste(cc$notes, collapse = "; "), ")", call. = FALSE)
   }
+  .sr_sap_compiles(r, spec, id, route)
+  ev <- .sr_sap_event_problem(project, table, r, spec, id)
+  if (!is.null(ev)) stop("analysis ", ev, call. = FALSE)
   family <- if (length(family) == 1L && is.na(family)) NA_character_ else {
     .sr_sap_id(family, "family")
   }
@@ -340,7 +400,9 @@ sr_sap_hash <- function(project) {
 #' block: no primary analysis; a block row of sr_readiness for an analysed table (detail prefixed with
 #' the table); a finding kept for a sensitivity analysis that no sensitivity analysis addresses; an
 #' analysis that does not fit in memory (or whose columns cannot be sized); a rule or family that no
-#' longer fits the analyses. warn: a readiness warn row; an analysis naming a family it is not in.
+#' longer fits the analyses; a binary outcome or survival status with no event value that is not 0/1 or
+#' logical in the data (item "event value"). warn: a readiness warn row; an analysis naming a family it
+#' is not in.
 sr_sap_check <- function(project) {
   an <- .sr_sap_analyses(project)
   if (length(an)) an <- an[order(names(an), method = "radix")]
@@ -387,6 +449,14 @@ sr_sap_check <- function(project) {
     }
   }
   if (!big) add("fits in memory", "ok", "every analysis fits in memory")
+
+  # sr_sap_add refuses this too; the data can change after the add (a re-import), so check it again.
+  for (id in names(an)) {
+    a <- an[[id]]
+    r <- tryCatch(sr_route_get(a$route, a$route_version), error = function(e) NULL)
+    ev <- if (is.null(r)) NULL else .sr_sap_event_problem(project, a$table, r, a$spec, id)
+    if (!is.null(ev)) add("event value", "block", ev)
+  }
 
   for (r in project$state$sap$rules %||% list()) {
     alt <- an[[r$alternative]]

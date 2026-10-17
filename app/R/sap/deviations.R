@@ -136,13 +136,7 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
          paste(c(cc$refused, cc$unmet, names(cc$choices)), collapse = ", "),
          " (", paste(cc$notes, collapse = "; "), ")", call. = FALSE)
   }
-  bad <- tryCatch({
-    sr_compile(r, spec)
-    NULL
-  }, error = function(e) conditionMessage(e))
-  if (!is.null(bad)) {
-    stop("the analysis cannot run on route ", .sr_sap_q(route), ": ", bad, call. = FALSE)
-  }
+  .sr_sap_compiles(r, spec, id, route)
   sr_project_append(project, "analysis.added", list(
     id = id, route = route, route_version = as.integer(r$version), table = table, label = label, spec = spec,
     parent = parent, trigger = trigger, reason = reason))

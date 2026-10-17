@@ -319,3 +319,37 @@ test_that("a read-only project cannot run and sr_result needs a run", {
   p$readonly <- TRUE
   expect_error(sr_run(p, "a1"), "read-only")
 })
+
+test_that("the error scrub replaces the project, temporary and home folders, in both slash styles", {
+  home <- path.expand("~")
+  tmp <- normalizePath(tempdir(), winslash = "/", mustWork = FALSE)
+  proj <- file.path(tmp, "some_project")
+  under_home <- paste0(home, "/notes/file.txt")
+  msg <- paste("cannot open", file.path(proj, "data", "x.parquet"), "|",
+               gsub("/", "\\", file.path(tmp, "spill.tmp"), fixed = TRUE), "|",
+               file.path(tmp, "spill2.tmp"), "|", under_home, "|", gsub("/", "\\", under_home, fixed = TRUE))
+  out <- .sr_run_scrub(msg, proj)
+  expect_match(out, "<project>/data/x.parquet", fixed = TRUE)
+  bs <- intToUtf8(92L)                                                  # one backslash
+  expect_match(out, paste0("<tempdir>", bs, "spill.tmp"), fixed = TRUE)
+  expect_match(out, "<tempdir>/spill2.tmp", fixed = TRUE)
+  expect_match(out, "<home>/notes/file.txt", fixed = TRUE)
+  expect_match(out, paste0("<home>", bs, "notes", bs, "file.txt"), fixed = TRUE)
+  for (p in unique(c(tmp, home, gsub("/", "\\", tmp, fixed = TRUE), gsub("/", "\\", home, fixed = TRUE)))) {
+    expect_false(grepl(p, out, fixed = TRUE), info = "a path survived the scrub")
+  }
+  prof <- Sys.getenv("USERPROFILE")
+  if (nzchar(prof)) {
+    m2 <- paste0("at ", prof, bs, "AppData", bs, "x and ", gsub(bs, "/", prof, fixed = TRUE), "/y")
+    o2 <- .sr_run_scrub(m2, proj)
+    expect_identical(o2, paste0("at <home>", bs, "AppData", bs, "x and <home>/y"))
+  }
+  if (identical(.Platform$OS.type, "windows")) {
+    o3 <- .sr_run_scrub(paste0("in ", toupper(tmp), "/z"), proj)
+    expect_identical(o3, "in <tempdir>/z")
+  }
+  # regular-expression characters in a path are matched literally
+  odd <- file.path(tmp, "a+b (1)[x]")
+  expect_identical(.sr_run_scrub(paste0(odd, "/f"), odd), "<project>/f")
+  expect_identical(.sr_run_scrub("no paths here", proj), "no paths here")
+})

@@ -268,7 +268,28 @@ test_that("auxiliary columns are predictors of the imputation model only", {
   expect_match(res$fragments$mi_note, "auxiliary", fixed = TRUE)
 })
 
-# ---- complete data (ruling R25d) ------------------------------------------------------------------
+test_that("a character auxiliary column with more than SR_MI_AUX_MAX_LEVELS levels is refused at run time", {
+  expect_identical(SR_MI_AUX_MAX_LEVELS, 50L)
+  d <- .im_nhanes()
+  s <- .im_lm_spec(terms = NULL, mi = list(m = 2, aux = "code"))
+  code <- sr_compile(.im_route("lm"), s)
+  expect_match(code, ".h_mi_col(.mi_base[[\"code\"]], FALSE, \"code\", 50L)", fixed = TRUE)
+  wide <- d[rep(seq_len(nrow(d)), 3L), ]
+  wide$id <- seq_len(nrow(wide))
+  wide$code <- sprintf("c%02d", seq_len(nrow(wide)))                  # 75 distinct values
+  e <- tryCatch(.im_value(wide, s, "lm"), error = function(e) conditionMessage(e))
+  expect_match(e, "auxiliary column \"code\" has 75 distinct values (more than 50)", fixed = TRUE)
+  expect_match(e, "drop it from the imputation model", fixed = TRUE)
+  # a few levels run; exactly 50 levels pass the helper; a stratum is never capped
+  ok <- wide
+  ok$code <- rep(c("a", "b", "c"), length.out = nrow(ok))
+  expect_true(is.list(.im_value(ok, s, "lm")))
+  expect_identical(nlevels(.sr_h_mi_col(sprintf("s%03d", 1:50), FALSE, "f", 50L)), 50L)
+  expect_identical(nlevels(.sr_h_mi_col(sprintf("s%03d", 1:120), TRUE)), 120L)
+  expect_error(.sr_h_mi_col(factor(sprintf("s%03d", 1:51)), FALSE, "f", 50L), "\"f\" has 51 distinct values")
+})
+
+# ---- complete data (ruling R25d)------------------------------------------------------------------
 
 test_that("data without missing values still run under MI and pool to the complete-case estimates", {
   s <- list(purpose = "explain-causal", outcome = "mpg", exposure = "am", terms = list(list(var = "wt")),

@@ -120,12 +120,32 @@ sr_extract <- function(project, table, cols) {
 
 # ---- the run ---------------------------------------------------------------------------------------
 
-# The message with the project folder (either slash style) replaced, so no event holds a user path.
+# `s` with every regular-expression metacharacter escaped, for a literal match.
+.sr_re_literal <- function(s) gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", s)
+
+# The message with user paths replaced, so no event holds one: the project folder ("<project>"), the
+# R temporary directory ("<tempdir>") and the home folder (path.expand("~") and %USERPROFILE%,
+# "<home>"). Each path is matched in both slash styles, and without regard to case on Windows. The
+# longest path is replaced first, so a project or temporary directory under the home folder keeps its
+# own placeholder. Paths of three characters or fewer (a drive root, "/") are never replaced.
 .sr_run_scrub <- function(msg, dir) {
   msg <- paste(msg, collapse = " ")
-  for (d in unique(c(dir, gsub("/", "\\", dir, fixed = TRUE)))) {
-    if (nzchar(d)) msg <- gsub(d, "<project>", msg, fixed = TRUE)
-  }
+  norm <- function(p) tryCatch(normalizePath(p, winslash = "/", mustWork = FALSE), error = function(e) p)
+  home <- c(path.expand("~"), Sys.getenv("USERPROFILE"))
+  tmp <- tempdir()
+  paths <- c(dir, norm(dir), tmp, norm(tmp), home, norm(home[nzchar(home)]))
+  holder <- c(rep("<project>", 2L), rep("<tempdir>", 2L), rep("<home>", length(paths) - 4L))
+  keep <- !is.na(paths) & nchar(paths) > 3L
+  paths <- paths[keep]
+  holder <- holder[keep]
+  both <- c(gsub("\\", "/", paths, fixed = TRUE), gsub("/", "\\", paths, fixed = TRUE))
+  holder <- c(holder, holder)
+  dup <- duplicated(tolower(both))
+  both <- both[!dup]
+  holder <- holder[!dup]
+  ord <- order(-nchar(both), method = "radix")
+  icase <- identical(.Platform$OS.type, "windows")
+  for (i in ord) msg <- gsub(.sr_re_literal(both[i]), holder[i], msg, ignore.case = icase)
   if (nchar(msg) > 2000L) msg <- paste0(substr(msg, 1L, 2000L), "...")
   msg
 }

@@ -29,6 +29,11 @@
 # Refused at compile, naming the combination (ruling R25a): MI with clustered data
 # (layers$clustered = TRUE) and MI with the Firth penalty.
 
+# The most distinct non-missing levels a character or factor auxiliary column may have. mice imputes
+# such a column by polytomous regression, one dummy per level; past this the imputation model is
+# slow and unstable, so the run refuses the column and asks for it to be dropped from spec$mi$aux.
+SR_MI_AUX_MAX_LEVELS <- 50L
+
 # ---- the layer and its validation ---------------------------------------------------------------
 
 # Whether the spec asks for multiple imputation.
@@ -96,10 +101,18 @@
 # ---- helpers inlined into the emitted code ------------------------------------------------------
 
 #' A column of the imputation frame that is not a model term: numeric (or logical) as numeric,
-#' anything else (and everything when `cat` is TRUE) as a factor of its observed values.
-.sr_h_mi_col <- function(x, cat = FALSE) {
+#' anything else (and everything when `cat` is TRUE) as a factor of its observed values. A factor
+#' with more than `max_levels` levels is refused, naming the column `nm` (auxiliary columns pass
+#' SR_MI_AUX_MAX_LEVELS as a literal: the helper is inlined, so it cannot read the constant).
+.sr_h_mi_col <- function(x, cat = FALSE, nm = NULL, max_levels = Inf) {
   if (!cat && (is.numeric(x) || is.logical(x))) return(as.numeric(x))
-  factor(as.character(x), levels = as.character(sort(unique(x[!is.na(x)]))))
+  lev <- as.character(sort(unique(x[!is.na(x)])))
+  if (length(lev) > max_levels) {
+    stop(sprintf(paste0("the auxiliary column \"%s\" has %d distinct values (more than %d): drop it from ",
+                        "the imputation model (spec$mi$aux)"), nm, length(lev), as.integer(max_levels)),
+         call. = FALSE)
+  }
+  factor(as.character(x), levels = lev)
 }
 
 #' Impute `d` m times, fit every completed dataset and pool. Inlined as .h_mi_run.
@@ -292,7 +305,8 @@ sr_mi_code <- function(spec, fit_code, kind = c("continuous", "binary", "surv"),
   }
   for (i in seq_along(aux)) {
     nm <- paste0(".a", i)
-    frame <- c(frame, sprintf(".mi_d[[%s]] <- .h_mi_col(.mi_base[[%s]])", .sr_lit(nm), .sr_lit(aux[i])))
+    frame <- c(frame, sprintf(".mi_d[[%s]] <- .h_mi_col(.mi_base[[%s]], FALSE, %s, %dL)", .sr_lit(nm),
+                              .sr_lit(aux[i]), .sr_lit(aux[i]), SR_MI_AUX_MAX_LEVELS))
     col <- c(col, nm)
     src <- c(src, aux[i])
     role <- c(role, "aux")
