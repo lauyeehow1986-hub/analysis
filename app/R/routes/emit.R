@@ -136,7 +136,7 @@
       root <- .sr_emit_root(x[[2L]])
       if (!is.na(root)) {
         nm <<- c(nm, root)
-        rhs[[length(rhs) + 1L]] <<- x[[3L]]
+        rhs[length(rhs) + 1L] <<- list(x[[3L]])   # list(): a NULL right-hand side keeps its slot
       }
     }
     for (i in seq_along(x)) if (!identical(x[[i]], quote(expr = ))) rec(x[[i]])
