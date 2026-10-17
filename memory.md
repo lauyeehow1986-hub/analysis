@@ -126,7 +126,8 @@ design; this file holds *what has happened* and *what we learned*.
 - **The SAP lock lives in P1c and every run needs it.** `sr_run` refuses an unlocked SAP; tests that
   run an analysis must add, lock, then run (see the `.fx_ready_project` fixture).
 - **`cache_inputs` keeps the run cache valid across moved projects:** the cache identity is the extract
-  SHA, route key + spec and seed, never the project path.
+  SHA, route key + spec, seed, library snapshot and hardware fingerprint, never the project path; a
+  project moved to a machine with a different library or hardware fingerprint recomputes.
 - **Emitted analysis code never names a diagnostic,** and diagnostics live in `app/R/diagnostics/`,
   outside `routes/`; the lint fails the build otherwise (no test-gated switching).
 - **`exclude_rows` positions** (the influence sensitivity) refer to the row order of the sorted extract
