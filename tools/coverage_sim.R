@@ -62,8 +62,16 @@ shown <- tab
 for (nm in c("coverage", "mcse", "bias", "mean_width", "truth")) shown[[nm]] <- sprintf("%.4f", tab[[nm]])
 print(shown, row.names = FALSE)
 for (cell in names(errors)) cat(sprintf("\nfailed replications in %s: %s\n", cell, paste(errors[[cell]], collapse = "; ")))
-cat(if (all(tab$pass)) "\nALL CELLS PASS\n" else
-  sprintf("\nFAILING CELLS: %s\n", paste(tab$cell[!tab$pass], collapse = ", ")))
+if (all(tab$pass) && sum(tab$failed) == 0L) {
+  cat("\nALL CELLS PASS\n")
+} else {
+  if (!all(tab$pass)) cat(sprintf("\nFAILING CELLS: %s\n", paste(tab$cell[!tab$pass], collapse = ", ")))
+  hit <- tab$failed > 0L
+  if (any(hit)) {
+    cat(sprintf("\nFAILED REPLICATIONS: %s\n",
+                paste(sprintf("%s %d", tab$cell[hit], as.integer(tab$failed[hit])), collapse = ", ")))
+  }
+}
 cat("\n--- CSV ---\n")
 utils::write.csv(tab, stdout(), row.names = FALSE)
 cat("--- END CSV ---\n")
