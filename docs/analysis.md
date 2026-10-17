@@ -19,7 +19,7 @@ review by a qualified statistician.
 - **No test-gated method switching.** A route's `compile()` never branches on a diagnostic. Diagnostics
   live in `app/R/diagnostics/`, outside `app/R/routes/`. At run time `.sr_emit_check()` refuses any
   emitted analysis string that calls a diagnostic or names a p-value; separately, the lint fails the
-  build if a route's `compile()` body under `routes/` branches on a p-value. A failed diagnostic adds a
+  build if a route's `compile()` body under `routes/` runs, names or branches on a diagnostic or a p-value. A failed diagnostic adds a
   sensitivity node; the primary analysis changes only through a rule written into the locked SAP.
 - **Effect sizes, not p-values.** Diagnostic verdicts are effect-size thresholds. Descriptive routes
   (Table 1 and the `*_describe` twins) carry no p-values.

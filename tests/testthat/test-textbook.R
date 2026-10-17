@@ -122,9 +122,9 @@ test_that("nhanes: lm(chl ~ bmi + age) under MI (m = 5, seed 1) equals mice::poo
   expect_true(all(res$effects$ci_method == "rubin"))
 })
 
-# ---- NHEFS (Hernan & Robins, ch. 13 and 15): standardisation ------------------------------------
+# ---- NHEFS (Hernan & Robins, ch. 13): standardisation --------------------------------------------
 
-# The book's outcome model (Program 13.2-13.4 (Chapter 13, standardisation)): wt82_71 ~ qsmk + sex + race + age + age^2 + education
+# The book's outcome model (Programs 13.2-13.4, Chapter 13): wt82_71 ~ qsmk + sex + race + age + age^2 + education
 # (factor) + smokeintensity + smokeintensity^2 + smokeyrs + smokeyrs^2 + exercise (factor) + active
 # (factor) + wt71 + wt71^2 + qsmk x smokeintensity, fitted on the rows with a measured wt82_71 and
 # standardised over every row. standardize_over = "all" relies on the lm code keeping the rows lost

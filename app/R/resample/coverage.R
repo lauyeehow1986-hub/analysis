@@ -29,7 +29,7 @@
 #              over z ~ N(0, 1), computed EXACTLY by numerical integration (stats::integrate,
 #              rel.tol 1e-10; .sr_cov_rd_truth), not by Monte Carlo.
 #   cluster    50 clusters of (near) equal size; a cluster-level exposure x (exactly half of the
-#              clusters, at random); z ~ N(0, 1); y = 1 + 0.5 x + 0.5 z + u + e with u ~ N(0, 0.2) per
+#              clusters, at random); z ~ N(0, 1); y = 1 + 0.5 x + 0.5 z + u + e with u ~ N(0, variance 0.2) per
 #              cluster and e ~ N(0, 0.8), so the residual ICC is 0.2. Analysis y ~ x + z; truth 0.5.
 #
 # Random numbers (ruling R37a): replication r ALWAYS uses the r-th L'Ecuyer-CMRG stream of `seed`

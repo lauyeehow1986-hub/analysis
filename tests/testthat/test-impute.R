@@ -289,7 +289,7 @@ test_that("a character auxiliary column with more than SR_MI_AUX_MAX_LEVELS leve
   expect_error(.sr_h_mi_col(factor(sprintf("s%03d", 1:51)), FALSE, "f", 50L), "\"f\" has 51 distinct values")
 })
 
-# ---- complete data (ruling R25d)------------------------------------------------------------------
+# ---- complete data (ruling R25d) -----------------------------------------------------------------
 
 test_that("data without missing values still run under MI and pool to the complete-case estimates", {
   s <- list(purpose = "explain-causal", outcome = "mpg", exposure = "am", terms = list(list(var = "wt")),
