@@ -306,11 +306,20 @@ sr_sap_rule <- function(project, id, analysis, check, action = c("add_sensitivit
 
 #' SHA-256 of the canonical JSON of the pre-specified analyses, the families and the rules, each
 #' ordered by id: independent adds in any order give the same hash. Analyses added after the lock
-#' (prespecified = FALSE) and the lock itself are not part of it.
+#' (prespecified = FALSE) and the lock itself are not part of it. A fired replace_primary rule
+#' (sap/deviations.R) relabels two analyses and keeps their label at the lock as `sap_label`; the hash
+#' is taken over that label, so it still equals the lock's hash.
 sr_sap_hash <- function(project) {
   by_id <- function(x) if (length(x)) unname(x[order(names(x), method = "radix")]) else list()
+  as_locked <- function(a) {
+    if (!is.null(a$sap_label)) {
+      a$label <- a$sap_label
+      a$sap_label <- NULL
+    }
+    a
+  }
   .sr_sha256(sr_canonical_json(list(
-    analyses = by_id(.sr_sap_analyses(project)),
+    analyses = by_id(lapply(.sr_sap_analyses(project), as_locked)),
     families = by_id(project$state$sap$families %||% list()),
     rules = by_id(project$state$sap$rules %||% list()))))
 }

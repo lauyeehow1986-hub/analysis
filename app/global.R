@@ -31,7 +31,8 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "intake/roles", "profile/profile", "profile/dq", "profile/dq_conformance", "profile/dq_completeness",
   "profile/dq_plausibility", "profile/dq_structure", "profile/dq_leakage", "profile/recipe", "io/cohort", "profile/suggest", "profile/query", "profile/flow",
   "routes/emit", "routes/result", "routes/terms", "sap/sap", "routes/run", "routes/table1", "routes/se", "routes/lm", "routes/marginal", "routes/glm", "routes/cox", "routes/rmst",
-  "impute/pool", "impute/impute", "resample/boot", "diagnostics/checks", "diagnostics/plots"
+  "impute/pool", "impute/impute", "resample/boot", "diagnostics/checks", "diagnostics/plots",
+  "sap/deviations"
 )
 
 for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
