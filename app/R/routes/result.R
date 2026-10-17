@@ -26,7 +26,9 @@ sr_effects_empty <- function() {
 #' SR_EFFECT_COLS (a missing or extra column, or an unknown measure / scale / role value, is an
 #' error; its columns are returned in canonical order) and no table may carry a column named like a
 #' p-value. Every `primary` row needs finite est, lo and hi with lo <= est <= hi; routes of the
-#' describe family are exempt from that check. `flags` is a data.frame(term, flag, detail):
+#' describe family are exempt from that check, and so are bootstrap rows (ci_method boot_*), whose
+#' interval may exclude the estimate when the bootstrap distribution is strongly biased.
+#' `flags` is a data.frame(term, flag, detail):
 #'   table2          every `covariate` row of an explain-causal route (Table 2 fallacy);
 #'   non_collapsible every `conditional` OR / HR row.
 #' @param presented list returned by route$present()
@@ -88,7 +90,7 @@ sr_result_check <- function(presented, route) {
         stop("sr_result_check: primary effect '", eff$term[i], "' needs a finite estimate and CI",
              call. = FALSE)
       }
-      if (!(lo <= est && est <= hi)) {
+      if (!(lo <= est && est <= hi) && !isTRUE(startsWith(as.character(eff$ci_method[i]), "boot_"))) {
         stop("sr_result_check: primary effect '", eff$term[i], "' violates lo <= est <= hi",
              call. = FALSE)
       }

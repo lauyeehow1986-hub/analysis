@@ -312,9 +312,10 @@
                                    "difference", g$level, role_of(g$rd, lo, hi), method, rd_mc)
     out[[length(out) + 1L]] <- row(paste0(lab[i], " (marginal RR)"), "RR", rr, rlo, rhi,
                                    rr_p, "ratio", g$level, role_of(rr, rlo, rhi), method, rr_mc)
-    nt <- if (all(is.finite(c(g$rd, lo, hi)))) {
+    nt <- if (all(is.finite(c(g$rd, lo, hi))) && lo <= g$rd && g$rd <= hi) {
       .sr_h_nnt(g$rd, lo, hi, level = lev)
     } else {
+      # (a bootstrap RD interval can exclude the RD: resample/boot.R)
       list(nnt = NA_real_, lo = NA_real_, hi = NA_real_, label = "NNT not available")
     }
     # NNT stays descriptive: the RD row above carries the inference and the NNT is derived from it

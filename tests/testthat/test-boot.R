@@ -247,6 +247,7 @@ test_that("the bootstrap settings are validated and the unsupported combinations
   expect_silent(sr_compile(r, mi))
   mi$boot <- list(B = 50, type = "bca")
   expect_error(sr_compile(r, mi), "percentile")
+  mi$boot <- list(B = 50)
   mi$choices <- list(mi_x_boot = "impute_then_boot")
   expect_silent(sr_compile(r, mi))
   mi$choices <- list(mi_x_boot = "neither")
@@ -422,4 +423,77 @@ test_that("multiple imputation with the bootstrap through sr_run, under each cho
   expect_true(all(is.finite(c(pr$est, pr$lo, pr$hi))))
   expect_identical(pr$ci_method, "rubin_bootvar")
   expect_true(!is.null(out$result$fragments$impute_then_boot))
+})
+
+# ---- review fixes (round 1) ---------------------------------------------------------------------
+
+test_that("a bootstrap interval that excludes its estimate is reported with a fragment, not refused", {
+  # a strongly biased bootstrap distribution: the bias-corrected normal interval excludes t0
+  skewed <- c(rep(5, 90), seq(-1, 1, length.out = 10))
+  ci0 <- .sr_h_boot_ci(0, skewed, "normal")
+  expect_true(ci0$hi < 0)
+  df <- .bt_df()
+  s <- list(purpose = "explain-causal", outcome = "yb", exposure = "x", terms = list(list(var = "z")),
+            layers = .bt_layers(), boot = list(B = 30, type = "normal"), seed = 5L)
+  v <- .bt_value(df, s, "logistic")
+  # every primary interval lies wholly above its estimate (log OR, marginal RD and log RR)
+  k <- v$boot$ci
+  k$lo <- k$t0 + 1
+  k$hi <- k$t0 + 2
+  v$boot$ci <- k
+  res <- .bt_present(v, s, "logistic")   # passes sr_result_check
+  f <- res$fragments$boot_estimate_outside
+  expect_true(is.character(f) && length(f) == 1L)
+  expect_match(f, "strongly biased")
+  pr <- .bt_prim(res)
+  expect_identical(sort(pr$measure), c("OR", "RD", "RR"))
+  expect_true(all(pr$est < pr$lo))
+  for (m in pr$measure) expect_match(f, m, fixed = TRUE)
+  # the NNT is not derived from an RD interval that excludes the RD
+  nn <- res$effects[res$effects$measure == "NNT", ]
+  expect_identical(nrow(nn), 1L)
+  expect_true(is.na(nn$est))
+})
+
+test_that("multiple imputation x bootstrap: invalid spec$mi$m and a non-percentile impute_then_boot are refused", {
+  r <- .bt_route("lm")
+  mi <- .bt_lm_spec(layers = .bt_layers(missing = "mi"), mi = list(m = 3.5),
+                    choices = list(mi_x_boot = "boot_then_impute"))
+  expect_error(sr_compile(r, mi), "spec$mi$m", fixed = TRUE)
+  mi$mi <- list(m = "ten")
+  expect_error(sr_compile(r, mi), "spec$mi$m", fixed = TRUE)
+  mi$mi <- list(m = 3, maxit = 0)
+  expect_error(sr_compile(r, mi), "spec$mi$maxit", fixed = TRUE)
+  mi$mi <- list(m = "auto")
+  expect_silent(sr_compile(r, mi))
+  itb <- .bt_lm_spec(layers = .bt_layers(missing = "mi"), mi = list(m = 3),
+                     choices = list(mi_x_boot = "impute_then_boot"))
+  expect_silent(sr_compile(r, itb))
+  itb$boot <- list(B = 50, type = "percentile")
+  expect_silent(sr_compile(r, itb))
+  for (ty in c("bca", "normal")) {
+    itb$boot <- list(B = 50, type = ty)
+    expect_error(sr_compile(r, itb), "does not apply", info = ty)
+    expect_error(sr_compile(r, itb), "Rubin", info = ty)
+  }
+})
+
+test_that("boot_then_impute: the marginal fragment describes the bootstrap percentile interval", {
+  df <- .bt_df()
+  df$z[c(3L, 9L, 17L, 30L, 44L, 61L)] <- NA
+  s <- .bt_lm_spec(layers = .bt_layers(missing = "mi"), mi = list(m = 2, maxit = 2), marginal = TRUE,
+                   choices = list(mi_x_boot = "boot_then_impute"), boot = list(B = 20))
+  res <- .bt_present(.bt_value(df, s, "lm"), s, "lm")
+  f <- res$fragments$lm_marginal
+  expect_true(is.character(f) && length(f) == 1L)
+  expect_false(grepl("delta-method|Rubin", f))
+  expect_match(f, "bootstrap percentile", fixed = TRUE)
+  s <- list(purpose = "explain-causal", outcome = "yb", exposure = "x", terms = list(list(var = "z")),
+            layers = .bt_layers(missing = "mi"), mi = list(m = 2, maxit = 2),
+            choices = list(mi_x_boot = "boot_then_impute"), boot = list(B = 20), seed = 8L)
+  res <- .bt_present(.bt_value(df, s, "logistic"), s, "logistic")
+  f <- res$fragments$glm_marginal
+  expect_true(is.character(f) && length(f) == 1L)
+  expect_false(grepl("delta-method|Rubin", f))
+  expect_match(f, "bootstrap percentile", fixed = TRUE)
 })

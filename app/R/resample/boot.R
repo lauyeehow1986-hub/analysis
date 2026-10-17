@@ -98,6 +98,8 @@
   m_inner <- NA_integer_
   m_auto <- FALSE
   if (.sr_mi_on(spec)) {
+    # spec$mi as written (boot_then_impute substitutes m in the inner spec, so check it here)
+    .sr_mi_check(spec, id)
     ch <- .sr_choice_value(spec, "mi_x_boot")
     opts <- c("boot_then_impute", "impute_then_boot")
     if (!(is.character(ch) && length(ch) == 1L && !is.na(ch) && ch %in% opts)) {
@@ -112,8 +114,13 @@
       }
       m <- spec[["mi"]][["m"]]
       m_auto <- identical(m, "auto")
-      m_inner <- if (is.numeric(m) && length(m) == 1L && !is.na(m)) as.integer(m) else 5L
+      m_inner <- if (m_auto) 5L else as.integer(m)   # a whole number >= 2 (.sr_mi_check)
     } else {
+      if (!identical(type, "percentile")) {
+        stop(id, "@1: spec$boot$type = \"", type, "\" does not apply to impute_then_boot: its interval is ",
+             "Rubin's rules with the bootstrap variances (leave spec$boot$type unset or \"percentile\")",
+             call. = FALSE)
+      }
       type <- NA_character_
     }
   }
@@ -515,6 +522,35 @@
 
 # ---- present ------------------------------------------------------------------------------------
 
+# The marginal fragment under boot_then_impute (it replaces the MI wording of the route): what ran.
+.sr_boot_bti_marginal <- function(nm, bt) {
+  how <- sprintf("by g-computation in every imputed dataset of each of the B = %d bootstrap samples (m = %d imputations each)",
+                 as.integer(bt$B), as.integer(bt$m_inner))
+  if (identical(nm, "lm_marginal")) {
+    paste0("Marginal mean difference ", how, "; the estimate is the mean of the B pooled differences and ",
+           "the interval their bootstrap percentile interval.")
+  } else {
+    paste0("Marginal risk difference and ratio ", how, "; the estimate of each is the mean of the B pooled ",
+           "values (the risk ratio on the log scale) and the interval their bootstrap percentile interval; ",
+           "NNT from the risk difference and its bootstrap bounds (Altman).")
+  }
+}
+
+# The primary bootstrap rows whose interval does not contain the estimate (a strongly biased bootstrap
+# distribution: the percentile, normal and BCa intervals can all do this): one fragment naming them,
+# or NULL. The rows are still reported (sr_result_check exempts boot_* rows from lo <= est <= hi).
+.sr_boot_outside <- function(e) {
+  i <- which(e$role == "primary" & startsWith(as.character(e$ci_method), "boot_") & is.finite(e$est) &
+               is.finite(e$lo) & is.finite(e$hi) & (e$est < e$lo | e$est > e$hi))
+  if (!length(i)) return(NULL)
+  rows <- sprintf("%s %s %s (estimate %s; bootstrap interval %s to %s)", e$term[i], e$measure[i],
+                  ifelse(is.na(e$level[i]), "", e$level[i]), sr_fmt_num(e$est[i]), sr_fmt_num(e$lo[i]),
+                  sr_fmt_num(e$hi[i]))
+  paste0("The bootstrap interval does not contain the estimate for ", paste(gsub("  +", " ", rows), collapse = "; "),
+         ": the bootstrap distribution is strongly biased relative to the estimate, so the interval is reported ",
+         "as computed but should be read with caution (the estimate may be unstable, e.g. sparse events).")
+}
+
 # The fragments every bootstrap result carries: how it was done, failures, BCa fallbacks.
 .sr_boot_fragments <- function(bt, kind) {
   n_units <- as.integer(round(bt$n_units))
@@ -600,14 +636,6 @@
   }
   ci <- bt$ci
   bti <- identical(bt$choice, "boot_then_impute")
-  est <- if (bti) ci$mean else ci$t0
-  out <- is.finite(est) & is.finite(ci$lo) & is.finite(ci$hi) & (est < ci$lo | est > ci$hi)
-  if (any(out)) {
-    stop("The bootstrap interval (", sr_fmt_num(ci$lo[out][1L]), ", ", sr_fmt_num(ci$hi[out][1L]),
-         ") of a primary effect does not contain its estimate ", sr_fmt_num(est[out][1L]),
-         ": the bootstrap distribution is strongly biased, so the effect cannot be reported with it.",
-         call. = FALSE)
-  }
   key_row <- function(k) ci[match(k, ci$key), , drop = FALSE]
   bterm <- character()
   if (kind == "rmst") {
@@ -697,11 +725,18 @@
     }
     for (nm in c("lm_marginal", "glm_marginal")) {
       f <- res$fragments[[nm]]
-      if (!bti && is.character(f)) res$fragments[[nm]] <- sub("delta-method interval", "bootstrap interval", f, fixed = TRUE)
+      if (!is.character(f)) next
+      res$fragments[[nm]] <- if (bti) {
+        .sr_boot_bti_marginal(nm, bt)
+      } else {
+        sub("delta-method interval", "bootstrap interval", f, fixed = TRUE)
+      }
     }
   }
   res$effects <- e
   frag <- .sr_boot_fragments(bt, kind)
+  outside <- .sr_boot_outside(e)
+  if (!is.null(outside)) frag$boot_estimate_outside <- outside
   if (bti) {
     frag$boot_then_impute <- sprintf(paste0(
       "Bootstrap, then impute: each of the B = %d bootstrap samples was multiply imputed (m = %d) and analysed, ",
