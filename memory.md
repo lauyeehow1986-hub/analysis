@@ -11,7 +11,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | Spec approved; implementation plans written: `docs/superpowers/plans/2026-10-03-p0-feasibility-spike.md`, `docs/superpowers/plans/2026-10-03-p1a-foundation.md` |
 | 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. final-review fixes (I1 torn/failed audit writes, I2 parse_json only, I3 events/audit cross-check on open, M1 atomic rewrites). 2295 tests pass, `LINT OK` |
 | 2026-10-10 | P1b data layer done (branch `p1b-data`, Tasks 1-23): DuckDB ingest to a Parquet store (chunked, resumable, external mode, pre-flight), dictionaries (CSV, REDCap CSV / ODM), join and cohort builder, profiling, the DQ check library (6 domains), Data Action Suggestor, recipe, readiness panel and the Data tab; `docs/data.md` user guide; `tools/scale_test.R`. Full suite 6558 pass, 0 fail, 2 skip (no fst package, no sas7bdat fixture), `LINT OK (41 files)`. Scale smoke 2M x 20 on the laptop and with `--profile=locked16`: PASS (peak RSS 1.07 GB / 0.83 GB) |
-| 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Full suite 9853 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
+| 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Final review fixed: `sr_sap_add` compiles every spec and checks binary event coding before the lock. Full suite 9967 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -26,9 +26,10 @@ design; this file holds *what has happened* and *what we learned*.
    - P1d also owns: the SAP_v1.docx and lock UI, Methods/Results prose from the P1c fragment inputs,
      chunk-level checkpoint/cancel and parallel workers for the bootstrap and MI (ExtendedTask).
    - Open P1c limitations to carry: interactions accept only linear and factor terms (no interaction
-     with a quadratic or spline term); `sr_sap_add` validates but does not compile (compile errors show
-     at run time); a fully separated modified Poisson fit gives unreliable estimates; the censoring
-     check ignores strata and uses Efron ties.
+     with a quadratic or spline term); the censoring check ignores strata and uses Efron ties; a
+     logical (Yes/No) outcome given a text `event_value` such as "Yes" is not caught at add time and fails
+     at run with "no events" (refuse it at `sr_sap_add` in P1d); `sr_analysis_add` has no event-value
+     check (the run refuses instead).
 
 ## Decisions (with the user)
 | Topic | Decision |

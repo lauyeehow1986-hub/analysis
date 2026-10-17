@@ -51,7 +51,7 @@ Every cell scores the route's primary effect row as reported.
 | mi_mar | Same model. z1 is missing at random, with logit P(missing) = a + std(y) + z2 and a calibrated to a mean of exactly 0.30 | MD 0.5 | linear model with multiple imputation (mice, m = 20), pooled by Rubin's rules |
 | boot | z ~ N(0,1); x ~ Bern(plogis(0.5z)); y ~ Bern(plogis(-0.5 + 0.8x + 0.6z)) | marginal RD 0.18231. Exact numerical integration (`stats::integrate`, rel.tol 1e-10), checked against a 1e6-draw Monte Carlo | logistic model, marginal risk difference by g-computation, percentile bootstrap B = 500 (g-computation re-run in every replicate) |
 | boot_mi | As mi_mar | MD 0.5 | linear model, bootstrap then impute (B = 200, m = 10), percentile interval |
-| cluster_robust | 50 clusters. Exposure x assigned at cluster level (half the clusters); z ~ N(0,1); cluster effect u ~ N(0, 0.2); e ~ N(0, 0.8); y = 1 + 0.5x + 0.5z + u + e | MD 0.5 | linear model y ~ x + z, cluster-robust SE (sandwich::vcovCL, HC1) |
+| cluster_robust | 50 clusters. Exposure x assigned at cluster level (half the clusters); z ~ N(0,1); cluster effect u ~ N(0, variance 0.2); e ~ N(0, variance 0.8) (ICC 0.2); y = 1 + 0.5x + 0.5z + u + e | MD 0.5 | linear model y ~ x + z, cluster-robust SE (sandwich::vcovCL, HC1) |
 | cluster_boot | As cluster_robust | MD 0.5 | linear model y ~ x + z, cluster bootstrap B = 500, percentile interval |
 
 ### Results (seed 1, n 200, harness bcaf5e4, 2026-10-17)
@@ -111,8 +111,8 @@ Rscript tools/coverage_sim.R [cells] [reps_scale]
   `sr.coverage_workers`). The default is the number of cores minus 2. The worker count does not
   change any result.
 - The tool prints the table and a CSV block to the console and writes nothing into the repository.
-- The full run takes about 4 hours serially. Almost all of that is the boot_mi cell. On many workers
-  it takes well under an hour.
+- The recorded full run took 2459 s (about 41 minutes) on 18 workers; the boot_mi cell alone took
+  2036 s. No serial run was timed.
 - To record a new run, paste its table here with the new commit, date and versions. If a cell fails,
   record it as a finding and investigate. **Never widen the pass rule.**
 
@@ -131,7 +131,7 @@ temporary project.
 | `survival::lung` | RMST by sex up to 365 days | difference 55.97 days (55.970324) | Within 1e-4 of 55.9703. Equal to `survfit` restricted means to 1e-8 |
 | `survival::gbsg`: German Breast Cancer Study Group, 686 patients (Schumacher et al., 1994) | Multivariable Cox model: hormon + age + meno + size + grade + nodes + pgr + er | 8 HRs with Wald 95% CIs, n = 686 | HR, lower and upper limits equal a direct `coxph` to 1e-8 |
 | `mice::nhanes` (van Buuren, *Flexible Imputation of Missing Data*; mice 3.19.0) | lm(chl ~ bmi + age) under MI, m = 5, maxit 10, seed 1 | Estimates, SEs and df pooled by Rubin's rules | Equal to `mice::pool` to 1e-10 (df to 1e-8). CI uses t with the Barnard-Rubin df |
-| NHEFS (Hernan & Robins, *Causal Inference: What If*, Program 15.1) | Standardisation (g-computation) of weight change 1971-82 on quitting smoking, with the book's outcome model. Fitted on the 1566 rows with an outcome, standardised over all 1629 | est 3.51857, 95% CI (2.64414, 4.45720); percentile bootstrap B = 2000, seed 1 | Published value 3.52 (2.6, 4.5). The test requires the estimate within 0.01 and each limit within 0.15 |
+| NHEFS (Hernan & Robins, *Causal Inference: What If*, Chapter 13, Programs 13.2-13.4) | Standardisation (g-computation) of weight change 1971-82 on quitting smoking, with the book's outcome model. Fitted on the 1566 rows with an outcome, standardised over all 1629 | est 3.51857, 95% CI (2.64414, 4.45720); percentile bootstrap B = 2000, seed 1 | Published value 3.52 (2.6, 4.5). The test requires the estimate within 0.01 and each limit within 0.15 |
 
 ### Notes on NHEFS
 

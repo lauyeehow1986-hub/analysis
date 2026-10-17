@@ -17,8 +17,9 @@ review by a qualified statistician.
 - **Numbers come from evaluated code.** No model writes numbers. Each route's `present()` turns the
   evaluated value into effect rows with the shared effect columns, checked by `sr_result_check()`.
 - **No test-gated method switching.** A route's `compile()` never branches on a diagnostic. Diagnostics
-  live in `app/R/diagnostics/`, outside `app/R/routes/`, and emitted analysis code never names a
-  diagnostic; the lint fails the build if a file under `routes/` does. A failed diagnostic adds a
+  live in `app/R/diagnostics/`, outside `app/R/routes/`. At run time `.sr_emit_check()` refuses any
+  emitted analysis string that calls a diagnostic or names a p-value; separately, the lint fails the
+  build if a route's `compile()` body under `routes/` branches on a p-value. A failed diagnostic adds a
   sensitivity node; the primary analysis changes only through a rule written into the locked SAP.
 - **Effect sizes, not p-values.** Diagnostic verdicts are effect-size thresholds. Descriptive routes
   (Table 1 and the `*_describe` twins) carry no p-values.
@@ -29,7 +30,8 @@ review by a qualified statistician.
 
 Every analysis is a route id plus a spec (a named list). Every spec carries a `purpose` (`describe`,
 `predict` or `explain-causal`) that must match the route's; every model route also requires `layers`
-and `seed` (Table 1 requires `seed`). Each route's own fields are in section 5. `sr_spec_validate()`
+and `seed` (Table 1 requires `seed`, and also a `layers` list because the composition check reads
+it). Each route's own fields are in section 5. `sr_spec_validate()`
 checks the spec against the route's schema, and `sr_compose_check()` checks that the layers can be
 combined (disallowed combinations and unresolved choices such as `choices$mi_x_boot`).
 
@@ -44,8 +46,9 @@ combined (disallowed combinations and unresolved choices such as `choices$mi_x_b
 | `matching` | `TRUE` / `FALSE` |
 | `framework` | `frequentist`, `bayesian`, `both` |
 
-Weighting, matching and the Bayesian framework are part of the vocabulary but are refused at compile
-in P1c (so at `sr_analysis_add` and `sr_run`), never silently ignored.
+Weighting, matching and the Bayesian framework are part of the vocabulary but cannot run in P1c. The
+spec is compiled when it is added (`sr_sap_add`, `sr_analysis_add`), so they are refused there, never
+silently ignored.
 
 **Terms** (`spec$terms`): a list of terms, each naming a column (`var`) and a type: `linear`, `factor`,
 `rcs` (restricted cubic spline) or `quad`. For `rcs`, `knots` is `NULL` (4 knots), a number from 3 to 7,
@@ -62,17 +65,21 @@ the selected columns, not to the order of the store. `exclude_rows` is refused o
 The SAP is drafted before any outcome data is seen and locked before anything runs.
 
 1. **Add.** `sr_sap_add()` adds an analysis (id, route, table, label, spec, parent, addresses) or
-   replaces the analysis with the same id. It refuses a bad route or spec, a disallowed layer
-   combination or unresolved choice, an unknown table or parent, and a bad label or family. It does not
-   compile: a layer that P1c cannot run yet (weighting, matching, Bayesian) is refused when the analysis
-   is compiled, at `sr_analysis_add` or `sr_run`. `sr_sap_remove()` removes an analysis before the lock.
+   replaces the analysis with the same id. The id must match `^[a-z][a-z0-9_]{0,39}$`. It refuses a bad
+   route or spec, a disallowed layer combination or unresolved choice, an unknown table or parent, and a
+   bad label or family. It also compiles the spec and refuses one that can never run ("cannot run on
+   route ..."): a layer P1c cannot run (weighting, matching, Bayesian), invalid MI settings (no `m`,
+   `m = 1`, MI with clustered data or Firth) or a bootstrap with B below 20. A binary outcome or survival
+   status with no `event_value` / `status_event` is refused unless the stored column is logical or all
+   0/1. `sr_sap_remove()` removes an analysis before the lock.
 2. **Family.** `sr_sap_family()` groups analyses into a multiplicity family with a p-value adjustment
    method: `holm`, `hochberg`, `hommel`, `bonferroni`, `BH`, `BY` or `none`.
 3. **Rule.** `sr_sap_rule()` pre-specifies the response when a check fails for an analysis: show the
    pre-specified alternative as a sensitivity result (`add_sensitivity`) or make it the primary result
    (`replace_primary`). For both actions the alternative must be a sensitivity analysis whose parent is
    that analysis.
-4. **Lock.** `sr_sap_check()` lists anything that blocks the lock; `sr_sap_lock()` refuses while any
+4. **Lock.** `sr_sap_check()` lists anything that blocks the lock (including an `event value` row,
+   re-checked against the current data); `sr_sap_lock()` refuses while any
    block remains, then records the SAP hash (`sap_hash`), the store hash of every table used
    (`tables$store_hash`), the library snapshot hash (`libsnap_hash`) and `locked_at`. Every run requires
    the lock. Amending a locked SAP is a later phase (section 11).
@@ -108,7 +115,7 @@ Spec fields per route (besides `purpose`, `layers` and `seed`):
   `exclude_rows`.
 - `logistic`, `modpois`: as lm plus `event_value`; `marginal` defaults to TRUE; logistic also takes
   `penalty` (`none` or `firth`).
-- `cox`: `time`, `status`, optional `status_event`, `exposure`, `exposure_ref`, `terms`, `interactions`,
+- `cox`: `time`, `status`, optional `status_event` (number or text), `exposure`, `exposure_ref`, `terms`, `interactions`,
   `strata`, `cluster`, `ties`, `exclude_rows`.
 - `rmst`: `time`, `status`, optional `status_event`, `exposure`, `exposure_ref`, and the required `tau`.
 
@@ -125,8 +132,14 @@ Notes per route:
 
 - **Describe twins.** `lm_describe`, `logistic_describe` and `cox_describe` share compile and present
   with their explain-causal routes but are descriptive: no p-values.
-- **Binary outcomes.** A logical or 0/1 outcome is used as is; any other outcome needs `event_value`
-  (checked by the emitted code at run time, since validation has no data).
+- **Binary outcomes.** A logical or 0/1 outcome (or status) is used as is; any other needs
+  `event_value` (`status_event` for a survival status). This is checked against the stored column at
+  `sr_sap_add` and at the lock, and again by the emitted code at run time. A CSV column of Yes/No or
+  TRUE/FALSE is stored as logical, so its event value, if given, must be `"TRUE"` or `"FALSE"`.
+- **Convergence.** A modified Poisson fit that does not converge (for example under complete
+  separation) is refused rather than reported. Firth convergence is read from logistf's iteration count.
+- **Cox with strata only.** With strata but no other model terms the note says "stratified by <strata>
+  (no other model terms)" and the HR is labelled conditional.
 - **Marginal effects.** `standardize_over` is `analysis` (the fitted rows) or `all` (also the rows lost
   only to a missing outcome). For a continuous exposure the glm marginal measures are skipped with a
   note unless `marginal = TRUE` was asked for explicitly, which is then an error. A conditional OR is
@@ -141,7 +154,8 @@ Notes per route:
 ## 6. Multiple imputation (`layers$missing = "mi"`)
 
 - Options in `spec$mi`: `m` (a whole number of at least 2, or `"auto"`), `maxit` (default 10) and `aux`
-  (auxiliary columns used only in the imputation model).
+  (auxiliary columns used only in the imputation model). A categorical auxiliary column with more than
+  50 distinct levels is refused at run time; drop it from the imputation model.
 - `spec$mi$m` is required.
 - Imputation is by `mice` with methods `pmm` (numeric), `logreg` (binary) and `polyreg` (categorical).
   For lm, logistic and modpois the outcome is imputed too and those rows are analysed; for cox and rmst,
@@ -192,7 +206,7 @@ verdict. A value that cannot be computed is a `warn`.
 |---|---|---|---|---|---|
 | `ph` | cox | abs(log HR early - log HR late) of the exposure, split at the median event time (max over the coefficients of a factor exposure; `cox.zph` reported only); carries `tau_suggest`, the 75th centile of event times | >= log 1.25 | >= log 1.5 | rmst at the pre-specified tau, else `tau_suggest` |
 | `influence` | lm, logistic, modpois | max Cook's distance | > 0.5 | > 1 | refit with `exclude_rows` |
-| `influence` | cox | max scaled dfbeta | >= 0.5 | >= 1 | refit with `exclude_rows` |
+| `influence` | cox | max absolute scaled dfbeta of the exposure | >= 0.5 | >= 1 | refit with `exclude_rows` |
 | `separation` | logistic | refit with maxit 100, epsilon 1e-12: some abs(beta) grows by more than 1 and some fitted p is within 1e-8 of 0 or 1 (1 = yes) | none | >= 1 | Firth |
 | `few_clusters` | model routes with a cluster | number of clusters | < 50 | < 30 | cluster bootstrap, B = 2000, percentile |
 | `inf_censoring` | cox, rmst | max abs log HR of a Cox model for censoring on the baseline terms (rmst: the exposure) | > log 1.25 | > log 1.5 | none: recorded as a limitation |
@@ -218,7 +232,7 @@ verdict. A value that cannot be computed is a `warn`.
     `add_sensitivity` adds nothing new, because the alternative is already pre-specified;
   - otherwise it adds the check's sensitivity analysis (the mapping in section 8) as
     `<analysis>_<check>`: the analysis part is lower-cased, characters outside `[a-z0-9_]` become `_`,
-    and it is shortened so the whole id stays within 40 characters; an id already held by another
+    an `a` is prefixed if it does not start with a letter, and it is shortened so the whole id stays within 40 characters; an id already held by another
     analysis is refused before anything is written;
   - a check with no sensitivity analysis (`inf_censoring`), or one whose analysis cannot be built, is
     recorded as a limitation (`diag.limitation`), never skipped.
