@@ -440,3 +440,489 @@ test_that(".sr_extract_frame is the frame sr_extract serialises", {
   expect_identical(names(fr), cols)
   expect_error(.sr_extract_frame(p, "t", c("y", "nope")), "nope")
 })
+
+# ---- the computation: SEs, design effect, MDE, blockers, tiers ----------------------------------
+
+# Hand-made inputs of the documented .sr_feas_inputs() structure. `lv_n` are the complete-case counts
+# per exposure level, the reference first (binary / factor); a linear exposure has no levels.
+.fe_hand <- function(kind = "binary", type = "binary", n_cc = 400L, variance = 0.25, r2x = 0.2,
+                     risk = 0.3, sd = 2, events_cc = 120, n_obs = n_cc, params = 3L,
+                     lv_n = c(`0` = 200L, `1` = 200L), ps_outside = 0, separated = FALSE,
+                     clusters = NULL, max_time = 20, pairs = NULL, blockers = character()) {
+  lv <- if (type == "linear") character() else names(lv_n)
+  levels_df <- data.frame(level = lv, n_all = as.integer(lv_n[lv]), n_cc = as.integer(lv_n[lv]),
+                          stringsAsFactors = FALSE)
+  ci <- if (type == "linear") {
+    data.frame(level = NA_character_, n_k = as.integer(n_cc), n_ref = NA_integer_, r2x = r2x,
+               ps_outside = NA_real_, separated = separated, stringsAsFactors = FALSE)
+  } else {
+    k <- lv[-1L]
+    data.frame(level = k, n_k = as.integer(lv_n[k]), n_ref = rep(as.integer(lv_n[1L]), length(k)),
+               r2x = rep(r2x, length(k)), ps_outside = rep(ps_outside, length(k)),
+               separated = rep(separated, length(k)), stringsAsFactors = FALSE)
+  }
+  outcome <- list(sd = if (kind == "continuous") sd else NA_real_, risk = if (kind == "binary") risk else NA_real_,
+                  events_total = if (kind == "continuous") NA_real_ else events_cc * n_obs / n_cc,
+                  events_cc = if (kind == "continuous") NA_real_ else events_cc,
+                  followup_total = NA_real_, max_time = if (kind == "surv") max_time else NA_real_,
+                  pairs = pairs)
+  list(kind = kind, n_rows = as.integer(n_cc), n_cc = as.integer(n_cc), n_obs = as.integer(n_obs),
+       outcome = outcome,
+       exposure = list(var = "x", type = type, ref = if (type == "linear") NA_character_ else lv[1L],
+                       levels = levels_df, variance = if (type == "factor") NA_real_ else variance),
+       contrasts_in = ci, clusters = clusters, params = as.integer(params), blockers = blockers)
+}
+
+.fe_row <- function(res, measure, level = NULL) {
+  r <- res$contrasts[res$contrasts$measure == measure, , drop = FALSE]
+  if (!is.null(level)) r <- r[r$level == level, , drop = FALSE]
+  stopifnot(nrow(r) == 1L)
+  r
+}
+
+test_that(".sr_feas_measures follows the route and the marginal block", {
+  sp <- .fe_spec()
+  expect_identical(.sr_feas_measures("lm", sp, "binary"), "MD")
+  expect_identical(.sr_feas_measures("lm_describe", sp, "linear"), "MD")
+  expect_identical(.sr_feas_measures("logistic", sp, "binary"), c("OR", "RD", "RR"))
+  expect_identical(.sr_feas_measures("logistic", sp, "factor"), c("OR", "RD", "RR"))
+  expect_identical(.sr_feas_measures("logistic", sp, "linear"), "OR")
+  expect_identical(.sr_feas_measures("logistic", sp, NULL), "OR")
+  expect_identical(.sr_feas_measures("logistic", .fe_spec(marginal = FALSE), "binary"), "OR")
+  expect_identical(.sr_feas_measures("logistic", .fe_spec(penalty = "firth"), "binary"), "OR")
+  expect_identical(.sr_feas_measures("modpois", sp, "binary"), c("RR", "RD"))
+  expect_identical(.sr_feas_measures("modpois", sp, "linear"), "RR")
+  expect_identical(.sr_feas_measures("cox", sp, "binary"), "HR")
+  expect_identical(.sr_feas_measures("cox_describe", sp, "linear"), "HR")
+  expect_identical(.sr_feas_measures("rmst", sp, "factor"), "RMST_diff")
+  expect_identical(.sr_feas_measures("table1", sp, "binary"), character())
+})
+
+test_that(".sr_feas_check_args refuses every malformed delta and assumption", {
+  ck <- function(delta = NULL, assumptions = list(), kind = "surv", measures = c("HR"), clustered = FALSE) {
+    .sr_feas_check_args(delta, assumptions, kind, measures, clustered)
+  }
+  d <- function(...) utils::modifyList(list(value = 0.8, measure = "HR", source = "the trial protocol"), list(...))
+  j <- function(value) list(value = value, justification = "a published estimate")
+  expect_true(ck())
+  expect_true(ck(d()))
+  expect_error(ck(d(measure = "OR")), "measure")                    # not a measure of this analysis
+  expect_error(ck(d(measure = "ZZ")), "measure")
+  expect_error(ck(d(value = 1)), "ratio")
+  expect_error(ck(d(value = 0)), "ratio")
+  expect_error(ck(d(value = -0.5)), "ratio")
+  expect_error(ck(d(source = NULL)), "delta must be")
+  expect_error(ck(d(source = "")), "source")
+  expect_error(ck(d(source = "  ")), "source")
+  expect_error(ck(d(source = NA_character_)), "source")
+  expect_error(ck(d(value = "a")), "value")
+  expect_error(ck(d(value = NA_real_)), "value")
+  expect_error(ck(d(extra = 1)), "delta must be")
+  expect_error(ck("HR 0.8"), "delta must be")
+  expect_true(ck(d(measure = "MD", value = 5), measures = "MD", kind = "continuous"))
+  expect_error(ck(d(measure = "MD", value = 0), measures = "MD", kind = "continuous"), "difference")
+  expect_error(ck(d(measure = "MD", value = -2), measures = "MD", kind = "continuous"), "difference")
+  expect_true(ck(d(measure = "RD", value = 0.02), measures = c("OR", "RD", "RR"), kind = "binary"))
+  # assumptions
+  expect_error(ck(assumptions = list(r2_y = j(0.3)), kind = "binary"), "r2_y applies to a continuous outcome only")
+  expect_error(ck(assumptions = list(r2_y = j(0.3))), "r2_y applies to a continuous outcome only")
+  expect_true(ck(assumptions = list(r2_y = j(0.3)), kind = "continuous"))
+  expect_error(ck(assumptions = list(r2_y = j(1)), kind = "continuous"), "r2_y")
+  expect_error(ck(assumptions = list(r2_y = j(-0.1)), kind = "continuous"), "r2_y")
+  expect_error(ck(assumptions = list(r2_y = list(value = 0.3, justification = "")), kind = "continuous"),
+               "justification")
+  expect_error(ck(assumptions = list(r2_y = list(value = 0.3)), kind = "continuous"), "r2_y")
+  expect_error(ck(assumptions = list(power = j(0.8))), "r2_y and icc")
+  expect_error(ck(assumptions = list(j(0.3))), "r2_y and icc")
+  expect_error(ck(clustered = TRUE), "a clustered analysis needs assumptions\\$icc \\(value and justification\\)")
+  expect_error(ck(assumptions = list(r2_y = j(0.1)), clustered = TRUE, kind = "continuous"),
+               "a clustered analysis needs assumptions\\$icc")
+  expect_error(ck(assumptions = list(icc = j(0.05))), "icc applies to a clustered analysis only")
+  expect_true(ck(assumptions = list(icc = j(0.05)), clustered = TRUE))
+  expect_error(ck(assumptions = list(icc = j(1)), clustered = TRUE), "icc")
+  expect_error(ck(assumptions = list(icc = j(-0.01)), clustered = TRUE), "icc")
+  expect_error(ck(assumptions = list(icc = list(value = 0.05, justification = NA_character_)), clustered = TRUE),
+               "justification")
+})
+
+test_that("each standard error matches its hand-computed formula (binary exposure)", {
+  sp <- .fe_spec()
+  v <- 400 * 0.25 * 0.8
+  res <- .sr_feas_compute(.fe_hand(), sp, sr_route_get("logistic"))
+  expect_named(res, c("contrasts", "blockers", "warnings", "tier", "advice"))
+  expect_identical(names(res$contrasts), c("contrast", "level", "measure", "scale", "se", "h", "mde",
+                                           "se_upper", "n_k", "n_ref", "r2x", "deff", "tier"))
+  expect_identical(res$contrasts$measure, c("OR", "RD", "RR"))
+  expect_equal(.fe_row(res, "OR")$se, 1 / sqrt(400 * 0.25 * 0.8 * 0.3 * 0.7), tolerance = 1e-12)
+  expect_equal(.fe_row(res, "RD")$se, sqrt(0.3 * 0.7 / v), tolerance = 1e-12)
+  expect_equal(.fe_row(res, "RR")$se, sqrt(0.7 / (0.3 * v)), tolerance = 1e-12)
+  or <- .fe_row(res, "OR")
+  expect_equal(or$h, exp(1.96 * or$se), tolerance = 1e-12)
+  expect_equal(or$mde, exp(2.80 * or$se), tolerance = 1e-12)
+  expect_identical(or$scale, "log")
+  rd <- .fe_row(res, "RD")
+  expect_equal(rd$h, 1.96 * rd$se, tolerance = 1e-12)
+  expect_equal(rd$mde, 2.80 * rd$se, tolerance = 1e-12)
+  expect_identical(rd$scale, "identity")
+  expect_identical(c(or$n_k, or$n_ref), c(200L, 200L))
+  expect_equal(c(or$r2x, or$deff), c(0.2, 1))
+  expect_true(is.na(or$se_upper))
+  expect_identical(or$level, "1")
+
+  lm_res <- .sr_feas_compute(.fe_hand(kind = "continuous"), sp, sr_route_get("lm"))
+  expect_equal(.fe_row(lm_res, "MD")$se, 2 / sqrt(v), tolerance = 1e-12)
+  expect_equal(.fe_row(lm_res, "MD")$h, 1.96 * 2 / sqrt(v), tolerance = 1e-12)
+  as <- list(r2_y = list(value = 0.5, justification = "published R2 of the covariates"))
+  lm_r2 <- .sr_feas_compute(.fe_hand(kind = "continuous"), sp, sr_route_get("lm"), assumptions = as)
+  expect_equal(.fe_row(lm_r2, "MD")$se, 2 * sqrt(0.5) / sqrt(v), tolerance = 1e-12)
+
+  hr <- .sr_feas_compute(.fe_hand(kind = "surv"), sp, sr_route_get("cox"))
+  expect_equal(.fe_row(hr, "HR")$se, 1 / sqrt(120 * 0.25 * 0.8), tolerance = 1e-12)
+  expect_equal(.fe_row(hr, "HR")$mde, exp(2.80 / sqrt(120 * 0.25 * 0.8)), tolerance = 1e-12)
+
+  mp <- .sr_feas_compute(.fe_hand(), sp, sr_route_get("modpois"))
+  expect_identical(mp$contrasts$measure, c("RR", "RD"))
+  expect_equal(.fe_row(mp, "RR")$se, sqrt(0.7 / (0.3 * v)), tolerance = 1e-12)
+})
+
+test_that("a linear exposure uses n_cc * Var(x) * (1 - r2x) and a factor contrast its two group sizes", {
+  sp <- .fe_spec()
+  lin <- .sr_feas_compute(.fe_hand(kind = "binary", type = "linear", variance = 1.7), sp, sr_route_get("logistic"))
+  expect_identical(lin$contrasts$measure, "OR")
+  expect_equal(lin$contrasts$se, 1 / sqrt(400 * 1.7 * 0.8 * 0.3 * 0.7), tolerance = 1e-12)
+  expect_true(is.na(lin$contrasts$level) && is.na(lin$contrasts$n_ref))
+  expect_match(lin$contrasts$contrast, "x", fixed = TRUE)
+  linhr <- .sr_feas_compute(.fe_hand(kind = "surv", type = "linear", variance = 1.7), sp, sr_route_get("cox"))
+  expect_equal(linhr$contrasts$se, 1 / sqrt(120 * 1.7 * 0.8), tolerance = 1e-12)
+
+  lv_n <- c(a = 100L, b = 150L, c = 150L)
+  fh <- .fe_hand(kind = "binary", type = "factor", lv_n = lv_n, n_cc = 400L)
+  fac <- .sr_feas_compute(fh, sp, sr_route_get("logistic"))
+  expect_identical(fac$contrasts$level[fac$contrasts$measure == "OR"], c("b", "c"))
+  vb <- 0.8 / (1 / 150 + 1 / 100)
+  expect_equal(.fe_row(fac, "OR", "b")$se, 1 / sqrt(vb * 0.21), tolerance = 1e-12)
+  expect_equal(.fe_row(fac, "RD", "c")$se, sqrt(0.21 / vb), tolerance = 1e-12)
+  expect_identical(.fe_row(fac, "OR", "b")$n_k, 150L)
+  expect_identical(.fe_row(fac, "OR", "b")$n_ref, 100L)
+  fhr <- .sr_feas_compute(.fe_hand(kind = "surv", type = "factor", lv_n = lv_n, n_cc = 400L), sp, sr_route_get("cox"))
+  p <- 150 / 250
+  expect_equal(.fe_row(fhr, "HR", "b")$se, 1 / sqrt(120 * 250 / 400 * p * (1 - p) * 0.8), tolerance = 1e-12)
+})
+
+test_that("clustering multiplies the SE by sqrt of the design effect", {
+  sp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE))
+  cl <- list(G = 20L, m_bar = 10, cv = 0.5)
+  as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))
+  base <- .sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"))
+  res <- .sr_feas_compute(.fe_hand(clusters = cl), sp, sr_route_get("logistic"), assumptions = as)
+  deff <- 1 + (1.25 * 10 - 1) * 0.05
+  expect_identical(.fe_row(res, "OR")$deff, deff)
+  expect_equal(.fe_row(res, "OR")$se, .fe_row(base, "OR")$se * sqrt(deff), tolerance = 1e-12)
+  expect_equal(.fe_row(res, "RD")$se, .fe_row(base, "RD")$se * sqrt(deff), tolerance = 1e-12)
+  expect_true(any(grepl("fewer than 30 clusters", res$warnings)))
+  big <- .sr_feas_compute(.fe_hand(clusters = list(G = 40L, m_bar = 10, cv = 0.5)), sp, sr_route_get("logistic"),
+                          assumptions = as)
+  expect_false(any(grepl("cluster", big$warnings)))
+  expect_error(.sr_feas_compute(.fe_hand(clusters = cl), sp, sr_route_get("logistic")), "assumptions\\$icc")
+  expect_error(.sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"), assumptions = as),
+               "icc applies to a clustered analysis only")
+})
+
+test_that("multiple imputation: se_upper uses n_obs, the tier uses the conservative se", {
+  sp <- .fe_spec(layers = .fe_layers(missing = "mi"))
+  res <- .sr_feas_compute(.fe_hand(n_obs = 500L), sp, sr_route_get("logistic"))
+  for (m in c("OR", "RD", "RR")) {
+    r <- .fe_row(res, m)
+    expect_lt(r$se_upper, r$se)
+    expect_equal(r$se_upper, r$se * sqrt(400 / 500), tolerance = 1e-12)
+  }
+  hr <- .sr_feas_compute(.fe_hand(kind = "surv", n_obs = 500L), sp, sr_route_get("cox"))
+  expect_equal(.fe_row(hr, "HR")$se_upper, 1 / sqrt(120 * 500 / 400 * 0.25 * 0.8), tolerance = 1e-12)
+  fac <- .sr_feas_compute(.fe_hand(type = "factor", lv_n = c(a = 100L, b = 300L), n_obs = 500L), sp,
+                          sr_route_get("logistic"))
+  expect_equal(.fe_row(fac, "OR")$se_upper, .fe_row(fac, "OR")$se * sqrt(0.8), tolerance = 1e-12)
+  d <- list(value = 1.5, measure = "OR", source = "a guideline")
+  tt <- .sr_feas_compute(.fe_hand(n_obs = 500L), sp, sr_route_get("logistic"), delta = d)
+  s <- .fe_row(tt, "OR")$se
+  expect_identical(tt$tier, if (2.8 * s <= log(1.5)) "adequate" else if (1.96 * s > log(1.5)) "inadequate" else "limited")
+  # a complete-case analysis has no upper end, even when n_obs > n_cc
+  cc <- .sr_feas_compute(.fe_hand(n_obs = 500L), .fe_spec(), sr_route_get("logistic"))
+  expect_true(all(is.na(cc$contrasts$se_upper)))
+})
+
+test_that("tiers follow MDE and CI half-width against delta (HR 0.80)", {
+  sp <- .fe_spec()
+  d <- list(value = 0.8, measure = "HR", source = "the trial protocol")
+  dd <- abs(log(0.8))
+  tier_for <- function(se, delta = d) {
+    D <- 1 / (se^2 * 0.25 * 0.8)
+    .sr_feas_compute(.fe_hand(kind = "surv", events_cc = D), sp, sr_route_get("cox"), delta = delta)
+  }
+  ad <- tier_for(0.9 * dd / 2.80)
+  expect_equal(.fe_row(ad, "HR")$se, 0.9 * dd / 2.80, tolerance = 1e-12)
+  expect_identical(ad$tier, "adequate")
+  expect_identical(ad$contrasts$tier, "adequate")
+  expect_identical(ad$advice, "proceed")
+  lim <- tier_for(dd / 2.4)
+  expect_true(1.96 * .fe_row(lim, "HR")$se < dd && dd < 2.80 * .fe_row(lim, "HR")$se)
+  expect_identical(lim$tier, "limited")
+  expect_identical(lim$advice, "proceed")
+  inad <- tier_for(dd / 1.5)
+  expect_true(1.96 * .fe_row(inad, "HR")$se > dd)
+  expect_identical(inad$tier, "inadequate")
+  expect_identical(inad$advice, c("revise", "stop", "exploratory"))
+  # well inside each band (the boundaries themselves are float-fragile)
+  expect_identical(tier_for(dd / 2.80 * 0.999)$tier, "adequate")
+  expect_identical(tier_for(dd / 1.96 * 0.999)$tier, "limited")
+  expect_identical(tier_for(dd / 1.96 * 1.001)$tier, "inadequate")
+  po <- tier_for(0.05, delta = NULL)
+  expect_identical(po$tier, "precision_only")
+  expect_identical(po$contrasts$tier, "precision_only")
+  expect_identical(po$advice, "proceed")
+  # a difference measure compares with the absolute delta
+  rd <- .sr_feas_compute(.fe_hand(), sp, sr_route_get("logistic"),
+                         delta = list(value = 0.5, measure = "RD", source = "convention"))
+  expect_identical(rd$tier, "adequate")
+})
+
+test_that("with a delta, rows of another measure are precision_only and the overall tier is the delta-measure worst", {
+  sp <- .fe_spec()
+  lv_n <- c(a = 100L, b = 250L, c = 50L)
+  inp <- .fe_hand(type = "factor", lv_n = lv_n, n_cc = 400L)
+  d <- list(value = 1.5, measure = "OR", source = "a guideline")
+  res <- .sr_feas_compute(inp, sp, sr_route_get("logistic"), delta = d)
+  cn <- res$contrasts
+  expect_true(all(cn$tier[cn$measure != "OR"] == "precision_only"))
+  expect_true(all(cn$tier[cn$measure == "OR"] %in% c("adequate", "limited", "inadequate")))
+  rank <- c(adequate = 1, limited = 2, inadequate = 3)
+  expect_identical(res$tier, names(rank)[max(rank[cn$tier[cn$measure == "OR"]])])
+  # the two contrasts differ in precision, so a delta between their MDEs gives two different row tiers
+  se_b <- .fe_row(res, "OR", "b")$se
+  se_c <- .fe_row(res, "OR", "c")$se
+  expect_gt(se_c, se_b)
+  d2 <- list(value = exp(2.80 * se_b * 1.05), measure = "OR", source = "x")
+  r2 <- .sr_feas_compute(inp, sp, sr_route_get("logistic"), delta = d2)
+  expect_identical(.fe_row(r2, "OR", "b")$tier, "adequate")
+  expect_false(.fe_row(r2, "OR", "c")$tier == "adequate")
+  expect_identical(r2$tier, .fe_row(r2, "OR", "c")$tier)
+})
+
+test_that("a route with no effect measure is not_applicable, and proceeds", {
+  sp <- .fe_spec()
+  res <- .sr_feas_compute(.fe_hand(), sp, "table1")
+  expect_identical(res$tier, "not_applicable")
+  expect_identical(nrow(res$contrasts), 0L)
+  expect_identical(res$advice, "proceed")
+  expect_error(.sr_feas_compute(.fe_hand(), sp, "table1", delta = list(value = 2, measure = "OR", source = "x")),
+               "measure")
+  t1 <- list(purpose = "describe", by = "x", vars = c("z1", "z2"), layers = .fe_layers())
+  inp <- .sr_feas_inputs(.fe_df(.fe_frame(), t1), t1, sr_route_get("table1"))
+  r2 <- .sr_feas_compute(inp, t1, sr_route_get("table1"))
+  expect_identical(r2$tier, "not_applicable")
+  expect_identical(r2$blockers, character())
+})
+
+# a planted frame -> the verdict
+.fe_verdict <- function(df, spec, route, ...) {
+  .sr_feas_compute(.sr_feas_inputs(.fe_df(df, spec), spec, sr_route_get(route)), spec, sr_route_get(route), ...)
+}
+
+test_that("each blocker fires on a planted frame: tier cannot_run, advice revise / stop", {
+  expect_blocked <- function(res, pattern) {
+    expect_identical(res$tier, "cannot_run")
+    expect_true(any(grepl(pattern, res$blockers)), info = paste(res$blockers, collapse = " | "))
+    expect_true(all(res$contrasts$tier == "cannot_run"))
+    expect_identical(res$advice, c("revise", "stop"))
+  }
+  # the healthy frame is not blocked
+  ok <- .fe_verdict(.fe_frame(), .fe_spec(), "logistic")
+  expect_identical(ok$blockers, character())
+  expect_identical(ok$tier, "precision_only")
+  # delta does not lift a blocker
+  bl <- .fe_verdict(transform(.fe_frame(), x = 1L), .fe_spec(), "logistic",
+                    delta = list(value = 2, measure = "OR", source = "x"))
+  expect_identical(bl$tier, "cannot_run")
+
+  df <- .fe_frame()
+  df$x <- 1L                                                    # a single-level exposure
+  expect_blocked(.fe_verdict(df, .fe_spec(), "logistic"), "fewer than 2 exposure levels")
+
+  df <- .fe_frame()                                             # a factor level with only NA covariates
+  df$z2[df$site == "c"] <- NA
+  sp <- .fe_spec(exposure = "site", exposure_ref = "a", terms = list(list(var = "z1"), list(var = "z2")))
+  r <- .fe_verdict(df, sp, "logistic")
+  expect_blocked(r, "exposure level 'c' has no complete-case row")
+  expect_identical(r$blockers[grepl("level 'c'", r$blockers)], "exposure level 'c' has no complete-case row")
+
+  df <- .fe_frame()                                             # an all-"no" outcome
+  df$y[!is.na(df$y)] <- "no"
+  expect_blocked(.fe_verdict(df, .fe_spec(), "logistic"), "no events")
+  df$y[!is.na(df$y)] <- "yes"                                   # and an all-"yes" one
+  expect_blocked(.fe_verdict(df, .fe_spec(), "logistic"), "constant")
+
+  df <- .fe_frame()                                             # a constant continuous outcome
+  df$w <- 5
+  spw <- .fe_spec(outcome = "w")
+  spw$event_value <- NULL
+  expect_blocked(.fe_verdict(df, spw, "lm"), "SD is 0")
+
+  df <- .fe_frame()                                             # 8 terms with 5 events
+  set <- withr::with_seed(9L, as.data.frame(matrix(stats::rnorm(500 * 6), 500, 6,
+                                                   dimnames = list(NULL, paste0("q", 1:6)))))
+  df <- cbind(df, set)
+  df$y[!is.na(df$y)] <- "no"
+  df$y[which(!is.na(df$y))[1:5]] <- "yes"
+  tm <- lapply(c("z1", "z2", "z3", paste0("q", 1:5)), function(v) list(var = v, type = "linear"))
+  r <- .fe_verdict(df, .fe_spec(terms = tm), "logistic")
+  expect_blocked(r, "model parameters")
+  # survival: more parameters than events
+  sf <- .fe_surv_frame(60L)
+  sf$status <- 0L
+  sf$status[1:2] <- 1L
+  sf$z2 <- withr::with_seed(2L, stats::rnorm(60))
+  sf$z3 <- withr::with_seed(3L, stats::rnorm(60))
+  tms <- lapply(c("z1", "z2", "z3"), function(v) list(var = v, type = "linear"))
+  ssp <- .fe_surv_spec()
+  ssp$terms <- tms
+  r <- .fe_verdict(sf, ssp, "cox")
+  expect_blocked(r, "model parameters")
+  # a continuous outcome: parameters >= n_cc
+  small <- .fe_frame(5L)
+  small$w <- seq_len(5L) * 1.5
+  small$z2 <- c(0.3, -1.2, 0.8, 0.1, -0.4)
+  small$x <- c(0, 1, 0, 1, 1)
+  spw <- .fe_spec(outcome = "w", terms = lapply(c("z1", "z2", "z3"), function(v) list(var = v, type = "linear")))
+  spw$event_value <- NULL
+  expect_blocked(.fe_verdict(small, spw, "lm"), "model parameters")
+
+  df <- .fe_frame()                                             # x equal to z1 > 0 (positivity)
+  df$x <- as.integer(df$z1 > 0)
+  expect_blocked(.fe_verdict(df, .fe_spec(), "logistic"),
+                 "the exposure is perfectly predicted by the covariates \\(positivity\\)")
+
+  df <- .fe_frame()                                             # a continuous exposure that does not vary
+  df$x <- 3.5
+  r <- .fe_verdict(df, .fe_spec(), "logistic")
+  expect_blocked(r, "the exposure does not vary")
+  expect_false(any(grepl("fewer than 2", r$blockers)))
+
+  spec <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 500,
+               layers = .fe_layers(), seed = 1L)               # rmst tau beyond the follow-up
+  withr::local_options(sr.feas_rmst_sims = 5)
+  expect_blocked(.fe_verdict(.fe_surv_frame(), spec, "rmst"), "tau")
+
+  # the Task 1 coding and design blockers pass through
+  spc <- .fe_spec()
+  spc$event_value <- NULL
+  expect_blocked(.fe_verdict(.fe_frame(), spc, "logistic"), "^outcome: ")
+  expect_blocked(.fe_verdict(.fe_frame(), .fe_spec(exclude_rows = 900), "logistic"), "^design: exclude_rows")
+})
+
+test_that("warnings: near-positivity, events per parameter (Firth advice), few clusters", {
+  sp <- .fe_spec()
+  r <- .sr_feas_compute(.fe_hand(ps_outside = 0.2), sp, sr_route_get("logistic"))
+  expect_true(any(grepl("near-positivity", r$warnings)))
+  expect_false(any(grepl("near-positivity",
+                         .sr_feas_compute(.fe_hand(ps_outside = 0.05), sp, sr_route_get("logistic"))$warnings)))
+  low <- .fe_hand(kind = "binary", risk = 0.05, params = 4L, n_cc = 400L)
+  low$outcome$events_cc <- 20                                   # 20 events / 4 parameters = 5 < 10
+  r <- .sr_feas_compute(low, sp, sr_route_get("logistic"))
+  expect_true(any(grepl("events per parameter", r$warnings)))
+  expect_true(any(grepl("consider pre-specifying penalty = \"firth\"", r$warnings, fixed = TRUE)))
+  rf <- .sr_feas_compute(low, .fe_spec(penalty = "firth"), sr_route_get("logistic"))
+  expect_true(any(grepl("events per parameter", rf$warnings)))
+  expect_false(any(grepl("firth", rf$warnings)))
+  lowc <- .fe_hand(kind = "surv", params = 4L)
+  lowc$outcome$events_cc <- 20
+  rc <- .sr_feas_compute(lowc, sp, sr_route_get("cox"))
+  expect_true(any(grepl("events per parameter", rc$warnings)))
+  expect_false(any(grepl("firth", rc$warnings)))
+  ok <- .sr_feas_compute(.fe_hand(), sp, sr_route_get("logistic"))
+  expect_identical(ok$warnings, character())
+})
+
+test_that("RMST SE: deterministic, order-free, symmetric, RNG-neutral", {
+  withr::local_options(sr.feas_rmst_sims = 40)
+  sp <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 7L)
+  inp <- .sr_feas_inputs(.fe_df(.fe_surv_frame(), sp), sp, sr_route_get("rmst"))
+  pr <- inp$outcome$pairs
+  se <- .sr_feas_rmst_se(pr, 150L, 200L, 8, 40L, 7L)
+  expect_true(is.finite(se) && se > 0)
+  expect_identical(.sr_feas_rmst_se(pr, 150L, 200L, 8, 40L, 7L), se)
+  expect_false(identical(.sr_feas_rmst_se(pr, 150L, 200L, 8, 40L, 8L), se))
+  perm <- pr[withr::with_seed(3L, sample(nrow(pr))), ]
+  expect_identical(.sr_feas_rmst_se(perm, 150L, 200L, 8, 40L, 7L), se)
+  expect_identical(.sr_feas_rmst_se(pr, 200L, 150L, 8, 40L, 7L), se)
+  # larger groups are more precise
+  expect_lt(.sr_feas_rmst_se(pr, 600L, 800L, 8, 40L, 7L), se)
+  # the caller's RNG kind and .Random.seed are restored
+  set.seed(11L)
+  before <- get(".Random.seed", envir = globalenv())
+  kind <- RNGkind()
+  .sr_feas_rmst_se(pr, 100L, 100L, 8, 10L, 1L)
+  expect_identical(get(".Random.seed", envir = globalenv()), before)
+  expect_identical(RNGkind(), kind)
+  # through the compute: the seed is spec$seed, else the route default, else 1
+  res <- .sr_feas_compute(inp, sp, sr_route_get("rmst"))
+  expect_identical(res$contrasts$measure, "RMST_diff")
+  expect_identical(res$contrasts$scale, "identity")
+  expect_identical(res$contrasts$se, .sr_feas_rmst_se(pr, inp$contrasts_in$n_k, inp$contrasts_in$n_ref, 8, 40L, 7L))
+  no_seed <- sp
+  no_seed$seed <- NULL
+  r1 <- .sr_feas_compute(inp, no_seed, sr_route_get("rmst"))
+  expect_identical(r1$contrasts$se, .sr_feas_rmst_se(pr, inp$contrasts_in$n_k, inp$contrasts_in$n_ref, 8, 40L, 1L))
+  expect_equal(res$contrasts$h, 1.96 * res$contrasts$se, tolerance = 1e-12)
+  expect_identical(res$tier, "precision_only")
+})
+
+test_that("compute on real inputs: precision only, blind, and byte-identical under outcome permutation", {
+  withr::local_options(sr.feas_rmst_sims = 20)
+  spec <- .fe_spec(terms = list(list(var = "z1", type = "rcs", knots = 4), list(var = "z2"),
+                                list(var = "site", type = "factor")))
+  df <- .fe_df(.fe_frame(), spec)
+  route <- sr_route_get("logistic")
+  one <- function(d) .sr_feas_compute(.sr_feas_inputs(d, spec, route), spec, route)
+  res <- one(df)
+  expect_identical(res$blockers, character())
+  expect_identical(res$tier, "precision_only")
+  expect_true(all(is.finite(res$contrasts$se)))
+  expect_identical(.sr_feas_blind_frame(res, spec), res)
+  ref <- sr_canonical_json(res)
+  expect_identical(sr_canonical_json(one(.fe_permute(df, "y"))), ref)
+  expect_identical(sr_canonical_json(one(.fe_shuffle(.fe_permute(df, "y")))), ref)
+
+  sv <- .fe_surv_spec()
+  sd0 <- .fe_df(.fe_surv_frame(), sv)
+  cox <- sr_route_get("cox")
+  one_c <- function(d) .sr_feas_compute(.sr_feas_inputs(d, sv, cox), sv, cox,
+                                        delta = list(value = 0.7, measure = "HR", source = "a protocol"))
+  rc <- one_c(sd0)
+  expect_identical(rc$contrasts$measure, "HR")
+  expect_true(rc$tier %in% c("adequate", "limited", "inadequate"))
+  expect_identical(.sr_feas_blind_frame(rc, sv), rc)
+  expect_identical(sr_canonical_json(one_c(.fe_shuffle(.fe_permute(sd0, c("time", "status"))))), sr_canonical_json(rc))
+
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 5L)
+  rd0 <- .fe_df(.fe_surv_frame(), rs)
+  rr <- sr_route_get("rmst")
+  one_r <- function(d) .sr_feas_compute(.sr_feas_inputs(d, rs, rr), rs, rr)
+  rres <- one_r(rd0)
+  expect_identical(rres$blockers, character())
+  expect_identical(sr_canonical_json(one_r(.fe_shuffle(.fe_permute(rd0, c("time", "status"))))), sr_canonical_json(rres))
+  expect_identical(.sr_feas_blind_frame(rres, rs), rres)
+})
+
+test_that("the verdict's contrasts frame never trips the gate when spec columns share its column names", {
+  bf <- .fe_frame()
+  names(bf)[match(c("y", "z1"), names(bf))] <- c("scale", "level")
+  spec <- .fe_spec(outcome = "scale", terms = list(list(var = "level")))
+  res <- .sr_feas_compute(.sr_feas_inputs(.fe_df(bf, spec), spec, sr_route_get("logistic")), spec,
+                          sr_route_get("logistic"))
+  expect_identical(res$blockers, character())
+  expect_identical(.sr_feas_blind_frame(res, spec), res)
+  bad <- res
+  bad$contrasts$hr <- 1
+  expect_error(.sr_feas_blind_frame(bad, spec), "contrasts\\$hr")
+})
