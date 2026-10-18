@@ -66,6 +66,7 @@
 # Cross-field validation of a cox spec (the schema has been checked already); stops with the reason.
 .sr_cox_check <- function(spec) {
   .sr_surv_check(spec)
+  .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
   base <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   cl <- spec[["cluster"]]

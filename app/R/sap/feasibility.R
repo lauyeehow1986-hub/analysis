@@ -192,6 +192,11 @@ sr_feasibility_assess <- function(project, analysis_id, delta = NULL, assumption
     stop("analysis ", .sr_sap_q(analysis_id), " is stopped: reverse the stop with sr_feasibility_decide first",
          call. = FALSE)
   }
+  # an assumption given as NULL is an absent one: never stored, and the verdict warns which value it used
+  if (is.list(assumptions)) {
+    assumptions <- Filter(Negate(is.null), assumptions)
+    if (!length(assumptions)) assumptions <- list()
+  }
   route <- sr_route_get(a$route, a$route_version)
   spec <- .sr_spec_from_state(a$spec)
   cols <- sr_spec_cols(spec)

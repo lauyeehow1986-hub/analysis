@@ -66,13 +66,12 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   d
 }
 
-# The outcome columns a spec names: outcome, time, status (character(0) when none).
-.sr_feas_outcome_cols <- function(spec) {
-  c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
-}
-
 # The levels of x the way .h_levels orders them (sorted in the original type, as text, `ref` first
 # when it is observed), without its refusals: an absent ref or a single level is a blocker elsewhere.
+# The order deliberately follows the run's: sort() on text collates in the session locale, exactly as
+# .h_levels does in the emitted analysis code, so the verdict's contrasts are the run's contrasts in the
+# run's order (a test checks this on mixed-case levels). Do not switch to a C-locale (radix) order here
+# without changing the emitted code too.
 .sr_feas_levels <- function(x, ref = NULL) {
   lv <- as.character(sort(unique(x[!is.na(x)])))
   if (!is.null(ref) && ref %in% lv) lv <- c(ref, setdiff(lv, ref))
@@ -197,7 +196,11 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #' @return a list:
 #'   * kind: "continuous" | "binary" | "surv" | "none" (.sr_feas_kind of the route id).
 #'   * n_rows: rows of df (every row: exclude_rows is ignored).
-#'   * n_cc: complete cases over every spec column present (sr_spec_cols, incl. mi$aux).
+#'   * n_cc: complete cases over the model columns present (outcome, time, status, exposure, term
+#'     variables, cluster, strata; not mi$aux): the n the compiled run fits for cox, and for glm/lm
+#'     with se = "cluster"; a cluster or strata column the run does not use still drops rows here
+#'     (conservative); kind "none": over every
+#'     spec column present.
 #'   * n_obs: rows with a non-missing coded outcome (surv: time and event); the raw non-missing count
 #'     when the outcome cannot be coded; NA when a spec column is missing; kind "none": the non-NA
 #'     count of spec$outcome when present, else NA.
@@ -223,7 +226,8 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #'     gives NA r2x, ps_outside, separated.
 #'   * clusters: NULL unless spec$layers$clustered, else list(G, m_bar = n_cc / G, cv = the
 #'     population SD of the cluster sizes / m_bar); all NA when the cluster column is unavailable
-#'     (also when it is an outcome column).
+#'     (also when it is an outcome column); fewer than 2 clusters is the blocker "design: the
+#'     cluster column '<c>' has fewer than 2 clusters".
 #'   * params: the column count of the full design (spec minus the outcome fields), minus 1 for surv
 #'     (no intercept); rmst: the number of exposure levels; NA when the design fails or is not built.
 #'   * blockers: unique character; "outcome: ..." or "design: ..." (missing columns, an outcome column
@@ -242,7 +246,17 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   rownames(df) <- NULL
   n_rows <- nrow(df)
   want <- tryCatch(sr_spec_cols(spec), error = function(e) names(df))
-  cols <- intersect(want, names(df))
+  # the complete-case filter of the model: only the columns the analysis model uses (outcome, time,
+  # status, exposure, term variables, cluster, strata). For cox, and for glm/lm with se = "cluster",
+  # this is the run's own filter, so n_cc is the n the run fits; a cluster or strata column the run
+  # does not use still drops rows here, which is conservative. mi$aux (and table1's by / vars / nonnormal) never drop a row; kind "none" has
+  # no model and keeps every spec column.
+  exv <- .sr_spec_chr(spec[["exposure"]])
+  tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
+  model_cols <- if (kind == "none") want else {
+    unique(c(.sr_outcome_cols(spec), exv, tv, .sr_spec_chr(spec[["cluster"]]), .sr_spec_chr(spec[["strata"]])))
+  }
+  cols <- intersect(model_cols, names(df))
   cc <- if (length(cols)) stats::complete.cases(df[, cols, drop = FALSE]) else rep(TRUE, n_rows)
   n_cc <- sum(cc)
   skeleton <- function(n_obs) {
@@ -277,10 +291,8 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   # 5. the complete-case covariate frame, sorted by all its columns. An outcome column named as a term,
   # an interaction variable, a stratum or the cluster is a blocker and is left out (R17): the frame
   # never holds an outcome column, and no design is built on such a spec.
-  exv <- .sr_spec_chr(spec[["exposure"]])
-  tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
   iv <- tryCatch(.sr_spec_chr(unlist(spec[["interactions"]])), error = function(e) character())
-  oc <- .sr_feas_outcome_cols(spec)
+  oc <- .sr_outcome_cols(spec)
   oc_cov <- intersect(oc, c(tv, iv, .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["cluster"]])))
   for (o in oc_cov) block("design: the outcome column '", o, "' cannot be a term, stratum or cluster")
   cov_cols <- setdiff(intersect(unique(c(exv, tv, .sr_spec_chr(spec[["cluster"]]), .sr_spec_chr(spec[["strata"]]))),
@@ -370,6 +382,8 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
       m <- sort(as.numeric(tabulate(match(cf[[cl]], unique(cf[[cl]])))))
       m_bar <- n_cc / length(m)
       clusters <- list(G = length(m), m_bar = m_bar, cv = sqrt(mean((m - m_bar)^2)) / m_bar)
+      # cf holds complete cases only, so the cluster column has no NA here: G counts distinct clusters
+      if (length(m) < 2L) block("design: the cluster column '", cl, "' has fewer than 2 clusters")
     }
   }
 
@@ -391,7 +405,7 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #' values are still walked. Returns x invisibly; stops naming the offending element.
 .sr_feas_blind_frame <- function(x, spec) {
   if (missing(spec) || !is.list(spec)) stop("spec must be the analysis spec (a list)", call. = FALSE)
-  oc <- .sr_feas_outcome_cols(spec)
+  oc <- .sr_outcome_cols(spec)
   chk <- x
   if (is.list(chk) && !is.data.frame(chk)) {
     for (p in .sr_feas_struct_paths) {
@@ -549,12 +563,13 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
   if (length(s) != 1L || is.na(s) || s < 2L) 500L else s
 }
 
-# The seed of the RMST simulation: spec$seed, else the route schema's default seed, else 1.
+# The seed of the RMST simulation: spec$seed when it is a whole number (sr_streams' rule), else 1. No
+# route schema gives seed a default (seed is required in every schema), so there is no schema step.
+# `route` is kept for the callers' signature.
 .sr_feas_seed <- function(spec, route) {
   s <- spec[["seed"]]
   whole <- function(z) .sr_feas_num1(z) && z == round(z) && abs(z) <= .Machine$integer.max   # sr_streams' rule
-  if (!whole(s)) s <- if (is.list(route)) route$spec_schema[["seed"]][["default"]] else NULL
-  if (!whole(s)) 1L else s
+  if (whole(s)) s else 1L
 }
 
 # The RMST simulation settings the verdict uses: list(sims = .sr_feas_rmst_sims(), seed =
@@ -617,7 +632,9 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
       if (fnum(ex$variance) && ex$variance == 0) block("the exposure does not vary")
     } else {
       if (sum(lv$n_cc > 0L) < 2L) block("fewer than 2 exposure levels have a complete-case row")
-      for (l in lv$level[lv$n_all > 0L & lv$n_cc == 0L]) block("exposure level '", l, "' has no complete-case row")
+      for (l in lv$level[lv$n_all > 0L & lv$n_cc == 0L]) {
+        block("exposure level '", l, "' is observed but has no complete-case row")
+      }
     }
     if (kind == "binary") {
       if (fnum(out$risk) && out$risk %in% c(0, 1)) {
@@ -634,9 +651,12 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
       binary = if (fnum(out$events_cc)) min(out$events_cc, n_cc - out$events_cc) else NA_real_,
       surv = out$events_cc, NA_real_)
     if (fnum(p) && kind == "continuous" && p >= n_cc) {
-      block(p, " model parameters need fewer than the ", n_cc, " complete-case rows")
+      block("the model has ", p, " parameters but only ", n_cc,
+            " complete-case rows (it needs more rows than parameters)")
     } else if (fnum(p) && fnum(epv_n) && p > epv_n) {
-      block(p, " model parameters exceed the ", format(round(epv_n, 1)), " expected ",
+      # RMST fits no regression: its p is the number of exposure groups
+      block(if (grepl("^rmst", rid)) paste0("the ", p, " exposure groups") else paste0(p, " model parameters"),
+            " exceed the ", format(round(epv_n, 1)), " expected ",
             if (kind == "binary") "events (or non-events)" else "events", " among the complete cases")
     }
     if (!is.null(ci) && nrow(ci) && any(ci$separated, na.rm = TRUE)) {
@@ -652,9 +672,20 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
            SR_FEAS_PS_RANGE[1L], ", ", SR_FEAS_PS_RANGE[2L], "]")
     }
     if (fnum(p) && p > 0 && fnum(epv_n) && epv_n / p < SR_FEAS_EPV_WARN) {
-      warn("events per parameter (", format(round(epv_n / p, 1)), ") is below ", SR_FEAS_EPV_WARN,
-           ": sparse-data bias is likely",
-           if (grepl("^logistic", rid) && !.sr_glm_firth(spec)) "; consider pre-specifying penalty = \"firth\"" else "")
+      if (grepl("^rmst", rid)) {
+        # RMST fits no regression: p is the number of exposure groups, so epv_n / p is the mean expected
+        # events per group, and few events make each group's Kaplan-Meier curve (and its RMST) imprecise
+        warn("expected events per exposure group (", format(round(epv_n / p, 1)), ") is below ", SR_FEAS_EPV_WARN,
+             ": the Kaplan-Meier estimates behind the RMST rest on few events")
+      } else {
+        warn("events per parameter (", format(round(epv_n / p, 1)), ") is below ", SR_FEAS_EPV_WARN,
+             ": sparse-data bias is likely",
+             if (grepl("^logistic", rid) && !.sr_glm_firth(spec)) "; consider pre-specifying penalty = \"firth\"" else "")
+      }
+    }
+    if (kind == "continuous" && "MD" %in% measures && is.null(assumptions[["r2_y"]])) {
+      warn("r2_y was not given: the MD standard error uses r2_y = 0 (the covariates are assumed to explain ",
+           "none of the outcome variance, which is conservative)")
     }
     if (clustered && fnum(inputs$clusters$G) && inputs$clusters$G < SR_FEAS_MIN_CLUSTERS) {
       warn("fewer than ", SR_FEAS_MIN_CLUSTERS, " clusters (", inputs$clusters$G,

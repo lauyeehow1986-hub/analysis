@@ -36,18 +36,16 @@ design; this file holds *what has happened* and *what we learned*.
      logical (Yes/No) outcome given a text `event_value` such as "Yes" is still accepted by `sr_sap_add`,
      but since P1c.1 it surfaces as a "no events" blocker in the feasibility verdict before the lock
      (see the R45 gotcha below); `sr_analysis_add` has no event-value check (the run refuses instead).
-   - P1c.1 follow-ups:
-     - refuse a spec that uses an outcome column as a term, stratum or cluster at the route level (the
-       feasibility verdict blocks it today);
-     - a test that the data-over-spec stale precedence holds;
-     - pin the legacy (pre-P1c.1) SAP hash as a literal in a test;
-     - a locale-independent level sort, together with `.h_levels`;
-     - `n_cc` under MI should count the aux / by / vars / nonnormal columns;
-     - the EPV warning wording on rmst routes;
-     - a generic blocker for an unusable cluster column;
-     - `r2_y = NULL` is accepted silently;
-     - measure the "well under 1%" claim;
-     - minor T6 wording.
+   - P1c.1 follow-ups F1-F15 done 2026-10-18 (branch `p1c1-followups`). Declined: a locale-independent
+     level sort. The engine follows the run's (locale) order of `.h_levels` on purpose, and changing it
+     would change the emitted analysis code (a test pins engine levels == run levels).
+   - Open feasibility follow-ups (from the p1c1-followups review):
+     - The glm/lm engine applies the cluster column and the design effect, and now the F8 "fewer than 2
+       clusters" blocker, even when `se != "cluster"`. Measured: deff 2.29 on an analysis the run fits
+       unclustered. Proposed fix, which needs the user's ruling: glm/lm refuse `layers$clustered = TRUE`
+       or a cluster column without `se = "cluster"`, mirroring cox.
+     - No engine version is stored with an assessment, so P1c.1-era assessments stay current after
+       engine changes.
 
 ## Decisions (with the user)
 | Topic | Decision |
@@ -172,6 +170,11 @@ design; this file holds *what has happened* and *what we learned*.
   their hash. A stop on any pre-specified analysis (secondary included) blocks the lock; missing,
   stale, no-decision and revise checks apply to primaries only. A stop is replaced only with a reason,
   and that is allowed even when the assessment is stale.
+- **Feasibility `n_cc` counts the model columns only** (outcome, time, status, exposure, term
+  variables, cluster, strata). That is the compiled run's own complete-case filter for cox, and for
+  glm/lm with `se = "cluster"`; a cluster or strata column the run does not use still drops rows in
+  the engine (conservative). `mi$aux`, `by`,
+  `vars` and `nonnormal` never drop a row (kind "none" still counts every spec column).
 - **R45 now surfaces before the lock:** an `event_value` that codes no row (for example "yes" on a
   column the store holds as logical) is a "no events" blocker in the feasibility verdict, not a failure
   at the run.
@@ -180,6 +183,11 @@ design; this file holds *what has happened* and *what we learned*.
 - **Claude Code Bash tool and big heredocs:** a very large single heredoc can be rejected with
   "unexpected EOF while looking for matching quote". Write files in small `cat >> file <<'EOF'` chunks
   and keep commands such as `grep -P` out of the same call.
+- **Regex backslashes in shell-edited R code:** `sed` replacement text and other shell-quoted strings
+  can halve backslashes, so a test pattern `"stale \\(...\\)"` became `"stale \(...\)"`, an R parse
+  error. Make such edits with the Edit / Write tool, or use `[(]` / `fixed = TRUE` in the pattern.
+- **Full RED counts:** testthat stops after 10 failures. Run
+  `TESTTHAT_MAX_FAILS=Inf Rscript tools/run_tests.R <filter>` to see them all.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

@@ -105,8 +105,11 @@ selection, and power from an observed effect stays refused. The code is in `app/
 
 The verdict is computed from what the project can already show while blind:
 
-- the analysed n, after the complete-case filter over every column of the spec (`exclude_rows` is
-  ignored, see below);
+- the analysed n, after the complete-case filter over the columns the analysis model uses (outcome,
+  time, status, exposure, term variables, cluster, strata). This is the filter the compiled run
+  applies for cox, and for glm/lm when `se = "cluster"`; a cluster or strata column that the run does
+  not use still drops rows here, which is conservative.
+  An `mi$aux` column never drops a row. `exclude_rows` is ignored, see below;
 - the outcome's own marginals: the marginal risk (binary), the marginal SD (continuous), and the
   total events and the pooled, exposure-blind (time, event) pairs (survival);
 - the exposure's marginals and the exposure-on-covariate structure: its levels and counts, the R² of
@@ -163,6 +166,8 @@ are optional (an ICC is required for a clustered analysis).
   precision only and says so.
 - **`assumptions$r2_y`** (a number in [0, 1)) applies to a continuous outcome only. **`assumptions$icc`**
   (a number in [0, 1)) applies to a clustered analysis only. Each needs a non-empty justification.
+  An assumption given as `NULL` counts as not given. Without `r2_y`, the MD row uses `r2_y = 0` and
+  the verdict says so in a warning. Without `icc`, a clustered analysis is refused.
 
 One example per measure (the route that reports it is in the comment):
 
@@ -225,6 +230,17 @@ Every number comes from the formula applied to the inputs above; nothing is fitt
   complete-case end to the other end is visible. The tier uses the complete-case end.
 - **Results.** The 95% CI half-width is `h = 1.96 * SE` and the minimum detectable effect at 80% power
   is `MDE = 2.80 * SE`. Both are on the reporting scale, so ratio measures are exponentiated.
+- **What comes from the complete cases.** The design the engine builds (the parameter count and the
+  exposure model) uses factor levels and RCS knots computed on the complete cases. The compiled glm,
+  lm and cox code computes them on every row of the table (rmst: on its complete cases). So:
+  - an exposure level seen only in incomplete rows is the blocker "exposure level '<l>' is observed
+    but has no complete-case row";
+  - a level of a factor term seen only in incomplete rows is left out of the engine's design, which
+    then counts one parameter fewer than the run (whose column for that level is all zero);
+  - RCS knots can differ slightly. That changes R2x a little, not the parameter count.
+- **The rmst `tau` check is pooled.** The blocker compares `tau` with the longest follow-up of the
+  pooled, exposure-blind (time, event) pairs, so it cannot see a `tau` beyond one group's follow-up
+  only. The compiled run refuses that case ("tau = ... exceeds the follow-up of group ...").
 
 The predicted SEs are checked against the spread of the estimates the analysis actually produces,
 over 1000 simulated datasets per cell, in [validation.md](validation.md) (section 3). All 11 cells
@@ -240,7 +256,7 @@ With a `delta`, the rows of the delta's measure are tiered. With `d = |log(delta
 | tier | rule | advice |
 |---|---|---|
 | `adequate` | `2.80 * SE <= d` (the MDE is no larger than the effect that matters) | proceed |
-| `limited` | `1.96 * SE <= d < 2.80 * SE`: the study can probably rule out an effect that large but has under 80% power to detect one | proceed, stating the precision in the Methods |
+| `limited` | `1.96 * SE <= d < 2.80 * SE`: the 95% CI half-width is at most `d`, so an estimate near the null would exclude an effect that large, but the power to detect it is between 50% and 80% | proceed, stating the precision (the half-width and the MDE) in the Methods |
 | `inadequate` | `1.96 * SE > d`: the study can neither reliably detect nor rule out the effect | revise, stop, or exploratory |
 | `precision_only` | no `delta`, or a row of another measure than the delta's | proceed |
 | `not_applicable` | the route reports no effect measure (Table 1 and other descriptive or unknown routes) | proceed |
@@ -254,13 +270,19 @@ The overall tier is the worst tier among the rows of the delta's measure. Rows o
 
 - no complete-case row; the analysis has no single exposure column;
 - a continuous exposure that does not vary (`Var(x) == 0`); a continuous exposure has no level blocker;
-- a categorical exposure with fewer than two levels that have a complete-case row, or a level with no
-  complete-case row;
+- a categorical exposure with fewer than two levels that have a complete-case row, or a level that is
+  observed but has no complete-case row;
 - a constant outcome: no events (or every row an event) for a binary outcome, no events for a
   survival outcome, an SD of 0 for a continuous outcome. An `event_value` that codes no row shows up
   here as "no events", now before the lock rather than at the run;
-- more model parameters than the complete-case rows (continuous outcome), or than the expected events
-  (survival) or the smaller of the expected events and non-events (binary);
+- at least as many model parameters as complete-case rows (continuous outcome: "the model has <p>
+  parameters but only <n> complete-case rows (it needs more rows than parameters)"), or more
+  parameters than the expected events (survival) or the smaller of the expected events and
+  non-events (binary): "<p> model parameters exceed the <e> expected events among the complete
+  cases". On rmst, which fits no regression, the count is of exposure groups: "the <p> exposure
+  groups exceed the <e> expected events among the complete cases";
+- a clustered analysis whose cluster column has fewer than two distinct clusters among the complete
+  cases: "design: the cluster column '<c>' has fewer than 2 clusters";
 - an exposure that the covariates predict perfectly (a positivity violation);
 - an rmst `tau` beyond the longest follow-up;
 - an outcome column (outcome, time or status) used as a term, an interaction variable, a stratum or
@@ -273,7 +295,11 @@ The overall tier is the worst tier among the rows of the delta's measure. Rows o
 
 - near-positivity: more than 5% of the rows have a propensity outside [0.01, 0.99];
 - fewer than 10 events per model parameter (sparse-data bias); for a logistic analysis the warning
-  offers a pre-specified Firth penalty;
+  offers a pre-specified Firth penalty. An rmst analysis fits no regression, so its warning is about
+  fewer than 10 expected events per exposure group, which make the Kaplan-Meier estimates behind the
+  RMST imprecise;
+- a continuous outcome assessed without `r2_y`: the MD standard error uses `r2_y = 0`
+  (conservative), and the warning says so;
 - fewer than 30 clusters, where cluster-robust SEs are unreliable;
 - a non-empty `exclude_rows`, which the verdict ignores (it is an influence sensitivity for the locked
   run).
@@ -529,7 +555,6 @@ The phase that owns each item is in brackets.
 - The Riley (pmsampsize) criteria for prediction routes [P6]. No prediction route exists yet; the
   engine marks a route it does not know as `not_applicable`.
 - Clustered RMST. The route refuses it, so it has no feasibility cell.
-
 - The SAP_v1.docx document and the lock UI [P1d]. P1c owns the `sap.*` events, the lock and its
   refusals, because every run needs them.
 - SAP amendment after the lock and data versioning [P2]. In P1c a run on data that changed after the

@@ -74,6 +74,25 @@ sr_spec_cols <- function(spec) {
   ))
 }
 
+#' The outcome columns a spec names: outcome, time, status, in that order (character(0) when none).
+.sr_outcome_cols <- function(spec) {
+  c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
+}
+
+#' Refuses a spec that uses an outcome column (outcome, time, status) as a term variable, an
+#' interaction variable, a stratum or the cluster, naming the first such outcome column. Called by
+#' the cross-field check of each model route; the feasibility engine keeps its own blocker too.
+.sr_outcome_cov_refuse <- function(spec) {
+  tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
+  iv <- tryCatch(.sr_spec_chr(unlist(spec[["interactions"]])), error = function(e) character())
+  cov <- c(tv, iv, .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["cluster"]]))
+  bad <- intersect(.sr_outcome_cols(spec), cov)
+  if (length(bad)) {
+    stop("the outcome column '", bad[1L], "' cannot be a term, stratum or cluster", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # ---- the term plan ------------------------------------------------------------------------------
 
 .sr_one_string <- function(x, what) {
