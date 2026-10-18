@@ -107,8 +107,10 @@ The verdict is computed from what the project can already show while blind:
 
 - the analysed n, after the complete-case filter over the columns the analysis model uses (outcome,
   time, status, exposure, term variables, cluster, strata). This is the filter the compiled run
-  applies for cox, and for glm/lm when `se = "cluster"`; a cluster or strata column that the run does
-  not use still drops rows here, which is conservative.
+  applies, so the n is the n the run fits. A cluster column is always one the run uses: cox fits
+  `cluster()`, and lm and glm refuse a cluster column (or `layers$clustered = TRUE`) without
+  `se = "cluster"`. Only a `strata` or `cluster` field that the route does not take (strata on lm or
+  glm, either on rmst) is ignored by the run and still drops rows here, which is conservative.
   An `mi$aux` column never drops a row. `exclude_rows` is ignored, see below;
 - the outcome's own marginals: the marginal risk (binary), the marginal SD (continuous), and the
   total events and the pooled, exposure-blind (time, event) pairs (survival);
@@ -415,9 +417,9 @@ Spec fields per route (besides `purpose`, `layers` and `seed`):
 | route | purpose | model | primary effect | SE options |
 |---|---|---|---|---|
 | `table1` | describe | baseline characteristics by `by` (mean (SD), median [IQR] for `nonnormal`, n (%)) | SMD per group vs the first level (with a CI for continuous and two-level variables); no p-values | none |
-| `lm` | explain-causal | `outcome ~ exposure + terms (+ interactions)`, complete cases | MD (adjusted mean difference); with `marginal = TRUE` the g-computation marginal MD | `model` (default), `robust` (HC3), `cluster` (HC1, t on min(residual df, G - 1) df) |
-| `logistic` | explain-causal | binomial logit glm, or Firth (`penalty = "firth"`, logistf) | conditional OR; marginal RD, RR and NNT by g-computation (`marginal` default TRUE, off with Firth) | `model` (default), `robust` (HC0), `cluster` (HC1) |
-| `modpois` | explain-causal | Poisson log-link glm (Zou 2004) | conditional RR; marginal RD, RR, NNT as for logistic | `robust` (default) or `cluster`; `model` is refused |
+| `lm` | explain-causal | `outcome ~ exposure + terms (+ interactions)`, complete cases | MD (adjusted mean difference); with `marginal = TRUE` the g-computation marginal MD | `model` (default), `robust` (HC3), `cluster` (HC1, t on min(residual df, G - 1) df); `cluster` needs `layers$clustered = TRUE` and `cluster`, and either of those needs `se = "cluster"` |
+| `logistic` | explain-causal | binomial logit glm, or Firth (`penalty = "firth"`, logistf) | conditional OR; marginal RD, RR and NNT by g-computation (`marginal` default TRUE, off with Firth) | `model` (default), `robust` (HC0), `cluster` (HC1); clustering as for lm |
+| `modpois` | explain-causal | Poisson log-link glm (Zou 2004) | conditional RR; marginal RD, RR, NNT as for logistic | `robust` (default) or `cluster`; `model` is refused; clustering as for lm |
 | `cox` | explain-causal | `Surv(time, status == status_event) ~ exposure + terms [+ strata] [+ cluster]`; ties `efron` (default) or `breslow` | HR (adjusted HR when terms or strata are present) | model-based; robust (cluster) only with `layers$clustered = TRUE` and `cluster` |
 | `rmst` | explain-causal | Kaplan-Meier per exposure level up to the pre-specified `tau` | RMST difference vs the reference level, normal interval | none; clustered data refused |
 
@@ -467,10 +469,11 @@ Notes per route:
 - Options: `spec$boot$B` (a whole number of at least 20, default 2000) and `spec$boot$type`:
   `percentile` (default), `bca` or `normal`. With `layers$clustered = TRUE` the spec must set
   `boot_type = "cluster"`, which resamples whole clusters (and leaves out whole clusters in the BCa
-  jackknife); `pair` and `replicate_weights` are refused at compile.
+  jackknife), and lm and glm also `se = "cluster"` (section 6); `pair` and `replicate_weights` are
+  refused at compile.
 - The bootstrapped statistic is the route's primary effect as reported: with marginal effects the
   g-computation is re-run in every replicate. Ratio measures are bootstrapped on the log scale.
-  Covariate and descriptive rows keep their model-based intervals.
+  Covariate and descriptive rows keep their analytic intervals (cluster-robust for clustered data).
 - Replicates run in chunks of 100, each on its own `nextRNGStream`, so results do not depend on the
   number of workers. BCa falls back to percentile when it cannot be computed, and the fallback and its
   reason are recorded. A Monte Carlo SE of the interval limits comes from 10 batches. Seed, B and method
@@ -508,6 +511,8 @@ verdict. A value that cannot be computed is a `warn`.
 
 - With `penalty = "firth"` the `separation`, `influence` and `linearity` checks do not apply (the
   unpenalised fit is not the analysis model); the reason is stated.
+- The Firth node of a clustered logistic analysis is unclustered (Firth has model-based intervals
+  only), and a cluster `boot_type` is not carried over; the node's note says so.
 - `inf_censoring` screens covariate-dependent censoring. Censoring that is informative given the
   covariates cannot be tested; IPCW is a later phase.
 - Figures (`app/R/diagnostics/plots.R`) are ggplot objects exported deterministically with ragg;

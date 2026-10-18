@@ -169,6 +169,27 @@ test_that("separation maps to Firth logistic with a model SE and no marginal eff
   .dv_valid(m2)
 })
 
+test_that("separation of a clustered logistic parent gives an unclustered Firth analysis and says so", {
+  .dv_routes()
+  par <- .dv_parent("logistic", .dv_logit(se = "cluster", cluster = "g", layers = .dv_layers(clustered = TRUE),
+                                          marginal = FALSE))
+  m <- .sr_diag_sensitivity("separation", par, list(check = "separation"))
+  expect_identical(m$spec$penalty, "firth")
+  expect_identical(m$spec$se, "model")
+  expect_false(m$spec$layers$clustered)
+  expect_null(m$spec$cluster)
+  expect_match(m$note, "unclustered")
+  .dv_valid(m)
+  # a cluster bootstrap is not carried over either (it needs clustered data)
+  pb <- .dv_parent("logistic", .dv_logit(se = "cluster", cluster = "g", marginal = FALSE, boot_type = "cluster",
+                                         layers = .dv_layers(clustered = TRUE, resampling = "bootstrap"),
+                                         boot = list(B = 50L, type = "percentile")))
+  mb <- .sr_diag_sensitivity("separation", pb, list(check = "separation"))
+  expect_null(mb$spec$boot_type)
+  expect_match(mb$note, "boot_type cluster is not carried over", fixed = TRUE)
+  .dv_valid(mb)
+})
+
 test_that("few_clusters maps to the cluster bootstrap with B = 2000 percentile", {
   .dv_routes()
   par <- .dv_parent("lm", .dv_lm(se = "cluster", cluster = "g", layers = .dv_layers(clustered = TRUE)))
@@ -202,6 +223,11 @@ test_that("heteroscedasticity maps to se = robust; inf_censoring is a limitation
   expect_identical(m$route, "lm")
   expect_identical(m$spec$se, "robust")
   .dv_valid(m)
+  # a clustered lm already has cluster-robust SEs, which are heteroscedasticity-robust too
+  pc <- .dv_parent("lm", .dv_lm(se = "cluster", cluster = "g", layers = .dv_layers(clustered = TRUE)))
+  lc <- .sr_diag_sensitivity("heteroscedasticity", pc, list(check = "heteroscedasticity"))
+  expect_match(lc$limitation, "cluster-robust")
+  expect_null(lc$spec)
   lim <- .sr_diag_sensitivity("inf_censoring", .dv_parent("cox", .dv_cox()), list(check = "inf_censoring"))
   expect_match(lim$limitation, "censoring")
   expect_null(lim$spec)

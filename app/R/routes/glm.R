@@ -8,6 +8,8 @@
 # The standard errors are those of .h_vcov: model-based, robust (HC0, the form defined for a glm) or
 # cluster (HC1). Modified Poisson is only valid with a robust or cluster SE, so se defaults to robust
 # there and "model" is refused. Intervals are normal (z); Firth uses profile-likelihood intervals.
+# layers$clustered = TRUE or a cluster column needs se = "cluster", and se = "cluster" needs both
+# (.sr_cluster_se_check, routes/se.R), so the clustering the SAP declares is the one the fit uses.
 #
 # The compiled code is data-free (see routes/terms.R): every model column has a derived name (t1,
 # t2f, ...), and present() maps the coefficients back to the user variables with sr_coef_source().
@@ -75,14 +77,7 @@
     }
     if (!is.null(spec[["penalty"]])) stop("modified Poisson has no penalty option", call. = FALSE)
   }
-  if (identical(se, "cluster")) {
-    if (!one(spec[["cluster"]])) {
-      stop("se = \"cluster\" needs a cluster column (spec$cluster)", call. = FALSE)
-    }
-    if (!isTRUE(spec[["layers"]][["clustered"]])) {
-      stop("se = \"cluster\" needs layers$clustered = TRUE", call. = FALSE)
-    }
-  }
+  .sr_cluster_se_check(spec, se)
   if (.sr_glm_firth(spec)) {
     if (isTRUE(spec[["marginal"]])) {
       stop("Firth penalised logistic regression has no marginal effects: set marginal = FALSE or penalty = \"none\"",

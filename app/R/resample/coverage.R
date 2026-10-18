@@ -105,7 +105,8 @@
     cluster_boot = list(reps = 500L, B = 500L, m = NA_integer_, gen = .sr_cov_gen_cluster, route = .sr_lm_route,
                         measure = "MD", truth = function() 0.5,
                         spec = function(B, m) .sr_cov_cl_spec(layers = .sr_cov_layers(clustered = TRUE, resampling = "bootstrap"),
-                                                              boot_type = "cluster", boot = list(B = B, type = "percentile")),
+                                                              se = "cluster", boot_type = "cluster",
+                                                              boot = list(B = B, type = "percentile")),
                         generator = "linear, 50 clusters, ICC 0.2, cluster-level exposure",
                         analysis = "lm, cluster bootstrap percentile")
   )

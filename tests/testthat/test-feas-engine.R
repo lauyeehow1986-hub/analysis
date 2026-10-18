@@ -157,7 +157,7 @@ test_that("an outcome column as a term, interaction variable, stratum or cluster
     term = .fe_spec(terms = c(base, list(list(var = "y", type = "factor")))),
     interaction = .fe_spec(interactions = list(c("x", "y"))),
     strata = .fe_spec(strata = "y"),
-    cluster = .fe_spec(cluster = "y", layers = .fe_layers(clustered = TRUE)))
+    cluster = .fe_spec(cluster = "y", se = "cluster", layers = .fe_layers(clustered = TRUE)))
   for (nm in names(cases)) {
     sp <- cases[[nm]]
     df <- .fe_sort(.fe_df(df0, sp))
@@ -668,7 +668,7 @@ test_that("a linear exposure uses n_cc * Var(x) * (1 - r2x) and a factor contras
 })
 
 test_that("clustering multiplies the SE by sqrt of the design effect", {
-  sp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE))
+  sp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE))
   cl <- list(G = 20L, m_bar = 10, cv = 0.5)
   as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))
   base <- .sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"))
@@ -1156,7 +1156,7 @@ test_that("an absent or NULL r2_y uses r2_y = 0 with a warning; a NULL icc is a 
                             assumptions = list(r2_y = list(value = 0.2, justification = "prior cohort")))
   expect_false(any(grepl("r2_y", given$warnings)))
   expect_false(any(grepl("r2_y", .sr_feas_compute(.fe_hand(), sp, sr_route_get("logistic"))$warnings)))
-  csp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE))
+  csp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE))
   expect_error(.sr_feas_compute(.fe_hand(clusters = list(G = 20L, m_bar = 10, cv = 0.5)), csp,
                                 sr_route_get("logistic"), assumptions = list(icc = NULL)),
                "a clustered analysis needs assumptions$icc", fixed = TRUE)
@@ -1164,7 +1164,7 @@ test_that("an absent or NULL r2_y uses r2_y = 0 with a warning; a NULL icc is a 
 
 test_that("clustered and multiple imputation together: the design effect and the MI factor both apply (F14)", {
   # no route runs clustered + MI (.sr_mi_check refuses it): this pins only how the engine combines the two
-  sp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE, missing = "mi"))
+  sp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE, missing = "mi"))
   cl <- list(G = 40L, m_bar = 10, cv = 0.5)
   as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))
   base <- .sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"))
@@ -1178,7 +1178,7 @@ test_that("clustered and multiple imputation together: the design effect and the
   }
   expect_identical(res$blockers, character())
   # on real inputs the verdict computes
-  rsp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE, missing = "mi"), mi = list(m = 5))
+  rsp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE, missing = "mi"), mi = list(m = 5))
   rr <- .fe_verdict(.fe_frame(), rsp, "logistic", assumptions = as)
   expect_identical(rr$blockers, character())
   expect_true(all(is.finite(rr$contrasts$se)) && all(is.finite(rr$contrasts$se_upper)))

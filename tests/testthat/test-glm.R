@@ -117,6 +117,33 @@ test_that("modified Poisson refuses a model-based SE; logistic accepts any SE", 
   expect_false(sr_spec_validate(.gl_spec(se = "bootstrap"), r)$ok)
 })
 
+test_that("clustered data or a cluster column need se = cluster (the clustering the run applies)", {
+  for (id in c("logistic", "logistic_describe", "modpois")) {
+    r <- .gl_route(id)
+    pur <- if (identical(id, "logistic_describe")) "describe" else "explain-causal"
+    ses <- if (identical(id, "modpois")) "robust" else c("model", "robust")
+    for (se in ses) {
+      # layers$clustered = TRUE with the cluster column, but a non-cluster SE
+      s <- .gl_spec(se = se, purpose = pur, cluster = "cl", layers = .gl_layers(clustered = TRUE))
+      v <- sr_spec_validate(s, r)
+      expect_false(v$ok, info = paste(id, se))
+      expect_match(paste(v$errors, collapse = " "), "layers$clustered = TRUE needs se = \"cluster\"", fixed = TRUE)
+      expect_error(sr_compile(r, s), "needs se = \"cluster\"", fixed = TRUE)
+      # a cluster column without layers$clustered
+      s2 <- .gl_spec(se = se, purpose = pur, cluster = "cl")
+      v2 <- sr_spec_validate(s2, r)
+      expect_false(v2$ok, info = paste(id, se))
+      expect_match(paste(v2$errors, collapse = " "), "a cluster column needs se = \"cluster\"", fixed = TRUE)
+      # layers$clustered = TRUE without any cluster column
+      expect_false(sr_spec_validate(.gl_spec(se = se, purpose = pur, layers = .gl_layers(clustered = TRUE)), r)$ok)
+    }
+    # the default SE (model for logistic, robust for modpois) is not a cluster SE either
+    s3 <- .gl_spec(purpose = pur, cluster = "cl", layers = .gl_layers(clustered = TRUE))
+    expect_false(sr_spec_validate(s3, r)$ok, info = id)
+    expect_true(sr_spec_validate(.gl_spec(se = "cluster", purpose = pur), r)$ok, info = id)
+  }
+})
+
 test_that("Firth: marginal effects and robust SEs are refused when asked for", {
   r <- .gl_route("logistic")
   expect_true(sr_spec_validate(.gl_spec(penalty = "firth"), r)$ok)

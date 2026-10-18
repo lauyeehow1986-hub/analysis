@@ -229,7 +229,7 @@ test_that("the bootstrap settings are validated and the unsupported combinations
   expect_silent(sr_compile(r, .bt_lm_spec(boot = NULL)))
   expect_error(sr_compile(r, .bt_lm_spec(boot = list(B = 10))), "B")
   expect_error(sr_compile(r, .bt_lm_spec(boot = list(B = 100, type = "student"))), "type")
-  cl <- .bt_lm_spec(layers = .bt_layers(clustered = TRUE), cluster = "cl")
+  cl <- .bt_lm_spec(layers = .bt_layers(clustered = TRUE), cluster = "cl", se = "cluster")
   expect_error(sr_compile(r, cl), "boot_type")
   for (bt in c("pair", "replicate_weights")) {
     s <- cl
@@ -275,7 +275,7 @@ test_that("the bootstrap code embeds the complete-case code of the route verbati
 
 test_that("lm: cluster bootstrap with BCa on the coefficient and the marginal difference", {
   df <- .bt_df()
-  s <- .bt_lm_spec(layers = .bt_layers(clustered = TRUE), cluster = "cl", boot_type = "cluster",
+  s <- .bt_lm_spec(layers = .bt_layers(clustered = TRUE), cluster = "cl", se = "cluster", boot_type = "cluster",
                    marginal = TRUE, boot = list(B = 150, type = "bca"))
   v <- .bt_value(df, s, "lm")
   expect_identical(v$boot$boot_type, "cluster")
@@ -294,9 +294,9 @@ test_that("lm: cluster bootstrap with BCa on the coefficient and the marginal di
   expect_equal(pr$hi[1L], ck$hi)
   expect_equal(pr$est[1L], unname(v$coef$est[v$coef$term == "t1"]))
   expect_equal(pr$mcse[1L], max(ck$mcse_lo, ck$mcse_hi))
-  # the covariates keep their model-based intervals
+  # the covariates keep their analytic intervals: cluster-robust, as clustered data need se = "cluster"
   cv <- res$effects[res$effects$role == "covariate", , drop = FALSE]
-  expect_true(all(cv$ci_method == "t_model"))
+  expect_true(all(cv$ci_method == "t_cluster_hc1"))
   expect_true(!is.null(res$fragments$boot_note))
 })
 

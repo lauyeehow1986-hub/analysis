@@ -154,6 +154,32 @@ test_that("validation refuses what lm cannot do: cluster SE without a cluster, u
   expect_false(sr_spec_validate(modifyList(.lm_spec(), list(outcome = NULL)), r)$ok)
 })
 
+test_that("clustered data or a cluster column need se = cluster (the clustering the run applies)", {
+  for (id in c("lm", "lm_describe")) {
+    r <- .lm_route(id)
+    pur <- if (identical(id, "lm_describe")) "describe" else "explain-causal"
+    for (se in c("model", "robust")) {
+      # layers$clustered = TRUE with the cluster column, but a non-cluster SE
+      s <- .lm_spec(se = se, cluster = "cyl", purpose = pur, layers = .lm_layers(clustered = TRUE))
+      v <- sr_spec_validate(s, r)
+      expect_false(v$ok, info = paste(id, se))
+      expect_match(paste(v$errors, collapse = " "), "layers$clustered = TRUE needs se = \"cluster\"", fixed = TRUE)
+      expect_error(sr_compile(r, s), "needs se = \"cluster\"", fixed = TRUE)
+      # a cluster column without layers$clustered
+      v2 <- sr_spec_validate(.lm_spec(se = se, cluster = "cyl", purpose = pur), r)
+      expect_false(v2$ok, info = paste(id, se))
+      expect_match(paste(v2$errors, collapse = " "), "a cluster column needs se = \"cluster\"", fixed = TRUE)
+      # layers$clustered = TRUE without any cluster column
+      expect_false(sr_spec_validate(.lm_spec(se = se, purpose = pur, layers = .lm_layers(clustered = TRUE)), r)$ok)
+    }
+    # no se at all is the model SE, not a cluster one
+    s3 <- .lm_spec(cluster = "cyl", purpose = pur, layers = .lm_layers(clustered = TRUE))
+    s3$se <- NULL
+    expect_false(sr_spec_validate(s3, r)$ok, info = id)
+    expect_true(sr_spec_validate(.lm_spec(se = "cluster", cluster = "cyl", purpose = pur), r)$ok, info = id)
+  }
+})
+
 test_that("compile refuses layers that lm@1 does not implement instead of ignoring them", {
   r <- .lm_route()
   for (lay in list(list(missing = "mi"), list(weights = "ipw"), list(matching = TRUE),
