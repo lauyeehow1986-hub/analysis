@@ -439,10 +439,27 @@ sr_docx_bookmarks <- function(path) {
   data.frame(name = name, text = text, stringsAsFactors = FALSE)
 }
 
+# The values of the export-specific custom properties (sr_audit_tip, sr_export_id) of a .docx unpacked in
+# `dir`: a named character vector, empty when docProps/custom.xml is absent.
+.sr_dx_meta_values <- function(dir) {
+  f <- file.path(dir, "docProps", "custom.xml")
+  if (!file.exists(f)) return(character())
+  doc <- xml2::read_xml(f)
+  props <- xml2::xml_find_all(doc, "//*[local-name()='property']")
+  nm <- xml2::xml_attr(props, "name")
+  val <- xml2::xml_text(props)
+  keep <- nm %in% c("sr_audit_tip", "sr_export_id") & nzchar(val)
+  stats::setNames(val[keep], nm[keep])
+}
+
 #' The SHA-256 that stands for a .docx: over the sorted (part name, SHA-256 of the part bytes) lines. The
 #' creation and modification dates of docProps/core.xml are replaced by a fixed string, and the media parts
 #' are named by the SHA-256 of their bytes (the relationship targets follow), so two renders of the same
-#' model give the same digest although officer stamps the time and names the images freshly.
+#' model give the same digest although officer stamps the time and names the images freshly. The digest
+#' stands for the content, not for the export it sits in (ruling R33): the values of the sr_audit_tip and
+#' sr_export_id custom properties are replaced by fixed strings wherever they appear (docProps/custom.xml
+#' and the footer parts; the footer shows the first 16 characters of the audit tip), so the same model
+#' exported twice has one digest. The SAP hash stays in.
 sr_docx_digest <- function(path) {
   if (!file.exists(path)) stop("'", path, "' does not exist", call. = FALSE)
   dir <- tempfile("sr-docx-")
@@ -462,12 +479,22 @@ sr_docx_digest <- function(path) {
     newname[i] <- paste0("word/media/", nn)
     rename[base] <- nn
   }
+  meta <- .sr_dx_meta_values(dir)
+  tip <- unname(meta["sr_audit_tip"])
+  eid <- unname(meta["sr_export_id"])
   text_part <- grepl("\\.(xml|rels)$", parts)
   for (i in which(text_part)) {
     s <- rawToChar(bytes[[i]])
     Encoding(s) <- "UTF-8"
     if (identical(parts[i], "docProps/core.xml")) {
       s <- gsub("(<dcterms:(created|modified)[^>]*>)[^<]*", "\\1FIXED", s)
+    }
+    if (identical(parts[i], "docProps/custom.xml") || grepl("^word/(footer|header)[0-9]*\\.xml$", parts[i])) {
+      if (!is.na(tip)) {
+        s <- gsub(tip, "SR-AUDIT-TIP", s, fixed = TRUE)
+        s <- gsub(substr(tip, 1L, 16L), "SR-AUDIT-TIP", s, fixed = TRUE)
+      }
+      if (!is.na(eid)) s <- gsub(eid, "SR-EXPORT-ID", s, fixed = TRUE)
     }
     for (old in names(rename)) s <- gsub(old, rename[[old]], s, fixed = TRUE)
     bytes[[i]] <- charToRaw(s)

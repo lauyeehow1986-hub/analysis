@@ -272,12 +272,29 @@ test_that("the digest is stable across renders and changes with the content", {
   m2$reg <- .dx_reg_copy(m$reg)
   m2$reg$rows$text[m2$reg$rows$id == id] <- paste0(m2$reg$rows$text[m2$reg$rows$id == id], "x")
   expect_false(identical(sr_docx_digest(a), sr_docx_digest(render(m2))))
-  # a change of the export id (footer, property) changes it too
-  pr <- .dx_props()
+  # the export id, the audit tip (footer, properties) and the creation time are export metadata: the
+  # digest stands for the content (ruling R33)
+  pr <- .dx_props(tip = "ffeeddccbbaa99887766554433221100")
   pr$export_id <- "export-002"
+  pr$created <- "2027-03-04T05:06:07Z"
   c2 <- sr_docx_render(m, "main", tempfile(fileext = ".docx"), tempfile("fig-"), pr)
-  expect_false(identical(sr_docx_digest(a), sr_docx_digest(c2)))
-  # but the creation time does not
+  expect_identical(sr_docx_digest(a), sr_docx_digest(c2))
+  # the metadata is really in the file, only the digest ignores it
+  cu <- function(p) paste(readLines(file.path(.dx_unzip(p), "docProps", "custom.xml"), warn = FALSE), collapse = "")
+  expect_match(cu(c2), "export-002", fixed = TRUE)
+  expect_match(cu(a), "export-001", fixed = TRUE)
+  # the SAP hash is content: it stays in the digest
+  pr3 <- .dx_props()
+  pr3$sap_hash <- "0123456789abcdef0123456789abcdef"
+  c3 <- sr_docx_render(m, "main", tempfile(fileext = ".docx"), tempfile("fig-"), pr3)
+  expect_false(identical(sr_docx_digest(a), sr_docx_digest(c3)))
+  # a placeholder change still shows through a different export id
+  m4 <- m
+  m4$reg <- .dx_reg_copy(m$reg)
+  m4$reg$rows$text[m4$reg$rows$id == id] <- paste0(m4$reg$rows$text[m4$reg$rows$id == id], "x")
+  c4 <- sr_docx_render(m4, "main", tempfile(fileext = ".docx"), tempfile("fig-"), pr)
+  expect_false(identical(sr_docx_digest(a), sr_docx_digest(c4)))
+  # the creation time does not change it either
   pr2 <- .dx_props()
   pr2$created <- "2027-01-01T00:00:00Z"
   d2 <- sr_docx_render(m, "main", tempfile(fileext = ".docx"), tempfile("fig-"), pr2)
