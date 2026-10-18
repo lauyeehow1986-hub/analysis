@@ -59,12 +59,10 @@ sr_reducer_register("run.completed", function(state, event) {
 
 # ---- the extract -----------------------------------------------------------------------------------
 
-#' Materialise `cols` of `table` as a data.frame with the store's types, rows sorted by every column,
-#' serialised (version 3) to data/extracts/<sha>.rds under the project, `sha` being the SHA-256 of the
-#' bytes. An existing file of that name is reused as it is: whether it still holds those bytes is
-#' what the run's prologue checks. Returns list(rel, sha, n, cols); `rel` is relative to the project
-#' folder.
-sr_extract <- function(project, table, cols) {
+#' `cols` (made unique) of `table` as a data.frame with the store's types, rows sorted by every column
+#' (ORDER BY all of them: the connection does not preserve insertion order). Refuses an unknown table
+#' or column. It is the frame sr_extract() serialises and the one the feasibility verdict reads.
+.sr_extract_frame <- function(project, table, cols) {
   .sr_store_check_table(table)
   if (!is.character(cols) || !length(cols) || anyNA(cols) || any(!nzchar(cols))) {
     stop("cols must be a character vector naming at least one column", call. = FALSE)
@@ -81,8 +79,17 @@ sr_extract <- function(project, table, cols) {
   sr_store_view(project, table)
   con <- sr_duck(project)
   q <- DBI::dbQuoteIdentifier(con, cols)
-  df <- sr_duck_query(con, sprintf("SELECT %s FROM %s ORDER BY %s", paste(q, collapse = ", "),
-                                   DBI::dbQuoteIdentifier(con, table), paste(q, collapse = ", ")))
+  sr_duck_query(con, sprintf("SELECT %s FROM %s ORDER BY %s", paste(q, collapse = ", "),
+                             DBI::dbQuoteIdentifier(con, table), paste(q, collapse = ", ")))
+}
+
+#' Materialise `cols` of `table` (.sr_extract_frame()) serialised (version 3) to
+#' data/extracts/<sha>.rds under the project, `sha` being the SHA-256 of the bytes. An existing file
+#' of that name is reused as it is: whether it still holds those bytes is what the run's prologue
+#' checks. Returns list(rel, sha, n, cols); `rel` is relative to the project folder.
+sr_extract <- function(project, table, cols) {
+  df <- .sr_extract_frame(project, table, cols)
+  cols <- unique(cols)
   bytes <- serialize(df, NULL, version = 3)
   sha <- .sr_sha256(bytes)
   rel <- paste0("data/extracts/", sha, ".rds")
