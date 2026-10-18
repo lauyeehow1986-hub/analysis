@@ -396,7 +396,7 @@ test_that("cox and rmst take the bootstrap", {
   p <- .fx_ready_project(df, "t", c(id = "id", y = "outcome"), env = env)
   .bt_route("lm")
   p <- sr_sap_add(p, "m1", "lm", spec, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   run <- p$state$runs$m1
   expect_true(run$ok, info = run$error)

@@ -184,6 +184,19 @@ sr_coverage_cells <- function() {
   as.integer(x)
 }
 
+#' The compiled and checked body of `spec` on `route`, as sr_run would build it: stops with "<what>:
+#' invalid spec: ..." on a spec that does not validate, or "<what>: the layers do not compose".
+#' Shared with resample/feas_sim.R.
+.sr_cov_compile <- function(route, spec, what) {
+  v <- sr_spec_validate(spec, route)
+  if (!v$ok) stop(what, ": invalid spec: ", paste(v$errors, collapse = "; "), call. = FALSE)
+  cc <- sr_compose_check(spec)
+  if (!cc$ok) stop(what, ": the layers do not compose", call. = FALSE)
+  body <- sr_compile(route, spec)
+  .sr_emit_check(body, "analysis")
+  body
+}
+
 #' Everything a replication needs, built once per cell: the generator, the route, the validated spec
 #' (spec$seed = `seed`; the preamble seed of each replication is drawn from its stream), the compiled
 #' and checked body, the scored measure and the true value. Stops as sr_run would on a spec that does
@@ -195,14 +208,30 @@ sr_coverage_cells <- function() {
   spec <- def$spec(B, m)
   spec$seed <- as.integer(seed)
   route <- def$route()
-  v <- sr_spec_validate(spec, route)
-  if (!v$ok) stop("coverage cell ", cell, ": invalid spec: ", paste(v$errors, collapse = "; "), call. = FALSE)
-  cc <- sr_compose_check(spec)
-  if (!cc$ok) stop("coverage cell ", cell, ": the layers do not compose", call. = FALSE)
-  body <- sr_compile(route, spec)
-  .sr_emit_check(body, "analysis")
+  body <- .sr_cov_compile(route, spec, paste("coverage cell", cell))
   list(cell = cell, n = as.integer(n), gen = def$gen, route = route, spec = spec, body = body,
        measure = def$measure, truth = def$truth())
+}
+
+#' The primary row of `setup$measure` from the route's own compiled body run on `df`: the run preamble
+#' of `run_seed`, then setup$body evaluated in a fresh environment under the global env with sr_data
+#' bound (as the sr_exec worker does), then setup$route$present() checked by sr_result_check. Returns
+#' c(est, lo, hi); stops when the value is not plain data, there is not exactly one primary row of the
+#' measure, or the row is not finite. Shared with resample/feas_sim.R.
+.sr_cov_primary <- function(df, run_seed, setup) {
+  env <- new.env(parent = globalenv())
+  env$sr_data <- df
+  value <- eval(parse(text = paste(sr_rng_preamble(run_seed), setup$body, sep = "\n")), envir = env)
+  if (!.sr_value_plain(value)) stop("the result is not plain data", call. = FALSE)
+  res <- sr_result_check(setup$route$present(value, setup$spec), setup$route)
+  eff <- res$effects
+  row <- eff[eff$role == "primary" & eff$measure == setup$measure, , drop = FALSE]
+  if (nrow(row) != 1L) {
+    stop("expected one primary ", setup$measure, " row, found ", nrow(row), call. = FALSE)
+  }
+  out <- c(est = row$est, lo = row$lo, hi = row$hi)
+  if (!all(is.finite(out))) stop("the primary ", setup$measure, " row is not finite", call. = FALSE)
+  out
 }
 
 #' One replication from its L'Ecuyer stream `stream` (a .Random.seed vector): generate the data, draw
@@ -217,18 +246,7 @@ sr_coverage_cells <- function() {
   tryCatch(suppressWarnings({
     df <- setup$gen(setup$n)
     run_seed <- sample.int(.Machine$integer.max, 1L)
-    env <- new.env(parent = globalenv())
-    env$sr_data <- df
-    value <- eval(parse(text = paste(sr_rng_preamble(run_seed), setup$body, sep = "\n")), envir = env)
-    if (!.sr_value_plain(value)) stop("the result is not plain data", call. = FALSE)
-    res <- sr_result_check(setup$route$present(value, setup$spec), setup$route)
-    eff <- res$effects
-    row <- eff[eff$role == "primary" & eff$measure == setup$measure, , drop = FALSE]
-    if (nrow(row) != 1L) {
-      stop("expected one primary ", setup$measure, " row, found ", nrow(row), call. = FALSE)
-    }
-    out <- c(est = row$est, lo = row$lo, hi = row$hi)
-    if (!all(is.finite(out))) stop("the primary ", setup$measure, " row is not finite", call. = FALSE)
+    out <- .sr_cov_primary(df, run_seed, setup)
     list(ok = TRUE, est = out[["est"]], lo = out[["lo"]], hi = out[["hi"]], error = NA_character_)
   }), error = function(e) {
     list(ok = FALSE, est = NA_real_, lo = NA_real_, hi = NA_real_, error = conditionMessage(e))
@@ -264,8 +282,9 @@ sr_coverage_cells <- function() {
 
 # ---- the cell -------------------------------------------------------------------------------------
 
-# Run the replications in this process, restoring the caller's RNG kind and seed afterwards.
-.sr_cov_serial <- function(streams, setup) {
+# Run the replications in this process, restoring the caller's RNG kind and seed afterwards. `fun`
+# is the replication function (fun(item, setup)), applied to each of `streams` in order.
+.sr_cov_serial <- function(streams, setup, fun = .sr_cov_rep) {
   genv <- globalenv()
   had_seed <- exists(".Random.seed", envir = genv, inherits = FALSE)
   old_seed <- if (had_seed) get(".Random.seed", envir = genv, inherits = FALSE) else NULL
@@ -278,7 +297,7 @@ sr_coverage_cells <- function() {
       rm(".Random.seed", envir = genv)
     }
   }, add = TRUE)
-  lapply(streams, .sr_cov_rep, setup = setup)
+  lapply(streams, fun, setup = setup)
 }
 
 # A PSOCK worker takes this process's library paths (a portable bundle sets them at start-up) and
@@ -289,12 +308,13 @@ sr_coverage_cells <- function() {
   TRUE
 }
 
-# Run the replications on a local PSOCK cluster of `workers` processes (results in replication order).
-.sr_cov_parallel <- function(streams, setup, workers) {
+# Run the replications on a local PSOCK cluster of `workers` processes (results in replication order);
+# `fun` as for .sr_cov_serial (a function of the global env, which the workers have loaded).
+.sr_cov_parallel <- function(streams, setup, workers, fun = .sr_cov_rep) {
   cl <- parallel::makePSOCKcluster(min(workers, length(streams)))
   on.exit(parallel::stopCluster(cl), add = TRUE)
   parallel::clusterCall(cl, .sr_cov_worker_init, sr_root, .libPaths())
-  parallel::parLapplyLB(cl, streams, .sr_cov_rep, setup = setup)
+  parallel::parLapplyLB(cl, streams, fun, setup = setup)
 }
 
 #' Run one coverage cell.

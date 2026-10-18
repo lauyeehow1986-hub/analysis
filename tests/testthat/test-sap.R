@@ -322,6 +322,7 @@ test_that("a kept-for-sensitivity finding needs a sensitivity analysis that addr
   # one that addresses it does
   p3 <- sr_sap_add(p, "s1", "stub_sap", .sap_spec(), "t", label = "sensitivity", parent = "a1",
                    addresses = fid)
+  p3 <- .fx_feasible(p3)
   expect_false(any(sr_sap_check(p3)$status == "block"))
   p4 <- sr_sap_lock(p3)
   expect_false(sr_blind(p4))
@@ -344,7 +345,7 @@ test_that("a table that is not ready refuses the lock, naming the table", {
 test_that("an analysis too large for an in-memory fit refuses the lock; a warn row does not", {
   p <- .sap_drafted()
   expect_true(any(sr_readiness(p, "t")$status == "warn"))      # no data dictionary is attached
-  expect_false(any(sr_sap_check(p)$status == "block"))
+  expect_false(any(sr_sap_check(.fx_feasible(p))$status == "block"))
   .sap_mock("sr_mem_estimate", function(project, table, cols, method = "glm", ...) {
     list(fits = FALSE, reason = "mock", need_gb = 99, budget_gb = 1, route = "bigglm", rows = 1, p = 1)
   })
@@ -383,6 +384,7 @@ test_that("a rule or family that no longer fits the analyses refuses the lock", 
   p <- sr_sap_add(p, "s1", "stub_sap", .sap_spec(), "t", label = "sensitivity", parent = "a1")
   p <- sr_sap_family(p, "f1", c("a1", "a2"))
   p <- sr_sap_rule(p, "r1", "a1", "ph", "add_sensitivity", "s1")
+  p <- .fx_feasible(p)
   expect_false(any(sr_sap_check(p)$status == "block"))
   # s1 is re-added under another parent: the alternative of the rule is no longer a sensitivity analysis of a1
   q <- sr_sap_add(p, "s1", "stub_sap", .sap_spec(), "t", label = "sensitivity", parent = "a2")
@@ -395,6 +397,7 @@ test_that("a rule or family that no longer fits the analyses refuses the lock", 
 test_that("locking records the SAP, the store hashes and the library snapshot, and unblinds", {
   p <- .sap_drafted()
   p <- sr_sap_family(p, "f1", c("a1", "a2"), method = "holm")
+  p <- .fx_feasible(p)
   h <- sr_sap_hash(p)
   expect_true(sr_blind(p))
   p <- sr_sap_lock(p)
@@ -431,7 +434,7 @@ test_that("the SAP state replays identically after a close and reopen", {
   p <- sr_sap_remove(p, "s1")
   p <- sr_sap_add(p, "s1", "stub_sap", .sap_spec(exposure = "sex"), "t", label = "sensitivity", parent = "a1")
   p <- sr_sap_rule(p, "r1", "a1", "ph", "add_sensitivity", "s1")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   dir <- p$paths$dir
   sr_duck_close(p)
   sr_project_close(p)
@@ -442,4 +445,60 @@ test_that("the SAP state replays identically after a close and reopen", {
   expect_identical(q$state$analyses, p$state$analyses)
   expect_false(sr_blind(q))
   expect_identical(sr_sap_hash(q), p$state$sap$lock$sap_hash)
+})
+
+# ---- the feasibility gate of the lock -------------------------------------------------------------------
+
+# The lock error as one string, "" when the lock succeeds.
+.sap_lock_msg <- function(p) tryCatch({ sr_sap_lock(p); "" }, error = function(e) conditionMessage(e))
+
+test_that("the lock needs a current feasibility decision on every primary analysis", {
+  p <- .sap_drafted()
+  chk <- sr_sap_check(p)
+  fr <- chk[chk$item == "feasibility", , drop = FALSE]
+  expect_identical(fr$status, "block")
+  expect_identical(fr$detail, "a1: no feasibility assessment")      # the secondary a2 does not block
+  expect_match(.sap_lock_msg(p), "feasibility: a1: no feasibility assessment", fixed = TRUE)
+  expect_true(sr_blind(p))
+
+  p <- sr_feasibility_assess(p, "a1")
+  expect_match(.sap_lock_msg(p), "feasibility: a1: no feasibility decision", fixed = TRUE)
+
+  ps <- sr_feasibility_decide(p, "a1", "stop", reason = "the design cannot answer the question")
+  expect_match(.sap_lock_msg(ps), "feasibility: a1: decision is stop (the design cannot answer the question)",
+               fixed = TRUE)
+
+  pr <- sr_feasibility_decide(p, "a1", "revise", reason = "add a covariate")
+  expect_match(.sap_lock_msg(pr), "feasibility: a1: decision is revise", fixed = TRUE)
+
+  # the spec is re-set after the decision: the assessment no longer describes it
+  pp <- sr_feasibility_decide(p, "a1", "proceed")
+  expect_false(any(sr_sap_check(pp)$status == "block"))
+  pq <- sr_sap_add(pp, "a1", "stub_sap", .sap_spec(exposure = "sex"), "t", label = "primary")
+  expect_match(.sap_lock_msg(pq), "feasibility: a1: the feasibility assessment is stale (the spec changed)",
+               fixed = TRUE)
+  expect_true(sr_blind(pq))
+
+  chk <- sr_sap_check(pp)
+  expect_identical(chk$detail[chk$item == "feasibility"], "every primary analysis has a current feasibility decision")
+  expect_identical(chk$status[chk$item == "feasibility"], "ok")
+  pl <- sr_sap_lock(pp)
+  expect_false(sr_blind(pl))
+})
+
+test_that("a stopped secondary blocks the lock; an unassessed secondary does not", {
+  p <- .sap_drafted()
+  p <- .fx_feasible(p)                                              # a1 only
+  expect_false(any(sr_sap_check(p)$status == "block"))
+  p <- sr_feasibility_assess(p, "a2")
+  p <- sr_feasibility_decide(p, "a2", "stop", reason = "no events")
+  expect_match(.sap_lock_msg(p), "feasibility: a2: decision is stop (no events)", fixed = TRUE)
+})
+
+test_that("a removed analysis does not hold the lock", {
+  p <- .sap_drafted()
+  p <- sr_feasibility_assess(p, "a2")
+  p <- .fx_feasible(p)
+  p <- sr_sap_remove(p, "a2")
+  expect_false(any(sr_sap_check(p)$status == "block"))
 })

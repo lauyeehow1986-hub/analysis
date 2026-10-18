@@ -580,7 +580,7 @@ test_that("sr_diag_run records diag.completed per check, cached, replayable, and
   s <- .dg_cox(terms = list(list(var = "z")))
   p <- sr_sap_add(p, "m1", "cox", s, "t", label = "primary")
   expect_error(sr_diag_run(p, "m1"), "not locked")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   expect_error(sr_diag_run(p, "m1"), "has not run successfully")
   expect_error(sr_diag_run(p, "nope"), "unknown analysis")
   p <- sr_run(p, "m1")

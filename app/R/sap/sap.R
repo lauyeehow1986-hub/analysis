@@ -12,7 +12,9 @@
 #                                         locked_at)
 # The outcome stays blind until the lock (sr_blind reads state$sap$locked), and the lock is refused
 # while a table is not ready, a kept-for-sensitivity finding has no sensitivity analysis, or an analysis
-# cannot be fitted in memory. Analyses added after the lock (sr_analysis_add, later) carry
+# cannot be fitted in memory, or a primary analysis has no current feasibility decision (proceed or
+# exploratory) or any pre-specified analysis is decided stop (sap/feasibility.R; the verdict is frozen
+# by the lock and part of the SAP hash). Analyses added after the lock (sr_analysis_add, later) carry
 # prespecified = FALSE and are not part of the SAP hash.
 #
 # Reducers see the event as a re-read parses it (NA -> NULL, vectors -> lists), so each one normalises
@@ -288,12 +290,19 @@ sr_sap_add <- function(project, id, route, spec, table, label = c("primary", "se
 }
 
 #' Remove a pre-specified analysis before the lock. Refused while another analysis names it as its
-#' parent. It also leaves its family and drops the rules that name it.
+#' parent, or while its feasibility decision is a stop (sap/feasibility.R: a stop is reversed with
+#' sr_feasibility_decide, never escaped by removing the analysis). It also leaves its family and drops
+#' the rules that name it.
 #' @return the project (`sap.analysis_removed`).
 sr_sap_remove <- function(project, id) {
   .sr_sap_open(project)
   .sr_sap_id(id, "id")
   .sr_sap_get(project, id)
+  if (identical(project$state$feasibility[[id]]$decision$decision, "stop")) {
+    stop("cannot remove ", .sr_sap_q(id), ": its feasibility decision is stop (",
+         project$state$feasibility[[id]]$decision$reason %||% "no reason",
+         "); reverse the stop with sr_feasibility_decide first", call. = FALSE)
+  }
   kids <- names(Filter(function(a) identical(a$parent, id), .sr_sap_analyses(project)))
   if (length(kids)) {
     stop("cannot remove ", .sr_sap_q(id), ": ", paste(.sr_sap_q(kids), collapse = ", "),
@@ -368,7 +377,10 @@ sr_sap_rule <- function(project, id, analysis, check, action = c("add_sensitivit
 #' ordered by id: independent adds in any order give the same hash. Analyses added after the lock
 #' (prespecified = FALSE) and the lock itself are not part of it. A fired replace_primary rule
 #' (sap/deviations.R) relabels two analyses and keeps their label at the lock as `sap_label`; the hash
-#' is taken over that label, so it still equals the lock's hash.
+#' is taken over that label, so it still equals the lock's hash. The feasibility record (assessment and
+#' decision, sap/feasibility.R) of every pre-specified analysis is part of it, ordered by id, so the
+#' frozen verdict is tamper-evident; the element is absent when there is none, so a SAP locked before
+#' P1c.1 keeps its hash.
 sr_sap_hash <- function(project) {
   by_id <- function(x) if (length(x)) unname(x[order(names(x), method = "radix")]) else list()
   as_locked <- function(a) {
@@ -378,10 +390,15 @@ sr_sap_hash <- function(project) {
     }
     a
   }
-  .sr_sha256(sr_canonical_json(list(
-    analyses = by_id(lapply(.sr_sap_analyses(project), as_locked)),
+  an <- .sr_sap_analyses(project)
+  parts <- list(
+    analyses = by_id(lapply(an, as_locked)),
     families = by_id(project$state$sap$families %||% list()),
-    rules = by_id(project$state$sap$rules %||% list()))))
+    rules = by_id(project$state$sap$rules %||% list()))
+  fe <- project$state$feasibility %||% list()
+  fe <- fe[intersect(names(an), names(fe))]
+  if (length(fe)) parts$feasibility <- by_id(fe)
+  .sr_sha256(sr_canonical_json(parts))
 }
 
 # ---- the check and the lock ------------------------------------------------------------------------
@@ -401,7 +418,9 @@ sr_sap_hash <- function(project) {
 #' the table); a finding kept for a sensitivity analysis that no sensitivity analysis addresses; an
 #' analysis that does not fit in memory (or whose columns cannot be sized); a rule or family that no
 #' longer fits the analyses; a binary outcome or survival status with no event value that is not 0/1 or
-#' logical in the data (item "event value"). warn: a readiness warn row; an analysis naming a family it
+#' logical in the data (item "event value"); a feasibility problem (item "feasibility", one row per
+#' .sr_feas_gate detail: a primary analysis without a current proceed / exploratory decision, or any
+#' pre-specified analysis decided stop). warn: a readiness warn row; an analysis naming a family it
 #' is not in.
 sr_sap_check <- function(project) {
   an <- .sr_sap_analyses(project)
@@ -482,6 +501,9 @@ sr_sap_check <- function(project) {
           sprintf("%s names family %s but is not a member of one with that id", id, .sr_sap_q(fam)))
     }
   }
+  gate <- .sr_feas_gate(project)
+  for (g in gate) add("feasibility", "block", g)
+  if (!length(gate)) add("feasibility", "ok", "every primary analysis has a current feasibility decision")
   data.frame(item = vapply(rows, function(r) r$item, ""), status = vapply(rows, function(r) r$status, ""),
              detail = vapply(rows, function(r) r$detail, ""), stringsAsFactors = FALSE)
 }

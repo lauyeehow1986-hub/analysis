@@ -589,7 +589,7 @@ test_that("complete separation on the exposure ends the run with a readable mess
   expect_error(.gl_present(val, s), "separation")
   expect_error(.gl_present(val, s), "penalty = \"firth\"", fixed = TRUE)
   p <- sr_sap_add(p, "m1", "logistic", s, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   r <- p$state$runs$m1
   expect_false(r$ok)
@@ -711,7 +711,7 @@ test_that("a text outcome with no event_value is refused before the lock; with i
   p <- sr_sap_add(p, "m1", "logistic", s, "t", label = "primary")
   # a logical outcome needs no event value: Yes is TRUE, the event
   p <- sr_sap_add(p, "m2", "logistic", .gl_spec(outcome = "yn", marginal = FALSE), "t", label = "secondary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   p <- sr_run(p, "m2")
   expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
@@ -745,7 +745,7 @@ test_that("logistic and modpois run through sr_sap_add, lock and sr_run; hostile
   expect_error(sr_sap_add(p, "bad2", "modpois", bad2, "t", label = "primary"), "robust or cluster")
   p <- sr_sap_add(p, "m1", "logistic", s, "t", label = "primary")
   p <- sr_sap_add(p, "m2", "modpois", s, "t", label = "secondary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   p <- sr_run(p, "m2")
   expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
