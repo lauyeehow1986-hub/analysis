@@ -62,3 +62,24 @@ test_that("two workers give the same result as one, and the caller's RNG is rest
   expect_identical(.Random.seed, seed)
   expect_identical(two, one)
 })
+
+test_that("rmst is worker-invariant too, with a per-replication prediction seed", {
+  skip_on_cran()
+  one <- sr_feas_sim_cell("rmst", 12L, seed = 2L, workers = 1L)
+  two <- sr_feas_sim_cell("rmst", 12L, seed = 2L, workers = 2L)
+  expect_identical(two, one)
+})
+
+test_that("the prediction uses the engine seed it is given (rmst Monte Carlo error is not shared)", {
+  setup <- .sr_fsim_setup("rmst", 400L, 1L)
+  df <- withr::with_seed(5L, setup$gen(400L), .rng_kind = "L'Ecuyer-CMRG")
+  a <- .sr_fsim_predict(df, setup, 11L)
+  expect_identical(.sr_fsim_predict(df, setup, 11L), a)
+  expect_false(identical(.sr_fsim_predict(df, setup, 12L), a))
+})
+
+test_that("the stored hr_cl ICC agrees with the closed form within Monte Carlo error", {
+  exact <- .sr_fsim_hr_cl_icc_exact()
+  expect_equal(exact, 0.16386, tolerance = 1e-4)
+  expect_lt(abs(SR_FEAS_SIM_HR_CL_ICC - exact), 0.005)
+})

@@ -37,9 +37,12 @@
 #
 # Random numbers: replication r ALWAYS uses the r-th L'Ecuyer-CMRG stream of `seed` (sr_streams). From
 # it the replication draws its dataset, then one integer, the seed of the run preamble its analysis
-# code runs under (as in the coverage harness). The engine's RMST simulation takes its own stream from
-# spec$seed (= `seed`) and restores the RNG. So a result depends only on (cell, reps, n, seed), never on
-# the number of workers. The caller's RNG kind and .Random.seed are restored on exit.
+# code runs under (as in the coverage harness), then one more integer, the engine seed of its
+# prediction: the prediction runs with spec$seed set to it, so the engine's RMST simulation (which takes
+# its own stream from spec$seed and restores the RNG) has independent Monte Carlo error in every
+# replication and averaging the predictions reduces it. The two extra draws come after the dataset, so
+# they never change the data. So a result depends only on (cell, reps, n, seed), never on the number of
+# workers. The caller's RNG kind and .Random.seed are restored on exit.
 #
 # Scoring, over the replications that succeeded:
 #   emp_sd = SD of the estimates (log scale for OR, RR, HR), pred_se = mean of the predicted SEs,
@@ -51,9 +54,21 @@
 # The event-indicator ICC of the hr_cl generator (events 1{T <= 1.5}, clusters of 10, gamma frailty of
 # variance 0.3), computed once by the one-way ANOVA estimator (MSB - MSW) / (MSB + (m - 1) MSW) on
 # 400 000 draws (40 000 clusters of 10; set.seed(1, kind = "L'Ecuyer-CMRG"); event share 0.7116). The
-# closed form, Var(1 - exp(-1.5 w)) / (p (1 - p)) with E exp(-s w) = (1 + 0.3 s)^(-1 / 0.3), gives
-# 0.16386, within the Monte Carlo error.
+# closed form (.sr_fsim_hr_cl_icc_exact) gives 0.16386, within the Monte Carlo error (the ANOVA
+# estimator's SE at 40 000 clusters of 10 is about 0.0015); the smoke test checks the two agree within
+# 0.005 (about 3 SE).
 SR_FEAS_SIM_HR_CL_ICC <- 0.162553
+
+# The closed-form event-indicator ICC of the hr_cl generator: P(event | w) = 1 - exp(-t w) with
+# t = 1.5, and E exp(-s w) = (1 + v s)^(-1 / v) for w ~ Gamma(shape 1/v, rate 1/v), v = 0.3. With
+# a1 = E exp(-t w), a2 = E exp(-2 t w) and p = 1 - a1, the ICC is Var(P(event | w)) / (p (1 - p)) =
+# (a2 - a1^2) / (p (1 - p)). Audits SR_FEAS_SIM_HR_CL_ICC; not used by the simulation.
+.sr_fsim_hr_cl_icc_exact <- function(t = 1.5, v = 0.3) {
+  a1 <- (1 + v * t)^(-1 / v)
+  a2 <- (1 + v * 2 * t)^(-1 / v)
+  p <- 1 - a1
+  (a2 - a1^2) / (p * (1 - p))
+}
 
 SR_FEAS_SIM_TOL <- 0.10                  # pass: |pred_se / emp_sd - 1| <= this
 
@@ -221,11 +236,14 @@ sr_feas_sim_cells <- function() {
        measure = def$measure, assumptions = def$assumptions)
 }
 
-# The engine's predicted SE of setup$measure on `df` (log scale for a ratio). Stops when the verdict
-# has blockers or the measure has no single finite SE.
-.sr_fsim_predict <- function(df, setup) {
-  inputs <- .sr_feas_inputs(df, setup$spec, setup$route)
-  v <- .sr_feas_compute(inputs, setup$spec, setup$route, assumptions = setup$assumptions)
+# The engine's predicted SE of setup$measure on `df` (log scale for a ratio), with the engine seed
+# `pred_seed` (spec$seed; it seeds the RMST simulation). Stops when the verdict has blockers or the
+# measure has no single finite SE.
+.sr_fsim_predict <- function(df, setup, pred_seed) {
+  spec <- setup$spec
+  spec$seed <- as.integer(pred_seed)
+  inputs <- .sr_feas_inputs(df, spec, setup$route)
+  v <- .sr_feas_compute(inputs, spec, setup$route, assumptions = setup$assumptions)
   if (length(v$blockers)) stop("the feasibility verdict has blockers: ", paste(v$blockers, collapse = "; "), call. = FALSE)
   se <- v$contrasts$se[v$contrasts$measure == setup$measure]
   if (length(se) != 1L || !is.finite(se)) stop("no single finite predicted ", setup$measure, " SE", call. = FALSE)
@@ -233,7 +251,8 @@ sr_feas_sim_cells <- function() {
 }
 
 #' One replication: `item` is list(stream, predict), stream a .Random.seed vector. Generates the data,
-#' draws the preamble seed, runs the route (.sr_cov_primary) and, when item$predict, the engine.
+#' draws the preamble seed and the engine seed, runs the route (.sr_cov_primary) and, when
+#' item$predict, the engine with its own seed.
 #' Returns list(ok, est, pred, error): est on the log scale for a ratio, pred NA when not predicted.
 #' Any error gives ok = FALSE with the message. Warnings are not surfaced. Sets the global RNG state;
 #' the caller restores it.
@@ -243,10 +262,11 @@ sr_feas_sim_cells <- function() {
   tryCatch(suppressWarnings({
     df <- setup$gen(setup$n)
     run_seed <- sample.int(.Machine$integer.max, 1L)
+    pred_seed <- sample.int(.Machine$integer.max, 1L)
     est <- .sr_cov_primary(df, run_seed, setup)[["est"]]
     if (.sr_feas_ratio(setup$measure)) est <- log(est)
     if (!is.finite(est)) stop("the primary ", setup$measure, " estimate is not finite on its scale", call. = FALSE)
-    pred <- if (isTRUE(item$predict)) .sr_fsim_predict(df, setup) else NA_real_
+    pred <- if (isTRUE(item$predict)) .sr_fsim_predict(df, setup, pred_seed) else NA_real_
     list(ok = TRUE, est = est, pred = pred, error = NA_character_)
   }), error = function(e) {
     list(ok = FALSE, est = NA_real_, pred = NA_real_, error = conditionMessage(e))

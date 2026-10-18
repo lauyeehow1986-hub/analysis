@@ -198,7 +198,9 @@ ratio   = pred_se / emp_sd,   pass = |ratio - 1| <= 0.10
   make a cell pass, and no engine formula is changed away from spec catalogue O.**
 - **Ruling: the rmst cell predicts on every 10th replication only.** Its prediction is itself a
   500-draw simulation, and the mean of 100 predictions estimates the mean predicted SE to well under
-  1%. Clustered RMST is refused by the route, so it has no cell.
+  1%. Each prediction runs with its own engine seed, drawn from its replication's stream after the
+  data, so the 100 simulations have independent Monte Carlo error. Clustered RMST is refused by the
+  route, so it has no cell.
 
 ### Cells
 
@@ -221,9 +223,14 @@ the exposure is assigned at cluster level (exactly half of the clusters, at rand
 | or_cl | as rd_cl | as or, cluster-robust SE | 600 | icc = 0.05 |
 | hr_cl | 40 clusters of 10; gamma frailty (variance 0.3) on Exp(1) times; administrative censoring at t = 1.5; z ~ N(0,1) unrelated | Cox ~ x + z, clustered (robust SE) | 400 | icc = 0.162553 |
 
+The clustered binary and HR cells carry an individual covariate z that is unrelated to the outcome,
+so that each analysis keeps one adjustment term as in the other cells; their true r2_y is 0.
+
 The hr_cl ICC is the ICC of the generator's event indicator. It was computed once with the one-way
 ANOVA estimator on 400 000 draws (40 000 clusters of 10) and is stored as a constant in
-`feas_sim.R`. The closed form gives 0.16386, which agrees within the Monte Carlo error.
+`feas_sim.R`. The closed form gives 0.16386, which agrees within the Monte Carlo error (the
+estimator's SE is about 0.0015). The smoke test checks that the constant is within 0.005 of the
+closed form.
 
 ### Results (seed 1, 2026-10-18)
 
@@ -234,7 +241,7 @@ ANOVA estimator on 400 000 draws (40 000 clusters of 10) and is stored as a cons
 | rr | 1000 | 0 | 0.13362 | 0.13508 | 0.98917 | TRUE |
 | or | 1000 | 0 | 0.19088 | 0.19290 | 0.98951 | TRUE |
 | hr | 1000 | 0 | 0.12792 | 0.13099 | 0.97660 | TRUE |
-| rmst | 1000 | 0 | 0.03642 | 0.03696 | 0.98545 | TRUE |
+| rmst | 1000 | 0 | 0.03787 | 0.03696 | 1.02465 | TRUE |
 | md_cl | 1000 | 0 | 0.16699 | 0.16870 | 0.98987 | TRUE |
 | rd_cl | 1000 | 0 | 0.04868 | 0.04799 | 1.01449 | TRUE |
 | rr_cl | 1000 | 0 | 0.16373 | 0.16292 | 1.00498 | TRUE |
@@ -242,6 +249,10 @@ ANOVA estimator on 400 000 draws (40 000 clusters of 10) and is stored as a cons
 | hr_cl | 1000 | 0 | 0.18670 | 0.19176 | 0.97361 | TRUE |
 
 **ALL 11 CELLS PASS. There were 0 failed replications.** Every ratio is within 3% of 1.
+
+A ratio below 1 means the prediction is slightly too small (anti-conservative). The hr (0.977) and
+hr_cl (0.974) predictions, and several others, are a little anti-conservative, but all are within the
+10% tolerance. "Conservative" in this section refers only to the NHEFS check below.
 
 The exact CSV block of the tool output (the per-cell `seconds` column is left out because it records
 wall-clock time; it does not affect the results):
@@ -253,7 +264,7 @@ wall-clock time; it does not affect the results):
 "rr","modpois","RR",FALSE,600,1000,1,0.13361783028995,0.135081420277818,0.98916512733685,TRUE,0
 "or","logistic","OR",FALSE,600,1000,1,0.190875243864281,0.192898008065976,0.98951381498453,TRUE,0
 "hr","cox","HR",FALSE,400,1000,1,0.127920413894957,0.130985171281906,0.976602256904693,TRUE,0
-"rmst","rmst","RMST_diff",FALSE,400,1000,10,0.0364177745203621,0.0369554109253714,0.985451754112679,TRUE,0
+"rmst","rmst","RMST_diff",FALSE,400,1000,10,0.0378661858185909,0.0369554109253714,1.02464523788029,TRUE,0
 "md_cl","lm","MD",TRUE,400,1000,1,0.16699003695875,0.168699171610055,0.989868743070914,TRUE,0
 "rd_cl","logistic","RD",TRUE,600,1000,1,0.0486827297663007,0.0479871745908318,1.01449460572329,TRUE,0
 "rr_cl","modpois","RR",TRUE,600,1000,1,0.163728502675957,0.162916513731904,1.00498408003862,TRUE,0
@@ -295,8 +306,9 @@ Rscript tools/feas_sim.R [cells] [reps_scale]
   `sr.feas_sim_workers`). The default is the number of cores minus 2. The worker count does not
   change any result.
 - The tool prints the table and a CSV block to the console and writes nothing into the repository.
-- The recorded full run took 101 s on 6 workers; the rmst cell alone took 41 s.
+- The recorded full run took 94 s on 6 workers; the rmst cell alone took 36 s.
 
 The smoke test `tests/testthat/test-feas-sim-smoke.R` runs every cell with 20 replications (rmst
 10). It checks the returned fields, that no replication fails, that the ratio is finite, and that one
-or two workers give identical results. It does not check `pass`.
+or two workers give identical results (md and rmst). It also checks that a prediction uses the engine
+seed it is given and that the stored hr_cl ICC agrees with the closed form. It does not check `pass`.
