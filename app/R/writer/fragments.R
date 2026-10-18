@@ -54,7 +54,7 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 }
 
 # The Methods paragraph of one analysis: its lead, each fragment of its result (numbers lifted into
-# placeholders), then its citations (Task 5; absent until `.sr_cite_keys` exists).
+# placeholders), then its citations (writer/cite.R).
 .sr_wr_m_analysis <- function(project, id, res, label, reg, keys) {
   lead <- paste0(.sr_wr_label(reg, SR_WR_LABEL_TEXT[[label]]), " analysis ", .sr_wr_label(reg, id), ": ")
   parts <- character()
@@ -67,12 +67,10 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   paste0(lead, body, .sr_wr_cite_tokens(keys))
 }
 
-# The citation keys of an analysis: list(methods, packages), empty until Task 5 defines `.sr_cite_keys`.
+# The citation keys of an analysis: list(methods, packages) from `.sr_cite_keys` (writer/cite.R).
 .sr_wr_keys <- function(project, id, res) {
-  none <- list(methods = character(), packages = character())
-  if (!exists(".sr_cite_keys", mode = "function")) return(none)
   a <- project$state$analyses[[id]]
-  k <- get(".sr_cite_keys", mode = "function")(as.character(a$route), a$spec, res$effects)
+  k <- .sr_cite_keys(as.character(a$route), a$spec, res$effects)
   list(methods = as.character(k$methods %||% character()), packages = as.character(k$packages %||% character()))
 }
 
@@ -129,7 +127,14 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
          .sr_wr_put_count(reg, v$n, src("n"), id), events, "): expected ", .sr_wr_label(reg, "95%"),
          " CI half-width ", num(v$h, "h"), " and minimum detectable effect at ", .sr_wr_label(reg, "80%"),
          " power ", num(v$mde, "mde"), delta, "; precision was rated ",
-         .sr_wr_label(reg, gsub("_", " ", as.character(v$tier), fixed = TRUE)), ".")
+         .sr_wr_label(reg, gsub("_", " ", as.character(v$tier), fixed = TRUE)),
+         if (.sr_wr_clustered(project, id)) " {{C:eldridge2006}}" else "", ".")
+}
+
+# TRUE when the analysis is clustered, as the feasibility engine decides it: layers$clustered, or a cluster column.
+.sr_wr_clustered <- function(project, id) {
+  spec <- project$state$analyses[[id]]$spec
+  isTRUE(spec[["layers"]][["clustered"]]) || length(.sr_spec_chr(spec[["cluster"]])) > 0L
 }
 
 # The sentence about a multiplicity family; `fa` is its sr_family_adjust() table.
@@ -147,12 +152,13 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   }
 }
 
-# The software sentence; `packages` are the packages of the reported routes (Task 5), none until then.
+# The software sentence; `packages` are the packages of the reported routes (writer/cite.R), each cited.
 .sr_wr_m_software <- function(reg, packages) {
   r <- sr_ph_put(reg, .sr_wr_r_version(), "text", "libsnap:r")
   packages <- sort(unique(as.character(packages)))
   with <- if (length(packages)) {
-    paste0(" with the packages ", .sr_wr_label(reg, paste(packages, collapse = ", ")), ", each cited in the references;")
+    paste0(" with the packages ", .sr_wr_label(reg, paste(packages, collapse = ", ")), " ",
+           paste0("{{C:", .sr_cite_pkg_key(packages), "}}", collapse = " "), ", each cited in the references;")
   } else {
     ";"
   }

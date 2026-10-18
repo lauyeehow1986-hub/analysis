@@ -5,6 +5,7 @@
 #
 #   sr_writer_opts()  the validated options of a build
 #   sr_doc_model()    list(meta, reg, main, supplement, not_reported, dropped_families)
+#                     the last block of `main` is list(type = "refs", keys), the reference list
 
 #' The options of a manuscript build, validated.
 #'
@@ -231,6 +232,9 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   main <- c(main, Filter(in_main, tables), if (nrow(main_tab$df)) list(main_tab), figs)
   supp_blocks <- c(Filter(Negate(in_main), tables), if (!is.null(fam_tab)) list(fam_tab), if (!is.null(dev_tab)) list(dev_tab))
   if (length(supp_blocks)) supplement <- c(supplement, list(.sr_wr_head("Supplementary tables", 1L)), supp_blocks)
+
+  # ---- the reference list: the keys in order of first use, last block of the main document (writer/cite.R) ----
+  main <- c(main, list(list(type = "refs", keys = sr_cite_order(list(main = main, supplement = supplement)))))
 
   lock <- project$state$sap$lock
   meta <- list(sap_hash = as.character(lock$sap_hash), locked_at = as.character(lock$locked_at),
