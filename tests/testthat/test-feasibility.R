@@ -141,6 +141,10 @@ test_that("a cannot_run verdict can only be revised or stopped", {
   expect_error(sr_feasibility_decide(p, "p1", "exploratory", reason = "x"), "cannot run")
   p <- sr_feasibility_decide(p, "p1", "revise", reason = "drop the bad row list")
   expect_identical(sr_feasibility(p, "p1")$decision$decision, "revise")
+  sr_project_close(p)
+  p2 <- sr_project_open(p$paths$dir)
+  withr::defer(sr_project_close(p2))
+  expect_identical(p2$state$feasibility, p$state$feasibility)
 })
 
 test_that("a stop is sticky: no re-assess, no escape except a reasoned decide, even when stale (R6)", {
@@ -171,6 +175,15 @@ test_that("a stop is sticky: no re-assess, no escape except a reasoned decide, e
   expect_error(sr_feasibility_decide(p, "p1", "stop", reason = "again"), "stale")
   p <- sr_feasibility_assess(p, "p1")
   expect_true(is.na(.sr_feas_stale(p, "p1")))
+
+  # R6 with proceed: replacing a stop on a stale assessment needs a reason, and then passes
+  p <- sr_feasibility_decide(p, "p1", "stop", reason = "no again")
+  p <- sr_sap_add(p, "p1", "logistic", .ft_spec(terms = list(list(var = "z1"))), "t", label = "primary")
+  expect_identical(.sr_feas_stale(p, "p1"), "spec")
+  expect_error(sr_feasibility_decide(p, "p1", "proceed"), "a reason is required to decide proceed \\(replacing a stop\\)")
+  p <- sr_feasibility_decide(p, "p1", "proceed", reason = "the stop was a mistake")
+  expect_null(sr_project_stopped(p))
+  expect_identical(sr_feasibility(p, "p1")$decision$decision, "proceed")
 })
 
 test_that("staleness: a changed spec or a re-imported table; the decision is refused on a stale assessment", {
@@ -270,7 +283,13 @@ test_that("the report and the fragment read the stored verdict and are outcome-b
   expect_identical(rep$label, rep("primary", 3L))
   expect_identical(rep$n_cc, rep(as$inputs$n_cc, 3L))
   expect_equal(rep$events, rep(as$inputs$outcome$events_cc, 3L))
-  expect_equal(rep$prevalence, rep(as$inputs$outcome$risk, 3L))
+  # R12: prevalence is the exposure prevalence (share of complete cases with x = 1), not the outcome risk
+  df <- .ft_frame()
+  cc <- stats::complete.cases(df[c("y", "x", "z1", "z2")])
+  expect_identical(as$inputs$n_cc, sum(cc))
+  want <- sum(df$x[cc] == 1) / sum(cc)
+  expect_equal(rep$prevalence, rep(want, 3L))
+  expect_false(isTRUE(all.equal(want, as$inputs$outcome$risk)))
   expect_identical(rep$decision, rep("proceed", 3L))
   expect_true(all(is.na(rep$stale)))
   expect_identical(rep$delta_measure, rep("OR", 3L))
@@ -280,6 +299,9 @@ test_that("the report and the fragment read the stored verdict and are outcome-b
   expect_identical(fr$template, "feasibility_methods")
   expect_named(fr$values, c("n", "events", "prevalence", "h", "mde", "delta", "delta_source", "tier"))
   expect_identical(fr$values$n, as$inputs$n_cc)
+  expect_identical(names(fr$values$prevalence), c("0", "1"))
+  expect_equal(fr$values$prevalence[["1"]], want)
+  expect_equal(fr$values$prevalence[["0"]], 1 - want)
   expect_identical(fr$values$tier, as$tier)
   expect_identical(fr$values$delta, 1.5)
   expect_identical(fr$values$mde, as$contrasts$mde[as$contrasts$measure == "OR"])
@@ -353,12 +375,57 @@ test_that("survival, rmst and continuous analyses replay identically and stay ou
   rep <- sr_feasibility_report(p)
   expect_identical(rep$analysis, c("bp", "cx", "rm"))
   expect_true(all(is.finite(rep$se)))
-  expect_equal(rep$prevalence[rep$analysis == "cx"], mean(df$status))
-  expect_true(is.na(rep$prevalence[rep$analysis == "bp"]))
+  expect_equal(rep$prevalence[rep$analysis == "cx"], mean(df$x == 1))
+  expect_equal(rep$prevalence[rep$analysis == "rm"], mean(df$x == 1))
+  expect_equal(sr_feasibility_fragment(p, "cx")$values$prevalence[["1"]], mean(df$x == 1))
+  expect_equal(rep$prevalence[rep$analysis == "bp"], mean(df$x == 1))
   expect_silent(.sr_assert_blind(rep, c("time", "status", "bp"), "z1"))
   p <- sr_feasibility_decide(p, "cx", "proceed", reason = "precision reported")
   sr_project_close(p)
   p2 <- sr_project_open(p$paths$dir)
   withr::defer(sr_project_close(p2))
   expect_identical(p2$state$feasibility, p$state$feasibility)
+})
+
+test_that("exposure prevalence (R12): a factor exposure gives every level's share, a continuous one NA", {
+  df <- .ft_frame()
+  # factor exposure: site against reference "a"
+  p <- .ft_project(df, spec = .ft_spec(exposure = "site", exposure_ref = "a",
+                                       terms = list(list(var = "z1", type = "linear"))))
+  p <- sr_feasibility_assess(p, "p1")
+  a <- sr_feasibility(p, "p1")$assessment
+  expect_identical(a$inputs$exposure$type, "factor")
+  cc <- stats::complete.cases(df[c("y", "site", "z1")])
+  sh <- table(df$site[cc]) / sum(cc)
+  rep <- sr_feasibility_report(p)
+  expect_identical(a$inputs$n_cc, sum(cc))
+  for (l in c("b", "c")) {
+    expect_equal(unique(rep$prevalence[grepl(paste0(": ", l, " vs a"), rep$contrast, fixed = TRUE)]),
+                 unname(sh[[l]]))
+  }
+  fr <- sr_feasibility_fragment(p, "p1")
+  expect_identical(names(fr$values$prevalence), c("a", "b", "c"))
+  expect_equal(unlist(fr$values$prevalence, use.names = FALSE), as.numeric(sh))
+  expect_equal(sum(unlist(fr$values$prevalence)), 1)
+  expect_silent(.sr_assert_blind(fr, "y", c("site", "z1")))
+
+  # continuous exposure: NA in the report and the fragment, and a replay-identical state
+  p <- .ft_project(df, spec = .ft_spec(exposure = "z3", terms = list(list(var = "z1", type = "linear"))))
+  p <- sr_feasibility_assess(p, "p1")
+  a <- sr_feasibility(p, "p1")$assessment
+  expect_identical(a$inputs$exposure$type, "linear")
+  rep <- sr_feasibility_report(p)
+  expect_true(nrow(rep) > 0L)
+  expect_true(all(is.na(rep$prevalence)))
+  expect_identical(sr_feasibility_fragment(p, "p1")$values$prevalence, NA_real_)
+  sr_project_close(p)
+  p2 <- sr_project_open(p$paths$dir)
+  withr::defer(sr_project_close(p2))
+  expect_identical(p2$state$feasibility, p$state$feasibility)
+
+  # no complete case: NA
+  p <- .ft_project(df, spec = .ft_spec(exclude_rows = seq_len(500L)))
+  p <- sr_feasibility_assess(p, "p1")
+  expect_true(all(is.na(sr_feasibility_report(p)$prevalence)))
+  expect_identical(sr_feasibility_fragment(p, "p1")$values$prevalence, NA_real_)
 })

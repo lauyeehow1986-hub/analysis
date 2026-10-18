@@ -279,14 +279,28 @@ sr_project_stopped <- function(project) {
   NULL
 }
 
-# The outcome prevalence of a stored assessment: the marginal risk (binary) or the share of events
-# (survival) among the rows with an outcome; NA for a continuous outcome and for kind none.
-.sr_feas_prevalence <- function(inputs) {
-  o <- inputs$outcome
-  if (is.null(o)) return(NA_real_)
-  if (identical(inputs$kind, "binary")) return(o$risk)
-  if (identical(inputs$kind, "surv") && !is.na(inputs$n_obs) && inputs$n_obs > 0L) return(o$events_total / inputs$n_obs)
-  NA_real_
+# Exposure prevalence of a stored assessment (R12), from the stored counts only: the share of the
+# complete cases at each exposure level (inputs$exposure$levels), as a named list. NA_real_ for a
+# continuous exposure, kind none, or no complete cases.
+.sr_feas_exposure_prevalence <- function(inputs) {
+  ex <- inputs$exposure
+  lv <- ex$levels
+  n <- inputs$n_cc
+  if (is.null(ex) || is.null(lv) || !nrow(lv) || !(ex$type %in% c("factor", "binary")) ||
+      is.na(n) || n < 1L) {
+    return(NA_real_)
+  }
+  stats::setNames(as.list(lv$n_cc / n), lv$level)
+}
+
+# The exposure prevalence of each contrast row (n_k / n_cc, the share of complete cases at the row's
+# contrast level, from contrasts_in); NA for a continuous exposure, no complete cases or no row.
+.sr_feas_row_prevalence <- function(inputs, level) {
+  ci <- inputs$contrasts_in
+  n <- inputs$n_cc
+  if (is.null(ci) || is.na(n) || n < 1L) return(rep(NA_real_, length(level)))
+  nk <- ci$n_k[match(level, ci$level)]
+  ifelse(is.na(level), NA_real_, nk / n)
 }
 
 #' The stored feasibility verdicts of the pre-specified analyses as one table (stored records only; the
@@ -294,7 +308,8 @@ sr_project_stopped <- function(project) {
 #' events, prevalence, se, h, mde, se_upper, delta, delta_measure, delta_source, tier, decision, reason,
 #' stale, blockers, warnings). One row per (contrast x measure), or one row with NA contrast columns
 #' when there is none (a cannot_run or not_applicable verdict). `events` is the expected number of
-#' events among the complete cases, `tier` the tier of the row (the overall tier when there is no row),
+#' events among the complete cases, `prevalence` the exposure prevalence of the row's contrast level
+#' (n_k / n_cc; NA for a continuous exposure), `tier` the tier of the row (the overall tier when there is no row),
 #' blockers / warnings the stored texts joined by "; " ("" when none). Analyses without an assessment
 #' are not listed.
 sr_feasibility_report <- function(project) {
@@ -312,7 +327,7 @@ sr_feasibility_report <- function(project) {
       analysis = id, label = an[[id]]$label, route = an[[id]]$route,
       contrast = pick("contrast", NA_character_), measure = pick("measure", NA_character_),
       n_cc = as$inputs$n_cc, events = as$inputs$outcome$events_cc %||% NA_real_,
-      prevalence = .sr_feas_prevalence(as$inputs),
+      prevalence = if (has) .sr_feas_row_prevalence(as$inputs, ct$level) else NA_real_,
       se = pick("se", NA_real_), h = pick("h", NA_real_), mde = pick("mde", NA_real_),
       se_upper = pick("se_upper", NA_real_), delta = d$value, delta_measure = d$measure,
       delta_source = d$source, tier = if (has) ct$tier else as$tier,
@@ -336,7 +351,8 @@ sr_feasibility_report <- function(project) {
 
 #' The Methods fragment inputs of an assessed analysis (inputs, not prose: the P1c convention):
 #' list(template = "feasibility_methods", values = list(n, events, prevalence, h, mde, delta,
-#' delta_source, tier)). n is the complete-case n, events and prevalence as in the report, h and mde
+#' delta_source, tier)). n is the complete-case n, events as in the report, prevalence the named list of every exposure level's
+#' share of the complete cases (NA for a continuous exposure, kind none, no complete case), h and mde
 #' those of the least precise contrast (largest mde) of the delta measure, or of the first measure when
 #' there is no delta (NA when none is computed), tier the overall tier. Refused without an assessment.
 sr_feasibility_fragment <- function(project, analysis_id) {
@@ -360,7 +376,7 @@ sr_feasibility_fragment <- function(project, analysis_id) {
   }
   list(template = "feasibility_methods",
        values = list(n = as$inputs$n_cc, events = as$inputs$outcome$events_cc %||% NA_real_,
-                     prevalence = .sr_feas_prevalence(as$inputs), h = h, mde = mde, delta = as$delta$value,
+                     prevalence = .sr_feas_exposure_prevalence(as$inputs), h = h, mde = mde, delta = as$delta$value,
                      delta_source = as$delta$source, tier = as$tier))
 }
 
