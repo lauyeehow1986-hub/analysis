@@ -135,7 +135,7 @@ test_that("the main document and the supplement hold the right analyses, heading
 test_that("meta records the lock, the library snapshot, the purposes and the wording", {
   p <- .fx_writer_project(environment())
   m <- sr_doc_model(p, sr_writer_opts(preset = "bmj", alpha = 0.01))
-  expect_named(m$meta, c("sap_hash", "locked_at", "libsnap", "preset", "alpha", "purposes", "wording"))
+  expect_named(m$meta, c("sap_hash", "locked_at", "libsnap", "preset", "alpha", "purposes", "wording", "effects"))
   expect_identical(m$meta$sap_hash, p$state$sap$lock$sap_hash)
   expect_identical(m$meta$locked_at, p$state$sap$lock$locked_at)
   expect_identical(m$meta$preset, "bmj")
@@ -267,6 +267,9 @@ test_that("a decision to treat a primary analysis as exploratory changes its Met
   expect_identical(m$meta$wording[["a_lr"]], "exploratory")
   expect_identical(m$meta$wording[["a_cox"]], "confirmatory")
   expect_match(.md_say(m, m$main, "results_a_lr"), "^In exploratory, hypothesis-generating analysis a_lr, the adjusted")
+  # the Table 1 sentence of an exploratory analysis says so too (claim guard G7)
+  expect_identical(.md_say(m, m$main, "results_table1_t1"),
+                   "In exploratory, hypothesis-generating analysis t1, baseline characteristics by grp are shown in Table 1.")
   ft <- .md_say(m, m$main, "methods_feas_a_lr")
   expect_true(endsWith(ft, " Because of this, the analysis is reported as exploratory and hypothesis-generating (test fixture)."))
   expect_true(all(sr_ph_verify(m$reg, p)$ok))

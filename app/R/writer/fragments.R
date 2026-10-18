@@ -237,12 +237,18 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   paste(out, collapse = " ")
 }
 
-# The Table 1 sentence of a table1 analysis.
-.sr_wr_r_table1 <- function(project, id, reg) {
+# The Table 1 sentence of a table1 analysis. An exploratory analysis says so, as every Results sentence of one must
+# (the claim guard's rule G7).
+.sr_wr_r_table1 <- function(project, id, reg, wording = "confirmatory") {
   by <- as.character(unlist(project$state$analyses[[id]]$spec$by))
   by <- by[!is.na(by) & nzchar(by)]
-  paste0("Baseline characteristics", if (length(by)) paste0(" by ", .sr_wr_label(reg, paste(by, collapse = ", "))) else "",
-         " are shown in ", .sr_wr_label(reg, "Table 1"), ".")
+  what <- paste0(" characteristics", if (length(by)) paste0(" by ", .sr_wr_label(reg, paste(by, collapse = ", "))) else "",
+                 " are shown in ", .sr_wr_label(reg, "Table 1"), ".")
+  if (identical(wording, "exploratory")) {
+    paste0("In exploratory, hypothesis-generating analysis ", .sr_wr_label(reg, id), ", baseline", what)
+  } else {
+    paste0("Baseline", what)
+  }
 }
 
 # "Not reported: ..." for the analyses with no ok run, and the families whose adjusted p values could not

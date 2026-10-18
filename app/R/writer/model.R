@@ -70,13 +70,36 @@ sr_writer_opts <- function(preset = "default", suppress_k = SR_SDC_K, table2 = c
   }, NA, USE.NAMES = FALSE)
 }
 
+# What the claim guard (writer/guard.R) needs to know about each effects row of the reported analyses: its
+# role, measure and conditional flag. One row per (analysis, effects row); the row is the `<row>` of an
+# `effect:<analysis>:<row>:<field>` source.
+.sr_wd_effects_info <- function(res, ids) {
+  one <- function(id) {
+    e <- res[[id]]$effects
+    n <- if (is.data.frame(e)) nrow(e) else 0L
+    if (!n) return(NULL)
+    col <- function(nm) if (nm %in% names(e)) e[[nm]] else rep(NA, n)
+    data.frame(analysis = rep(id, n), row = seq_len(n), role = as.character(col("role")),
+               measure = as.character(col("measure")), conditional = as.logical(col("conditional")),
+               stringsAsFactors = FALSE)
+  }
+  out <- do.call(rbind, lapply(ids, one))
+  if (is.null(out)) {
+    out <- data.frame(analysis = character(), row = integer(), role = character(), measure = character(),
+                      conditional = logical(), stringsAsFactors = FALSE)
+  }
+  rownames(out) <- NULL
+  out
+}
+
 #' The document model of a locked and run project.
 #'
 #' `main` and `supplement` are ordered lists of blocks: heading blocks `list(type = "heading", text,
 #' level)`, paragraph blocks `list(type = "para", id, text, analysis, section)`, and the table and figure
 #' blocks of writer/tables.R and writer/figures.R. `reg` is the placeholder registry every template reads.
 #' `meta` records the lock, the library snapshot, the options, the purpose of each reported analysis and its
-#' wording (confirmatory or exploratory). `not_reported` lists the secondary, sensitivity and exploratory
+#' wording (confirmatory or exploratory), and `effects`, the role, measure and conditional flag of every effects
+#' row (analysis, row, role, measure, conditional), which the claim guard reads. `not_reported` lists the secondary, sensitivity and exploratory
 #' analyses with no ok run (id, label, reason "not run" or "latest run failed"). `dropped_families` names the
 #' multiplicity families whose adjusted p values could not be computed, each with the reason.
 #'
@@ -178,7 +201,7 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   results_paras <- function(id) {
     out <- list()
     if (identical(project$state$analyses[[id]]$route, "table1")) {
-      out <- c(out, list(.sr_wr_para(paste0("results_table1_", id), .sr_wr_r_table1(project, id, reg), id, "results")))
+      out <- c(out, list(.sr_wr_para(paste0("results_table1_", id), .sr_wr_r_table1(project, id, reg, wording[[id]]), id, "results")))
     }
     if (!identical(purposes[[id]], "describe")) {
       txt <- .sr_wr_r_effects(project, id, res[[id]], wording[[id]], reg, fa_of)
@@ -239,7 +262,7 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   lock <- project$state$sap$lock
   meta <- list(sap_hash = as.character(lock$sap_hash), locked_at = as.character(lock$locked_at),
                libsnap = sr_libsnap(), preset = opts$preset, alpha = opts$alpha, purposes = purposes,
-               wording = wording)
+               wording = wording, effects = .sr_wd_effects_info(res, rep_ids))
   list(meta = meta, reg = reg, main = main, supplement = supplement, not_reported = not_reported,
        dropped_families = dropped)
 }
