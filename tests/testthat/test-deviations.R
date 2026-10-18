@@ -275,7 +275,7 @@ test_that("no rule: apply adds <id>_ph as an unplanned sensitivity analysis and 
   p <- sr_sap_add(p, "m2", "cox", .dv_cox(exposure = "z"), "t", label = "secondary", family = "f1")
   p <- sr_sap_family(p, "f1", c("m1", "m2"), "holm")
   expect_error(sr_diag_apply(p, "m1"), "not locked")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   hash0 <- p$state$sap$lock$sap_hash
   p <- sr_run(p, "m1")
   expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
@@ -353,7 +353,7 @@ test_that("a pre-lock replace_primary rule makes the pre-specified RMST primary 
   p <- sr_sap_add(p, "m1", "cox", .dv_cox(terms = list(list(var = "z"))), "t", label = "primary")
   p <- sr_sap_add(p, "m1_km", "rmst", .dv_cox(tau = 2), "t", label = "sensitivity", parent = "m1")
   p <- sr_sap_rule(p, "r1", "m1", "ph", "replace_primary", "m1_km")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   hash0 <- p$state$sap$lock$sap_hash
   p <- sr_run(p, "m1")
   p <- sr_diag_run(p, "m1", checks = "ph")
@@ -385,7 +385,7 @@ test_that("an add_sensitivity rule fires without adding or relabelling anything"
   p <- sr_sap_add(p, "m1", "cox", .dv_cox(), "t", label = "primary")
   p <- sr_sap_add(p, "m1_km", "rmst", .dv_cox(tau = 2), "t", label = "sensitivity", parent = "m1")
   p <- sr_sap_rule(p, "r1", "m1", "ph", "add_sensitivity", "m1_km")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   p <- sr_diag_run(p, "m1", checks = "ph")
   an0 <- p$state$analyses
@@ -401,7 +401,7 @@ test_that("sr_analysis_add: post-lock only, reason required, validated like sr_s
   s <- .dv_cox()
   expect_error(sr_analysis_add(p, "e1", "cox", s, "t", "exploratory", reason = "look"), "not locked")
   p <- sr_sap_add(p, "m1", "cox", s, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   hash0 <- sr_sap_hash(p)
   expect_error(sr_analysis_add(p, "e1", "cox", s, "t", "exploratory"), "reason")
   expect_error(sr_analysis_add(p, "e1", "cox", s, "t", "exploratory", reason = ""), "reason")

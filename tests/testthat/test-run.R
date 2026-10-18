@@ -51,7 +51,7 @@
 }
 
 .run_locked <- function(id = "stub_run", body_fn = NULL, env = parent.frame()) {
-  sr_sap_lock(.run_drafted(id, body_fn, env = env))
+  sr_sap_lock(.fx_feasible(.run_drafted(id, body_fn, env = env)))
 }
 
 # Re-open the project in `dir` (the old handle is closed first).

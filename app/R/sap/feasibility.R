@@ -272,7 +272,7 @@ sr_feasibility <- function(project, analysis_id) {
 #' NULL when none is stopped.
 sr_project_stopped <- function(project) {
   an <- .sr_sap_analyses(project)
-  for (id in sort(names(an), method = "radix")) {
+  for (id in sort(as.character(names(an)), method = "radix")) {
     d <- project$state$feasibility[[id]]$decision
     if (identical(d$decision, "stop")) return(list(analysis = id, reason = d$reason))
   }
@@ -315,7 +315,7 @@ sr_project_stopped <- function(project) {
 sr_feasibility_report <- function(project) {
   an <- .sr_sap_analyses(project)
   rows <- list()
-  for (id in sort(names(an), method = "radix")) {
+  for (id in sort(as.character(names(an)), method = "radix")) {
     rec <- project$state$feasibility[[id]]
     as <- rec$assessment
     if (is.null(as)) next
@@ -391,7 +391,7 @@ sr_feasibility_fragment <- function(project, analysis_id) {
 .sr_feas_gate <- function(project) {
   an <- .sr_sap_analyses(project)
   out <- character()
-  for (id in sort(names(an), method = "radix")) {
+  for (id in sort(as.character(names(an)), method = "radix")) {
     primary <- identical(an[[id]]$label, "primary")
     rec <- project$state$feasibility[[id]]
     dec <- rec$decision$decision

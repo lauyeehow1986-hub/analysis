@@ -23,7 +23,7 @@
   p <- .fx_ready_project(df, "t", roles, env = env)
   .tb_routes()
   p <- sr_sap_add(p, "a1", route, spec, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "a1")
   expect_true(p$state$runs$a1$ok, info = p$state$runs$a1$error)
   p

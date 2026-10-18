@@ -487,7 +487,8 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
 #' the sorted pairs, take each group's RMST up to `tau` (summary(survfit)$table[["rmean"]]) and
 #' difference them. Draws come from stream 1 of sr_streams(seed, 1), the smaller group first, so
 #' swapping the groups only flips the sign of every difference. The caller's RNG kind and
-#' .Random.seed are restored. NA when it cannot be computed.
+#' .Random.seed are restored. Draws that have no RMST (every time beyond tau) are dropped; NA when fewer
+#' than two draws are finite or it cannot be computed.
 .sr_feas_rmst_se <- function(pairs, n_k, n_ref, tau, sims, seed) {
   if (!is.data.frame(pairs) || !all(c("time", "event") %in% names(pairs))) return(NA_real_)
   pr <- pairs[order(pairs$time, pairs$event, method = "radix"), c("time", "event"), drop = FALSE]
@@ -514,7 +515,8 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
   assign(".Random.seed", stream, envir = genv)
   rmean <- function(i) {
     fit <- survival::survfit(survival::Surv(time, event) ~ 1, data = pr[i, , drop = FALSE])
-    summary(fit, rmean = tau)$table[["rmean"]]
+    # a draw whose smallest time is beyond tau has no RMST (survival refuses the truncation): non-finite
+    tryCatch(summary(fit, rmean = tau)$table[["rmean"]], error = function(e) NA_real_)
   }
   lo <- as.integer(min(n_k, n_ref))
   hi <- as.integer(max(n_k, n_ref))

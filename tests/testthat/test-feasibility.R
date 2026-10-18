@@ -429,3 +429,82 @@ test_that("exposure prevalence (R12): a factor exposure gives every level's shar
   expect_true(all(is.na(sr_feasibility_report(p)$prevalence)))
   expect_identical(sr_feasibility_fragment(p, "p1")$values$prevalence, NA_real_)
 })
+
+# ---- the lock freezes the verdict, the hash covers it, a stop is sticky ---------------------------------
+
+# The logistic project, assessed and decided proceed, and locked.
+.ft_locked <- function(env = parent.frame()) {
+  p <- .ft_project(env = env)
+  p <- sr_feasibility_assess(p, "p1", delta = .ft_delta())
+  p <- sr_feasibility_decide(p, "p1", "proceed", reason = "adequate for the pre-specified contrast")
+  sr_sap_lock(p)
+}
+
+test_that("after the lock the verdict is frozen: no assess, no decide, no engine call", {
+  p <- .ft_locked()
+  expect_identical(sr_sap_hash(p), p$state$sap$lock$sap_hash)
+  expect_error(sr_feasibility_assess(p, "p1"), "frozen", fixed = TRUE)
+  expect_error(sr_feasibility_decide(p, "p1", "stop", reason = "late"), "frozen", fixed = TRUE)
+
+  calls <- 0L
+  trace(".sr_feas_compute", tracer = quote(calls <<- calls + 1L), print = FALSE, where = globalenv())
+  withr::defer(untrace(".sr_feas_compute", where = globalenv()))
+  f <- sr_feasibility(p, "p1")
+  r <- sr_feasibility_report(p)
+  expect_identical(calls, 0L)
+  expect_identical(f$decision$decision, "proceed")
+  expect_true(is.na(f$stale))
+  expect_identical(r$decision, rep("proceed", nrow(r)))
+})
+
+test_that("the SAP hash covers the feasibility record, and only when there is one", {
+  p <- .ft_locked()
+  h <- sr_sap_hash(p)
+  q <- p
+  q$state$feasibility$p1$decision$reason <- "another reason"
+  expect_false(identical(sr_sap_hash(q), h))
+  q <- p
+  q$state$feasibility$p1$decision$decision <- "exploratory"
+  expect_false(identical(sr_sap_hash(q), h))
+  q <- p
+  q$state$feasibility$p1$assessment$tier <- "adequate"
+  expect_false(identical(sr_sap_hash(q), h))
+  # a feasibility record of a removed analysis is not part of the SAP
+  q <- p
+  q$state$feasibility$gone <- q$state$feasibility$p1
+  expect_identical(sr_sap_hash(q), h)
+
+  # a SAP locked before P1c.1 (no feasibility records) keeps the hash it had: the element is absent
+  q <- p
+  q$state$feasibility <- NULL
+  legacy <- .sr_sha256(sr_canonical_json(list(
+    analyses = unname(lapply(.sr_sap_analyses(q), identity)),
+    families = list(), rules = list())))
+  expect_identical(sr_sap_hash(q), legacy)
+  q$state$feasibility <- list()
+  expect_identical(sr_sap_hash(q), legacy)
+})
+
+test_that("a stopped analysis cannot be removed; only a recorded reversal frees it", {
+  p <- .ft_project()
+  p <- sr_sap_add(p, "s1", "logistic", .ft_spec(), "t", label = "sensitivity", parent = "p1")
+  p <- sr_feasibility_assess(p, "s1")
+  p <- sr_feasibility_decide(p, "s1", "stop", reason = "too few events")
+  expect_error(sr_sap_remove(p, "s1"), "reverse the stop with sr_feasibility_decide first", fixed = TRUE)
+  expect_match(tryCatch(sr_sap_remove(p, "s1"), error = conditionMessage), "s1", fixed = TRUE)
+  # another analysis' stop does not stop the removal of an analysis that is not stopped
+  p <- sr_sap_add(p, "s2", "logistic", .ft_spec(), "t", label = "sensitivity", parent = "p1")
+  expect_null(sr_sap_remove(p, "s2")$state$analyses$s2)
+  p <- sr_feasibility_decide(p, "s1", "revise", reason = "reversing the stop")
+  expect_null(sr_sap_remove(p, "s1")$state$analyses$s1)
+})
+
+test_that("sr_run on a stopped project is refused before anything is extracted", {
+  p <- .ft_locked()
+  s <- p
+  s$state$feasibility$p1$decision <- list(decision = "stop", reason = "no power")
+  expect_identical(sr_project_stopped(s)$analysis, "p1")
+  ex_dir <- file.path(s$paths$dir, "data", "extracts")
+  expect_error(sr_run(s, "p1"), "the project is stopped: no power", fixed = TRUE)
+  expect_identical(list.files(ex_dir), character())
+})

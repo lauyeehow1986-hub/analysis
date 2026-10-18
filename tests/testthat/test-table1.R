@@ -327,7 +327,7 @@ test_that("Table 1 runs end to end through sr_run on a locked project", {
   p <- .fx_ready_project(df, "t", c(id = "id", stage = "outcome"))
   .t1_route()
   p <- sr_sap_add(p, "t1", "table1", .t1_spec(), "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "t1")
   expect_true(p$state$runs$t1$ok, info = p$state$runs$t1$error)
   res <- sr_result(p, "t1")

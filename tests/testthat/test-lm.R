@@ -394,7 +394,7 @@ test_that("lm runs through sr_sap_add, lock and sr_run; a hostile column name is
   bad2 <- .lm_spec(outcome = hostile, exposure = "a b", standardize_over = "exposed")
   expect_error(sr_sap_add(p, "bad2", "lm", bad2, "t", label = "primary"), "standardize_over")
   p <- sr_sap_add(p, "m1", "lm", s, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   expect_true(p$state$runs$m1$ok, info = p$state$runs$m1$error)
   res <- sr_result(p, "m1")

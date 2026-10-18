@@ -927,6 +927,15 @@ test_that("the verdict's contrasts frame never trips the gate when spec columns 
   expect_error(.sr_feas_blind_frame(bad, spec), "contrasts\\$hr")
 })
 
+test_that("RMST SE: draws whose times all lie beyond tau are dropped, not an error", {
+  pr <- data.frame(time = c(12, 15, 20), event = c(1L, 0L, 1L))
+  expect_no_error(se <- .sr_feas_rmst_se(pr, 2L, 2L, 5, 20L, 1L))
+  expect_true(is.na(se))
+  mixed <- data.frame(time = c(1, 2, 3, 4, 30), event = c(1L, 1L, 0L, 1L, 1L))
+  expect_no_error(se2 <- .sr_feas_rmst_se(mixed, 1L, 1L, 5, 60L, 1L))
+  expect_true(is.finite(se2))
+})
+
 test_that("an uncodable survival outcome gives cannot_run without simulating, and a non-whole seed falls back to 1", {
   withr::local_options(sr.feas_rmst_sims = 10)
   expect_true(is.na(.sr_feas_rmst_se(NULL, 100L, 100L, 8, 10L, 1L)))

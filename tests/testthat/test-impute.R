@@ -71,7 +71,7 @@ test_that("lm under MI through sr_run equals a direct mice run under the same RN
   .im_route("lm")
   s <- .im_lm_spec()
   p <- sr_sap_add(p, "m1", "lm", s, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "m1")
   run <- p$state$runs$m1
   expect_true(run$ok, info = run$error)
