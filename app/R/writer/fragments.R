@@ -27,9 +27,9 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 
 # ---- counts ---------------------------------------------------------------------------------------
 
-# A count placeholder: a small cell (1 to SR_SDC_K - 1) is masked here, so no caller can print it.
+# A count placeholder: a small cell (1 to reg$k - 1) is masked here, so no caller can print it.
 .sr_wr_put_count <- function(reg, v, source, analysis) {
-  sv <- sr_sdc_value(v)
+  sv <- sr_sdc_value(v, k = reg$k)
   sr_ph_put(reg, sv$text, "count", source, analysis = analysis,
             value = if (sv$suppressed) NA_real_ else as.numeric(v), suppressed = sv$suppressed)
 }
@@ -79,6 +79,29 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 # The feasibility sentence of a primary analysis with an assessment, or NULL when there is nothing to say
 # (no assessment, the assessment is not applicable, or it has no precision).
 .sr_wr_m_feas <- function(project, id, reg) {
+  # an exploratory decision is always stated; the precision sentence comes first when there is one
+  dec <- project$state$feasibility[[id]]$decision
+  expl <- if (identical(dec$decision, "exploratory")) {
+    why <- dec$reason
+    why <- if (is.character(why) && length(why) == 1L && !is.na(why) && nzchar(why)) {
+      paste0(" (", .sr_wr_label(reg, why), ")")
+    } else {
+      ""
+    }
+    paste0("the analysis is reported as exploratory and hypothesis-generating", why, ".")
+  } else {
+    NULL
+  }
+  prec <- .sr_wr_m_feas_precision(project, id, reg)
+  if (is.null(prec)) {
+    if (is.null(expl)) return(NULL)
+    return(paste0("Because of the feasibility assessment, ", expl))
+  }
+  if (is.null(expl)) prec else paste0(prec, " Because of this, ", expl)
+}
+
+# The precision sentence of the pre-lock feasibility assessment, or NULL when there is none to state.
+.sr_wr_m_feas_precision <- function(project, id, reg) {
   fr <- tryCatch(sr_feasibility_fragment(project, id), error = function(e) NULL)
   if (is.null(fr)) return(NULL)
   v <- fr$values
@@ -102,22 +125,11 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   } else {
     ""
   }
-  txt <- paste0("Before the plan was locked, the expected precision was assessed from the complete cases (n = ",
-                .sr_wr_put_count(reg, v$n, src("n"), id), events, "): expected ", .sr_wr_label(reg, "95%"),
-                " CI half-width ", num(v$h, "h"), " and minimum detectable effect at ", .sr_wr_label(reg, "80%"),
-                " power ", num(v$mde, "mde"), delta, "; precision was rated ",
-                .sr_wr_label(reg, gsub("_", " ", as.character(v$tier), fixed = TRUE)), ".")
-  dec <- project$state$feasibility[[id]]$decision
-  if (identical(dec$decision, "exploratory")) {
-    why <- dec$reason
-    why <- if (is.character(why) && length(why) == 1L && !is.na(why) && nzchar(why)) {
-      paste0(" (", .sr_wr_label(reg, why), ")")
-    } else {
-      ""
-    }
-    txt <- paste0(txt, " Because of this, the analysis is reported as exploratory and hypothesis-generating", why, ".")
-  }
-  txt
+  paste0("Before the plan was locked, the expected precision was assessed from the complete cases (n = ",
+         .sr_wr_put_count(reg, v$n, src("n"), id), events, "): expected ", .sr_wr_label(reg, "95%"),
+         " CI half-width ", num(v$h, "h"), " and minimum detectable effect at ", .sr_wr_label(reg, "80%"),
+         " power ", num(v$mde, "mde"), delta, "; precision was rated ",
+         .sr_wr_label(reg, gsub("_", " ", as.character(v$tier), fixed = TRUE)), ".")
 }
 
 # The sentence about a multiplicity family; `fa` is its sr_family_adjust() table.
@@ -171,12 +183,12 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 .sr_wr_p_clause <- function(lead, text, token) paste0(lead, if (grepl("^[<>]", text)) " " else " = ", token)
 
 # The Results paragraph of an analysis: one sentence per primary-role effects row. `fa_of` is
-# function(analysis record) -> list(fid, fa) for a member of a usable multiplicity family, else NULL.
+# function(analysis id) -> list(fid, fa) for a member of a usable multiplicity family, else NULL.
 .sr_wr_r_effects <- function(project, id, res, wording, reg, fa_of) {
   eff <- res$effects
   idx <- which(eff$role == "primary")
   if (!length(idx)) return(NULL)
-  fam <- fa_of(project$state$analyses[[id]])
+  fam <- fa_of(id)
   has_cov <- any(eff$role == "covariate")
   first_measure <- eff$measure[idx[1L]]
   lead <- if (identical(wording, "exploratory")) {
@@ -228,16 +240,20 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 }
 
 # "Not reported: ..." for the analyses with no ok run, and the families whose adjusted p values could not
-# be computed for that reason.
+# be computed, each with the reason given.
 .sr_wr_r_not_reported <- function(nr, dropped, reg) {
-  if (!nrow(nr)) return(NULL)
-  items <- paste0(nr$id, " (", nr$label, ", ", nr$reason, ")")
-  txt <- paste0("Not reported: ", .sr_wr_label(reg, paste(items, collapse = ", ")), ".")
-  for (fid in dropped) {
-    txt <- paste0(txt, " Adjusted p values of family ", .sr_wr_label(reg, fid),
-                  " are not reported because a member of the family was not run.")
+  txt <- character()
+  if (nrow(nr)) {
+    items <- paste0(nr$id, " (", nr$label, ", ", nr$reason, ")")
+    txt <- paste0("Not reported: ", .sr_wr_label(reg, paste(items, collapse = ", ")), ".")
   }
-  txt
+  # `dropped` is c(family id = the reason sr_family_adjust() gave); the notice does not depend on `nr`
+  for (fid in names(dropped)) {
+    why <- sub("^family [^:]*: ", "", dropped[[fid]])
+    txt <- c(txt, paste0("Adjusted p values of family ", .sr_wr_label(reg, fid), " are not reported (",
+                         .sr_wr_label(reg, why), ")."))
+  }
+  if (!length(txt)) NULL else paste(txt, collapse = " ")
 }
 
 # ---- resolvers ------------------------------------------------------------------------------------

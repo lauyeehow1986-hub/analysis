@@ -119,6 +119,27 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
   out
 }
 
+# The multiplicity family an analysis is reported in: its own `family` when that family is in the project, else,
+# for the alternative of a fired replace_primary rule, the family of the analysis it replaced (ruling R16;
+# sr_family_adjust() keys the alternative's rows under the alternative's own id). NA when there is none.
+# Shared by the main table and the Results sentences, so both read the same adjusted p.
+.sr_wr_family_id_of <- function(project, id) {
+  fams <- names(project$state$sap$families %||% list())
+  usable <- function(f) {
+    if (is.null(f) || length(f) != 1L || is.na(f) || !(as.character(f) %in% fams)) NA_character_ else as.character(f)
+  }
+  an <- project$state$analyses %||% list()
+  f <- usable(an[[id]]$family)
+  if (!is.na(f)) return(f)
+  for (r in project$state$sap$fired %||% list()) {
+    if (identical(r$action, "replace_primary") && identical(r$alternative, id)) {
+      f <- usable(an[[r$analysis]]$family)
+      if (!is.na(f)) return(f)
+    }
+  }
+  NA_character_
+}
+
 # ---- the main-results table -------------------------------------------------------------------------
 
 #' The "Main results" table: one row per primary-role effects row of `ids`.
@@ -132,14 +153,8 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
 .sr_wr_main_table <- function(project, ids, reg, opts) {
   opts <- .sr_wr_opts(opts)
   if (.sr_wr_cache_on()) on.exit(.sr_ph_ctx$cache <- NULL, add = TRUE)
-  fams <- names(project$state$sap$families %||% list())
-  family_of <- function(a) {
-    f <- a$family
-    if (is.null(f) || length(f) != 1L || is.na(f) || !(as.character(f) %in% fams)) NA_character_ else as.character(f)
-  }
-  an <- lapply(ids, function(id) .sr_wr_analysis(project, id))
-  names(an) <- ids
-  any_family <- any(!is.na(vapply(an, family_of, "")))
+  for (id in ids) .sr_wr_analysis(project, id)
+  any_family <- any(!is.na(vapply(ids, function(id) .sr_wr_family_id_of(project, id), "")))
 
   fa_cache <- list()
   cells <- list()
@@ -151,7 +166,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
     eff <- res$effects
     idx <- which(eff$role == "primary")
     if (!length(idx)) next
-    fid <- family_of(an[[id]])
+    fid <- .sr_wr_family_id_of(project, id)
     fa <- NULL
     if (!is.na(fid)) {
       if (is.null(fa_cache[[fid]])) fa_cache[[fid]] <- sr_family_adjust(project, fid)

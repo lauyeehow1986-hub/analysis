@@ -4,12 +4,13 @@
 # guard and the reporting checklist all read this one model.
 #
 #   sr_writer_opts()  the validated options of a build
-#   sr_doc_model()    list(meta, reg, main, supplement, not_reported)
+#   sr_doc_model()    list(meta, reg, main, supplement, not_reported, dropped_families)
 
 #' The options of a manuscript build, validated.
 #'
 #' @param preset the journal preset name (Task 8 resolves it to a size and a resolution).
-#' @param suppress_k tables and figures hide a count of 1 to suppress_k - 1; a whole number of at least 2.
+#' @param suppress_k the small-cell threshold of the whole document (ruling R15): prose, tables and figures hide
+#'   a count of 1 to suppress_k - 1. A whole number of at least SR_SDC_K, the floor: a looser threshold is refused.
 #' @param table2 "label" keeps the covariate coefficients of an explain-causal model under a Table 2
 #'   footnote, "suppress" drops them.
 #' @param alpha the significance level, strictly between 0 and 1.
@@ -19,9 +20,9 @@ sr_writer_opts <- function(preset = "default", suppress_k = SR_SDC_K, table2 = c
   if (!(is.character(preset) && length(preset) == 1L && !is.na(preset) && nzchar(preset))) {
     stop("`preset` must be a single non-empty string", call. = FALSE)
   }
-  if (!(is.numeric(suppress_k) && length(suppress_k) == 1L && is.finite(suppress_k) && suppress_k >= 2 &&
+  if (!(is.numeric(suppress_k) && length(suppress_k) == 1L && is.finite(suppress_k) && suppress_k >= SR_SDC_K &&
         suppress_k == round(suppress_k))) {
-    stop("`suppress_k` must be a whole number of at least 2", call. = FALSE)
+    stop("`suppress_k` must be a whole number of at least ", SR_SDC_K, " (the small-cell floor SR_SDC_K)", call. = FALSE)
   }
   if (identical(table2, c("label", "suppress"))) table2 <- "label"
   if (!(is.character(table2) && length(table2) == 1L && !is.na(table2) && table2 %in% c("label", "suppress"))) {
@@ -75,7 +76,8 @@ sr_writer_opts <- function(preset = "default", suppress_k = SR_SDC_K, table2 = c
 #' blocks of writer/tables.R and writer/figures.R. `reg` is the placeholder registry every template reads.
 #' `meta` records the lock, the library snapshot, the options, the purpose of each reported analysis and its
 #' wording (confirmatory or exploratory). `not_reported` lists the secondary, sensitivity and exploratory
-#' analyses with no ok run (id, label, reason "not run" or "latest run failed").
+#' analyses with no ok run (id, label, reason "not run" or "latest run failed"). `dropped_families` names the
+#' multiplicity families whose adjusted p values could not be computed, each with the reason.
 #'
 #' Refused, naming every offender: an unlocked SAP, a primary analysis with no ok run, and an analysis
 #' whose stored result cannot be read.
@@ -137,17 +139,20 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   # the families whose adjusted p values can be computed (every member ran); the others are left out of the
   # view the table builders read
   fams <- project$state$sap$families %||% list()
-  usable <- names(fams)[vapply(names(fams), function(fid) {
-    !inherits(tryCatch(sr_family_adjust(project, fid), error = function(e) e), "error")
-  }, NA)]
-  dropped <- setdiff(names(fams), usable)
+  # only the sr_family_adjust() call is caught, and its message is kept: a dropped family is always reported
+  fam_err <- vapply(names(fams), function(fid) {
+    e <- tryCatch(sr_family_adjust(project, fid), error = function(e) conditionMessage(e))
+    if (is.character(e)) e else NA_character_
+  }, "", USE.NAMES = TRUE)
+  usable <- names(fams)[is.na(fam_err)]
+  dropped <- fam_err[!is.na(fam_err)]
   view <- project
   view$state$sap$families <- fams[usable]
   fa_cache <- lapply(stats::setNames(usable, usable), function(fid) sr_family_adjust(view, fid))
-  fa_of <- function(a) {
-    f <- a$family
-    if (is.null(f) || length(f) != 1L || is.na(f) || !(as.character(f) %in% usable)) return(NULL)
-    list(fid = as.character(f), fa = fa_cache[[as.character(f)]])
+  # a fired replace_primary alternative is in the family of the analysis it replaced (ruling R16)
+  fa_of <- function(id) {
+    fid <- .sr_wr_family_id_of(view, id)
+    if (is.na(fid)) NULL else list(fid = fid, fa = fa_cache[[fid]])
   }
 
   # purpose and wording of each reported analysis
@@ -163,7 +168,7 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   }
   wording <- vapply(rep_ids, wording_of, "", USE.NAMES = TRUE)
 
-  reg <- sr_ph_registry()
+  reg <- sr_ph_registry(k = opts$suppress_k)
   keys <- lapply(stats::setNames(rep_ids, rep_ids), function(id) .sr_wr_keys(project, id, res[[id]]))
   methods_para <- function(id) {
     .sr_wr_para(paste0("methods_", id),
@@ -231,5 +236,6 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   meta <- list(sap_hash = as.character(lock$sap_hash), locked_at = as.character(lock$locked_at),
                libsnap = sr_libsnap(), preset = opts$preset, alpha = opts$alpha, purposes = purposes,
                wording = wording)
-  list(meta = meta, reg = reg, main = main, supplement = supplement, not_reported = not_reported)
+  list(meta = meta, reg = reg, main = main, supplement = supplement, not_reported = not_reported,
+       dropped_families = dropped)
 }

@@ -47,6 +47,9 @@ test_that("sr_writer_opts returns the validated plain list the table builders re
   expect_identical(o2$suppress_k, 10L)
   expect_error(sr_writer_opts(table2 = "hide"), "table2")
   expect_error(sr_writer_opts(suppress_k = 1), "suppress_k")
+  # one threshold per document, never looser than the floor (ruling R15)
+  for (k in 2:4) expect_error(sr_writer_opts(suppress_k = k), "at least 5")
+  expect_identical(sr_writer_opts(suppress_k = 5)$suppress_k, 5L)
   expect_error(sr_writer_opts(suppress_k = 4.5), "suppress_k")
   expect_error(sr_writer_opts(alpha = 1.5), "alpha")
   expect_error(sr_writer_opts(alpha = NA_real_), "alpha")
@@ -90,7 +93,9 @@ test_that("an unlocked SAP, a missing result and a failed primary run are refuse
 test_that("the main document and the supplement hold the right analyses, headings and tables", {
   p <- .fx_writer_project(environment())
   m <- sr_doc_model(p)
-  expect_named(m, c("meta", "reg", "main", "supplement", "not_reported"))
+  expect_named(m, c("meta", "reg", "main", "supplement", "not_reported", "dropped_families"))
+  expect_length(m$dropped_families, 0L)
+  expect_identical(m$reg$k, 5L)
   expect_s3_class(m$reg, "sr_ph")
   expect_identical(.md_heads(m$main)[1:2], c("Methods", "Statistical analysis"))
   expect_true("Results" %in% .md_heads(m$main))
@@ -114,7 +119,12 @@ test_that("the main document and the supplement hold the right analyses, heading
   expect_true("main_results" %in% .md_ids(m$main, "table"))
   expect_true("t1_table1" %in% .md_ids(m$main, "table"))
   expect_true(all(c("families", "deviations") %in% .md_ids(m$supplement, "table")))
-  expect_true("a_mp_coefficients" %in% .md_ids(m$supplement, "table") || length(.md_ids(m$supplement, "table")) >= 3L)
+  expect_setequal(.md_ids(m$main, "table"), c("t1_table1", "main_results"))
+  expect_setequal(.md_ids(m$supplement, "table"),
+                  c("t1_missing", "a_lr_coefficients", "a_lr_model_fit", "a_lr_observed_risk", "a_lr_marginal",
+                    "a_cox_coefficients", "a_cox_model_fit", "a_rmst_rmst", "a_rmst_rmst_difference",
+                    "x_age_coefficients", "x_age_model_fit", "a_mp_coefficients", "a_mp_model_fit",
+                    "a_mp_observed_risk", "a_mp_marginal", "families", "deviations"))
   expect_true(length(.md_ids(m$main, "figure")) >= 1L)
   expect_true(all(vapply(Filter(function(b) identical(b$type, "table"), m$main), function(b) identical(b$where, "main"), NA)))
   expect_true(all(vapply(Filter(function(b) identical(b$type, "table"), m$supplement), function(b) identical(b$where, "supplement"), NA)))
@@ -292,6 +302,32 @@ test_that("a fired replace_primary rule reports the alternative as primary and t
   expect_true(all(sr_ph_verify(m$reg, p)$ok))
 })
 
+test_that("a fired replace_primary alternative is reported in the family of the analysis it replaced", {
+  p <- .fx_writer_project(environment())
+  p <- sr_project_append(p, "sap.rule_fired", list(rule = "r1", analysis = "a_lr", check = "ph",
+                                                  action = "replace_primary", alternative = "a_mp", detail = "test"))
+  expect_identical(.sr_wr_family_id_of(p, "a_mp"), "fam1")
+  expect_identical(.sr_wr_family_id_of(p, "a_cox"), "fam1")
+  expect_true(is.na(.sr_wr_family_id_of(p, "x_age")))
+  expect_true(is.na(.sr_wr_family_id_of(p, "nope")))
+  m <- sr_doc_model(p)
+  fa <- sr_family_adjust(p, "fam1")
+  r <- which(fa$analysis == "a_mp")[1L]
+  expect_false(is.na(fa$p_adj[r]))
+  padj <- sr_fmt_p(fa$p_adj[r])
+  txt <- .md_say(m, m$main, "results_a_mp")
+  expect_match(txt, paste0(", adjusted p ", if (grepl("^[<>]", padj)) "" else "= ", padj), fixed = TRUE)
+  # the main-table row of a_mp carries the same adjusted p
+  mt <- Filter(function(b) identical(b$id, "main_results"), m$main)[[1L]]$df
+  expect_true("Adjusted p" %in% names(mt))
+  row <- mt[mt$Analysis == "a_mp", , drop = FALSE]
+  expect_true(nrow(row) >= 1L)
+  expect_identical(sr_ph_resolve(row[["Adjusted p"]][1L], m$reg, cite = .md_cite), padj)
+  expect_true(all(sr_ph_verify(m$reg, p)$ok))
+  # the replaced analysis is a sensitivity analysis now: no adjusted p of its own
+  expect_false(grepl("adjusted p", .md_say(m, m$supplement, "results_a_lr"), fixed = TRUE))
+})
+
 test_that("a count of one to four in a fragment prints as <5, suppressed, with no value", {
   p <- .fx_writer_project(environment())
   real <- sr_result
@@ -328,6 +364,9 @@ test_that("an analysis that did not run is listed, and a family it belongs to is
   expect_match(nr, "a_cox", fixed = TRUE)
   expect_match(nr, "a_rmst", fixed = TRUE)
   expect_match(nr, "fam1", fixed = TRUE)          # its adjusted p values cannot be computed
+  expect_match(nr, "not yet run successfully: a_cox", fixed = TRUE)   # the real reason
+  expect_identical(names(m$dropped_families), "fam1")
+  expect_match(m$dropped_families[["fam1"]], "not yet run successfully", fixed = TRUE)
   expect_length(Filter(function(b) identical(b$id, "methods_family_fam1"), m$main), 0L)
   expect_false("families" %in% .md_ids(m$supplement, "table"))
   expect_false("Adjusted p" %in% names(Filter(function(b) identical(b$id, "main_results"), m$main)[[1L]]$df))
@@ -361,3 +400,74 @@ test_that("the model leaves the result cache as it found it", {
   expect_error(sr_doc_model(structure(list(state = list(sap = list(locked = FALSE))), class = "x")), "not locked")
   expect_null(.sr_ph_ctx$cache)
 })
+test_that("a family dropped for another reason is reported with that reason, with or without unrun analyses", {
+  p <- .fx_writer_project(environment())
+  real <- sr_family_adjust
+  withr::defer(assign("sr_family_adjust", real, envir = globalenv()))
+  assign("sr_family_adjust", function(project, family_id) {
+    stop("family 'fam1': analysis 'a_cox' has no primary-role effect row", call. = FALSE)
+  }, envir = globalenv())
+  m <- sr_doc_model(p)
+  expect_identical(nrow(m$not_reported), 0L)                 # nothing was unrun: the notice stands alone
+  expect_identical(names(m$dropped_families), "fam1")
+  nr <- .md_say(m, m$main, "results_not_reported")
+  expect_match(nr, "^Adjusted p values of family fam1 are not reported \\(")
+  expect_match(nr, "has no primary-role effect row", fixed = TRUE)
+  expect_false(grepl("not run", nr, fixed = TRUE))
+  expect_false(grepl("Not reported", nr, fixed = TRUE))
+  expect_length(Filter(function(b) identical(b$id, "methods_family_fam1"), m$main), 0L)
+  expect_true(all(sr_ph_verify(m$reg, p)$ok))
+})
+
+test_that("an exploratory decision is stated even when the precision sentence is omitted", {
+  p <- .fx_writer_build(environment(), decision = "exploratory")
+  real <- sr_feasibility_fragment
+  withr::defer(assign("sr_feasibility_fragment", real, envir = globalenv()))
+  assign("sr_feasibility_fragment", function(project, id) {
+    r <- real(project, id)
+    r$values$tier <- "not_applicable"
+    r
+  }, envir = globalenv())
+  m <- sr_doc_model(p)
+  ft <- .md_say(m, m$main, "methods_feas_a_lr")
+  expect_false(grepl("expected precision", ft, fixed = TRUE))
+  expect_identical(ft, "Because of the feasibility assessment, the analysis is reported as exploratory and hypothesis-generating (test fixture).")
+  expect_true(all(sr_ph_verify(m$reg, p)$ok))
+  # no assessment to read at all: still stated
+  assign("sr_feasibility_fragment", function(project, id) stop("no assessment"), envir = globalenv())
+  m2 <- sr_doc_model(p)
+  expect_match(.md_say(m2, m2$main, "methods_feas_a_lr"), "exploratory and hypothesis-generating", fixed = TRUE)
+})
+
+test_that("one small-cell threshold governs prose, tables and the registry of a document (ruling R15)", {
+  expect_identical(sr_ph_registry()$k, 5L)
+  expect_error(sr_ph_registry(k = 1), "k")
+  reg <- sr_ph_registry(k = 10)
+  expect_identical(reg$k, 10L)
+  tk <- sr_ph_lift("7 events were seen", reg, "fragment:a_lr:glm_note", "a_lr")
+  expect_identical(sr_ph_resolve(tk, reg, cite = .md_cite), "<10 events were seen")
+  expect_identical(sr_ph_table(reg)$suppressed, TRUE)
+  # the default registry shows 7, as before
+  reg5 <- sr_ph_registry()
+  tk5 <- sr_ph_lift("7 events were seen", reg5, "fragment:a_lr:glm_note", "a_lr")
+  expect_identical(sr_ph_resolve(tk5, reg5, cite = .md_cite), "7 events were seen")
+  # a document built with suppress_k = 10 masks a count of 7 in prose
+  p <- .fx_writer_project(environment())
+  real <- sr_result
+  withr::defer(assign("sr_result", real, envir = globalenv()))
+  assign("sr_result", function(project, analysis_id) {
+    r <- real(project, analysis_id)
+    if (identical(analysis_id, "a_lr")) {
+      r$fragments$glm_note <- sub("209 events", "7 events", r$fragments$glm_note, fixed = TRUE)
+    }
+    r
+  }, envir = globalenv())
+  m10 <- sr_doc_model(p, sr_writer_opts(suppress_k = 10))
+  expect_identical(m10$reg$k, 10L)
+  expect_match(.md_say(m10, m10$main, "methods_a_lr"), "(<10 events)", fixed = TRUE)
+  expect_true(all(sr_ph_verify(m10$reg, p)$ok))
+  m5 <- sr_doc_model(p)
+  expect_match(.md_say(m5, m5$main, "methods_a_lr"), "(7 events)", fixed = TRUE)
+  expect_true(all(sr_ph_verify(m5$reg, p)$ok))
+})
+

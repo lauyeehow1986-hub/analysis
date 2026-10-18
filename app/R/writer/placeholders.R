@@ -34,8 +34,14 @@ SR_PH_COLS <- c("id", "kind", "text", "value", "analysis", "source", "scale", "n
 
 #' A new, empty placeholder registry: an environment of class "sr_ph" whose `rows` is a data.frame
 #' (id, kind, text, value, analysis, source, scale, null, suppressed).
-sr_ph_registry <- function() {
+#' @param k the small-cell threshold of this document (ruling R15): a count of 1 to k - 1 is masked as
+#'   "<k". One registry, one k, so prose and tables agree.
+sr_ph_registry <- function(k = SR_SDC_K) {
+  if (!(is.numeric(k) && length(k) == 1L && !is.na(k) && k >= 2 && k == round(k))) {
+    stop("`k` must be a whole number of at least 2", call. = FALSE)
+  }
   reg <- new.env(parent = emptyenv())
+  reg$k <- as.integer(k)
   reg$rows <- .sr_ph_rows_empty()
   class(reg) <- "sr_ph"
   reg
@@ -155,8 +161,9 @@ sr_ph_resolve <- function(x, reg, cite = NULL) {
 #'
 #' The source of match k (its position in `text`) is paste0(source_prefix, ":", k). A whole number
 #' without "%" whose next word (skipping one "(") matches SR_SDC_COUNT_WORDS is a `count`, every other
-#' number a `num`. The value is the parsed number, the "%" dropped. A count of 1 to SR_SDC_K - 1 is a
-#' small cell: its token resolves to "<5" (suppressed = TRUE, value NA); zero is shown. A digit inside
+#' number a `num`. The value is the parsed number, the "%" dropped. A count of 1 to k - 1 (the
+#' registry's `k`, default SR_SDC_K) is a
+#' small cell: its token resolves to "<k" (suppressed = TRUE, value NA); zero is shown. A digit inside
 #' a name (z1, age_10) is not a number and is left alone.
 #' @param text one string
 #' @param source_prefix e.g. "fragment:a_lr:glm_note"
@@ -177,7 +184,7 @@ sr_ph_lift <- function(text, reg, source_prefix, analysis) {
     v <- as.numeric(sub("%$", "", t))
     if (is_count) {
       # a small cell is masked here, so no caller can print it (ruling R13); verify re-derives the raw count
-      sv <- sr_sdc_value(v)
+      sv <- sr_sdc_value(v, k = reg$k)
       toks[k] <- sr_ph_put(reg, sv$text, "count", src, analysis = analysis,
                            value = if (sv$suppressed) NA_real_ else v, suppressed = sv$suppressed)
     } else {
@@ -273,7 +280,7 @@ sr_ph_digits <- function(template) {
 #' Re-derive every row of the registry from its source and compare it with the registered text.
 #'
 #' `got` is the re-derived text (the message when the resolver fails), `expected` the registered text.
-#' A suppressed row passes when the re-derived count is in 1..(SR_SDC_K - 1). A resolver error is
+#' A suppressed row passes when the re-derived count is in 1..(k - 1), k being the registry's threshold. A resolver error is
 #' ok = FALSE, never an error of this function.
 #' @return data.frame(id, source, expected, got, ok)
 sr_ph_verify <- function(reg, project) {
@@ -294,7 +301,7 @@ sr_ph_verify <- function(reg, project) {
     got[i] <- as.character(r)
     if (isTRUE(rows$suppressed[i])) {
       v <- suppressWarnings(as.numeric(got[i]))
-      ok[i] <- grepl("^[0-9]+$", got[i]) && !is.na(v) && v >= 1 && v <= SR_SDC_K - 1L
+      ok[i] <- grepl("^[0-9]+$", got[i]) && !is.na(v) && v >= 1 && v <= reg$k - 1L
     } else {
       ok[i] <- identical(got[i], rows$text[i])
     }
