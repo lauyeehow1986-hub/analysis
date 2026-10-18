@@ -66,11 +66,6 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   d
 }
 
-# The outcome columns a spec names: outcome, time, status (character(0) when none).
-.sr_feas_outcome_cols <- function(spec) {
-  c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
-}
-
 # The levels of x the way .h_levels orders them (sorted in the original type, as text, `ref` first
 # when it is observed), without its refusals: an absent ref or a single level is a blocker elsewhere.
 .sr_feas_levels <- function(x, ref = NULL) {
@@ -280,7 +275,7 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   exv <- .sr_spec_chr(spec[["exposure"]])
   tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
   iv <- tryCatch(.sr_spec_chr(unlist(spec[["interactions"]])), error = function(e) character())
-  oc <- .sr_feas_outcome_cols(spec)
+  oc <- .sr_outcome_cols(spec)
   oc_cov <- intersect(oc, c(tv, iv, .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["cluster"]])))
   for (o in oc_cov) block("design: the outcome column '", o, "' cannot be a term, stratum or cluster")
   cov_cols <- setdiff(intersect(unique(c(exv, tv, .sr_spec_chr(spec[["cluster"]]), .sr_spec_chr(spec[["strata"]]))),
@@ -391,7 +386,7 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #' values are still walked. Returns x invisibly; stops naming the offending element.
 .sr_feas_blind_frame <- function(x, spec) {
   if (missing(spec) || !is.list(spec)) stop("spec must be the analysis spec (a list)", call. = FALSE)
-  oc <- .sr_feas_outcome_cols(spec)
+  oc <- .sr_outcome_cols(spec)
   chk <- x
   if (is.list(chk) && !is.data.frame(chk)) {
     for (p in .sr_feas_struct_paths) {

@@ -65,6 +65,7 @@
   if (!is.null(spec[["event_value"]]) && !one(spec[["event_value"]])) {
     stop("event_value must be one non-empty value (the outcome value that counts as the event)", call. = FALSE)
   }
+  .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
   se <- .sr_glm_se(spec, kind)
   if (identical(kind, "modpois")) {

@@ -56,6 +56,7 @@
   if (identical(spec[["outcome"]], spec[["exposure"]])) {
     stop("the outcome and the exposure must be different columns", call. = FALSE)
   }
+  .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
   if (identical(.sr_lm_se(spec), "cluster")) {
     if (!one(spec[["cluster"]])) {

@@ -120,9 +120,20 @@ test_that("exclude_rows is ignored end to end (R16): outcome-blind, same verdict
 
 test_that("an outcome column used as a term is blocked end to end and the record stays outcome-blind (R17)", {
   sp <- .ft_spec(terms = list(list(var = "z1", type = "linear"), list(var = "y", type = "factor")))
-  p <- sr_feasibility_assess(.ft_project(.ft_frame(), spec = sp), "p1")
+  # the route refuses such a spec when it is added (F1) ...
+  expect_error(.ft_project(.ft_frame(), spec = sp), "the outcome column 'y' cannot be a term, stratum or cluster",
+               fixed = TRUE)
+  # ... and the engine blocker stays as defence in depth: a SAP state that holds the spec anyway (written
+  # in memory here) still gets a cannot_run, outcome-blind verdict
+  tenv <- environment()
+  with_spec <- function(df) {
+    p <- .ft_project(df, env = tenv)
+    p$state$analyses$p1$spec <- sp
+    sr_feasibility_assess(p, "p1")
+  }
+  p <- with_spec(.ft_frame())
   a <- p$state$feasibility$p1$assessment
-  b <- sr_feasibility_assess(.ft_project(.ft_frame(permute_y = TRUE), spec = sp), "p1")$state$feasibility$p1$assessment
+  b <- with_spec(.ft_frame(permute_y = TRUE))$state$feasibility$p1$assessment
   expect_identical(a$tier, "cannot_run")
   expect_true("design: the outcome column 'y' cannot be a term, stratum or cluster" %in% a$blockers)
   expect_true(all(is.na(a$inputs$contrasts_in$r2x)))
