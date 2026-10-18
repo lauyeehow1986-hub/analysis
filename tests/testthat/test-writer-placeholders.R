@@ -32,14 +32,14 @@ test_that("sr_ph_resolve fills E and L tokens, drops or renders citations, and n
 
 test_that("sr_ph_lift turns every number into a placeholder and leaves digits inside names alone", {
   reg <- sr_ph_registry()
-  txt <- paste("Logistic regression of y on grp; 398 row(s) analysed (120 events), 2 excluded;",
+  txt <- paste("Logistic regression of y on grp; 398 row(s) analysed (120 events), 12 excluded;",
                "95% CI; spline with 3 knots; z1 and age_10 kept.")
   out <- sr_ph_lift(txt, reg, "fragment:a_lr:glm_note", "a_lr")
   tb <- sr_ph_table(reg)
   expect_identical(nrow(tb), 5L)
-  expect_identical(tb$text, c("398", "120", "2", "95%", "3"))
+  expect_identical(tb$text, c("398", "120", "12", "95%", "3"))
   expect_identical(tb$kind, c("count", "count", "count", "num", "num"))
-  expect_equal(tb$value, c(398, 120, 2, 95, 3))
+  expect_equal(tb$value, c(398, 120, 12, 95, 3))
   expect_identical(tb$source, sprintf("fragment:a_lr:glm_note:%d", 1:5))
   expect_true(all(tb$analysis == "a_lr"))
   expect_identical(sr_ph_digits(out), character(0))
@@ -51,6 +51,17 @@ test_that("sr_ph_lift turns every number into a placeholder and leaves digits in
   expect_identical(sr_ph_table(reg2)$kind, c("count", "num"))
   # a text with no number is returned as it is
   expect_identical(sr_ph_lift("no number here", reg2, "fragment:a:g", "a"), "no number here")
+})
+
+test_that("sr_ph_lift masks a small count itself: 1 to 4 is <5, zero is shown, a knot count is not a count", {
+  reg <- sr_ph_registry()
+  out <- sr_ph_lift("3 events, 0 deaths, 4 knots, 5 patients and 1 row(s)", reg, "fragment:a:f", "a")
+  tb <- sr_ph_table(reg)
+  expect_identical(tb$text, c("<5", "0", "4", "5", "<5"))
+  expect_identical(tb$kind, c("count", "count", "num", "count", "count"))
+  expect_identical(tb$suppressed, c(TRUE, FALSE, FALSE, FALSE, TRUE))
+  expect_equal(tb$value, c(NA, 0, 4, 5, NA))
+  expect_identical(sr_ph_resolve(out, reg), "<5 events, 0 deaths, 4 knots, 5 patients and <5 row(s)")
 })
 
 test_that("sr_ph_digits sees only the digits outside placeholder tokens", {

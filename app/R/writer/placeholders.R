@@ -155,8 +155,9 @@ sr_ph_resolve <- function(x, reg, cite = NULL) {
 #'
 #' The source of match k (its position in `text`) is paste0(source_prefix, ":", k). A whole number
 #' without "%" whose next word (skipping one "(") matches SR_SDC_COUNT_WORDS is a `count`, every other
-#' number a `num`. The value is the parsed number, the "%" dropped. A digit inside a name (z1, age_10)
-#' is not a number and is left alone.
+#' number a `num`. The value is the parsed number, the "%" dropped. A count of 1 to SR_SDC_K - 1 is a
+#' small cell: its token resolves to "<5" (suppressed = TRUE, value NA); zero is shown. A digit inside
+#' a name (z1, age_10) is not a number and is left alone.
 #' @param text one string
 #' @param source_prefix e.g. "fragment:a_lr:glm_note"
 #' @param analysis the analysis id the numbers belong to
@@ -172,8 +173,16 @@ sr_ph_lift <- function(text, reg, source_prefix, analysis) {
     t <- mm$txt[k]
     after <- sub("^\\(", "", sub("^[[:space:]]+", "", substring(text, mm$start[k] + mm$len[k])))
     is_count <- grepl("^[0-9]+$", t) && grepl(SR_SDC_COUNT_WORDS, after, perl = TRUE)
-    toks[k] <- sr_ph_put(reg, t, if (is_count) "count" else "num", paste0(source_prefix, ":", k),
-                         analysis = analysis, value = as.numeric(sub("%$", "", t)))
+    src <- paste0(source_prefix, ":", k)
+    v <- as.numeric(sub("%$", "", t))
+    if (is_count) {
+      # a small cell is masked here, so no caller can print it (ruling R13); verify re-derives the raw count
+      sv <- sr_sdc_value(v)
+      toks[k] <- sr_ph_put(reg, sv$text, "count", src, analysis = analysis,
+                           value = if (sv$suppressed) NA_real_ else v, suppressed = sv$suppressed)
+    } else {
+      toks[k] <- sr_ph_put(reg, t, "num", src, analysis = analysis, value = v)
+    }
   }
   m <- gregexpr(SR_NUM_RE, text, perl = TRUE)
   regmatches(text, m) <- list(toks)
