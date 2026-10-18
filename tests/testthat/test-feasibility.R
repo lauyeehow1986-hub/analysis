@@ -441,17 +441,27 @@ test_that("exposure prevalence (R12): a factor exposure gives every level's shar
 }
 
 test_that("after the lock the verdict is frozen: no assess, no decide, no engine call", {
-  p <- .ft_locked()
+  # a counter bound into the tracer (the tracer runs in the traced function's frame, not here)
+  seen <- new.env(parent = emptyenv())
+  seen$n <- 0L
+  tick <- function() seen$n <- seen$n + 1L
+  suppressMessages(trace(".sr_feas_compute", tracer = bquote(.(tick)()), print = FALSE, where = globalenv()))
+  withr::defer(suppressMessages(untrace(".sr_feas_compute", where = globalenv())))
+
+  # positive control: assessing an unlocked project does call the engine
+  p <- .ft_project()
+  p <- sr_feasibility_assess(p, "p1", delta = .ft_delta())
+  expect_gt(seen$n, 0L)
+  p <- sr_feasibility_decide(p, "p1", "proceed", reason = "adequate for the pre-specified contrast")
+  p <- sr_sap_lock(p)
+  seen$n <- 0L
+
   expect_identical(sr_sap_hash(p), p$state$sap$lock$sap_hash)
   expect_error(sr_feasibility_assess(p, "p1"), "frozen", fixed = TRUE)
   expect_error(sr_feasibility_decide(p, "p1", "stop", reason = "late"), "frozen", fixed = TRUE)
-
-  calls <- 0L
-  trace(".sr_feas_compute", tracer = quote(calls <<- calls + 1L), print = FALSE, where = globalenv())
-  withr::defer(untrace(".sr_feas_compute", where = globalenv()))
   f <- sr_feasibility(p, "p1")
   r <- sr_feasibility_report(p)
-  expect_identical(calls, 0L)
+  expect_identical(seen$n, 0L)
   expect_identical(f$decision$decision, "proceed")
   expect_true(is.na(f$stale))
   expect_identical(r$decision, rep("proceed", nrow(r)))
@@ -507,4 +517,9 @@ test_that("sr_run on a stopped project is refused before anything is extracted",
   ex_dir <- file.path(s$paths$dir, "data", "extracts")
   expect_error(sr_run(s, "p1"), "the project is stopped: no power", fixed = TRUE)
   expect_identical(list.files(ex_dir), character())
+  # positive control: the same locked project without the stop does write an extract there
+  ran <- sr_run(p, "p1")
+  expect_true(dir.exists(ex_dir))
+  expect_gt(length(list.files(ex_dir)), 0L)
+  expect_true(ran$state$runs$p1$ok)
 })

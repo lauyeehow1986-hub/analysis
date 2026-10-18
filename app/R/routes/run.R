@@ -160,10 +160,10 @@ sr_extract <- function(project, table, cols) {
 #' Run one analysis of the locked SAP and record run.completed. Refused (nothing is written) when the
 #' project is read-only, the analysis is unknown, the SAP is not locked, an analysis is decided stop
 #' (sr_project_stopped), the table changed after the lock, the spec or layer stack no longer passes,
-#' the analysis does not fit in memory or its compiled code is rejected. Otherwise the analysis runs in the isolated worker behind the fits cache, and a
-#' failed fit (an error, a result that is not plain data, a presentation that breaks the result
-#' contract) is recorded with ok = FALSE and the project returned. `lib_changed` says that the library
-#' snapshot differs from the one recorded at the lock.
+#' the analysis does not fit in memory or its compiled code is rejected. Otherwise the analysis runs in
+#' the isolated worker behind the fits cache, and a failed fit (an error, a result that is not plain
+#' data, a presentation that breaks the result contract) is recorded with ok = FALSE and the project
+#' returned. `lib_changed` says that the library snapshot differs from the one recorded at the lock.
 #' @param timeout seconds the worker may run
 #' @return the project (run.completed).
 sr_run <- function(project, analysis_id, timeout = 3600) {
