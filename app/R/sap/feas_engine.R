@@ -489,6 +489,7 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
 #' swapping the groups only flips the sign of every difference. The caller's RNG kind and
 #' .Random.seed are restored. NA when it cannot be computed.
 .sr_feas_rmst_se <- function(pairs, n_k, n_ref, tau, sims, seed) {
+  if (!is.data.frame(pairs) || !all(c("time", "event") %in% names(pairs))) return(NA_real_)
   pr <- pairs[order(pairs$time, pairs$event, method = "radix"), c("time", "event"), drop = FALSE]
   rownames(pr) <- NULL
   n <- nrow(pr)
@@ -536,8 +537,9 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
 # The seed of the RMST simulation: spec$seed, else the route schema's default seed, else 1.
 .sr_feas_seed <- function(spec, route) {
   s <- spec[["seed"]]
-  if (!.sr_feas_num1(s)) s <- if (is.list(route)) route$spec_schema[["seed"]][["default"]] else NULL
-  if (!.sr_feas_num1(s)) 1L else s
+  whole <- function(z) .sr_feas_num1(z) && z == round(z) && abs(z) <= .Machine$integer.max   # sr_streams' rule
+  if (!whole(s)) s <- if (is.list(route)) route$spec_schema[["seed"]][["default"]] else NULL
+  if (!whole(s)) 1L else s
 }
 
 # The tiers a delta can give, best first (the overall tier is the worst row).
@@ -655,6 +657,7 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
     r2 <- ci$r2x[i]
     fac <- ex$type == "factor"
     if (m == "RMST_diff") {
+      if (length(blockers)) return(NA_real_)             # already cannot_run: no simulation
       return(.sr_feas_rmst_se(out$pairs, round(nk * f), round(nr * f), spec[["tau"]], sims, seed))
     }
     v <- if (fac) {

@@ -926,3 +926,31 @@ test_that("the verdict's contrasts frame never trips the gate when spec columns 
   bad$contrasts$hr <- 1
   expect_error(.sr_feas_blind_frame(bad, spec), "contrasts\\$hr")
 })
+
+test_that("an uncodable survival outcome gives cannot_run without simulating, and a non-whole seed falls back to 1", {
+  withr::local_options(sr.feas_rmst_sims = 10)
+  expect_true(is.na(.sr_feas_rmst_se(NULL, 100L, 100L, 8, 10L, 1L)))
+  expect_true(is.na(.sr_feas_rmst_se(data.frame(t = 1:5), 100L, 100L, 8, 10L, 1L)))
+  sf <- .fe_surv_frame()
+  sf$status <- ifelse(sf$status == 1L, "dead", "alive")
+  spec <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+               layers = .fe_layers(), seed = 1L)
+  expect_no_error(r <- .fe_verdict(sf, spec, "rmst"))
+  expect_identical(r$tier, "cannot_run")
+  expect_true(any(grepl("^outcome: ", r$blockers)))
+  expect_true(all(r$contrasts$tier == "cannot_run"))
+  cx <- .fe_surv_spec()
+  expect_no_error(r2 <- .fe_verdict(sf, cx, "cox"))
+  expect_identical(r2$tier, "cannot_run")
+  # a seed that is not a whole number is not used: the result is that of the default seed 1
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 1L)
+  d <- .fe_df(.fe_surv_frame(), rs)
+  inp <- .sr_feas_inputs(d, rs, sr_route_get("rmst"))
+  base <- .sr_feas_compute(inp, rs, sr_route_get("rmst"))
+  for (bad in list(1.5, NA_real_, Inf, "a", 3e10)) {
+    rs$seed <- bad
+    expect_no_error(r <- .sr_feas_compute(inp, rs, sr_route_get("rmst")))
+    expect_identical(r$contrasts$se, base$contrasts$se)
+  }
+})
