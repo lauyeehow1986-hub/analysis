@@ -19,8 +19,11 @@ design; this file holds *what has happened* and *what we learned*.
    - **User hand-off (locked16 PC):** run the FULL scale test (`Rscript tools/scale_test.R 20000000 60 <dir on the data drive> --profile=locked16`, about 8 GB CSV, needs the free space the pre-flight reports) next to the P0 Task 8 hand-off (run `sr_spike.zip` on the locked PC). Paste the printed report back; expect `PASS` (peak RSS under 8 GB = DuckDB cap 6 + 2). Only a 2M x 20 smoke has been run (on the laptop).
 3. ~~Execute P1a in a worktree (branch `p1a-foundation`)~~ done 2026-10-03; review and merge the branch.
 4. ~~P1b data layer~~ done 2026-10-10 (branch `p1b-data`); review and merge the branch.
-5. ~~P1c analysis~~ done 2026-10-18 (branch `p1c-analysis`); review and merge the branch.
-6. **Next: write the P1d plan** (router + writer + freeze + UI), then the new **P1e scale** plan
+5. ~~P1c analysis~~ done 2026-10-18 (branch `p1c-analysis`), merged to `main` (PR #1).
+6. **Next: execute P1c.1** (study feasibility verdict, spec catalogue O; plan
+   `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`, branch `p1c1-feasibility`). The SAP lock
+   requires its verdict, so it comes before P1d.
+7. Then **write the P1d plan** (router + writer + freeze + UI), then the new **P1e scale** plan
    (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
    them in that order.
    - P1d also owns: the SAP_v1.docx and lock UI, Methods/Results prose from the P1c fragment inputs,
