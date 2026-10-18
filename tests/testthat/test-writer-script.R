@@ -16,6 +16,18 @@
   }, args = list(f = f, d = dir), libpath = .libPaths(), user_profile = FALSE, wd = tempdir())
 }
 
+# Rebind the machine-dependent inputs of the key (core functions live in the global environment) until
+# `env` finishes, as another machine or another library would give them.
+.ws_pretend_other_machine <- function(env) {
+  g <- globalenv()
+  for (nm in c("sr_hw_fingerprint", "sr_libsnap_hash")) {
+    old <- get(nm, envir = g)
+    assign(nm, local({ v <- strrep(if (nm == "sr_hw_fingerprint") "a" else "b", 64L); function(...) v }), envir = g)
+    local({ nm <- nm; old <- old; withr::defer(assign(nm, old, envir = g), envir = env) })
+  }
+  invisible(TRUE)
+}
+
 .ws_stored <- function(p, id) {
   readRDS(file.path(p$paths$fits, paste0(p$state$runs[[id]]$ok_key, ".rds")))$value
 }
@@ -25,14 +37,32 @@ test_that("the run reducer keeps the extract of the latest ok run next to ok_key
   r <- p$state$runs$a_lr
   expect_match(r$ok_extract_sha, "^[0-9a-f]{64}$")
   expect_identical(r$ok_extract_sha, r$extract_sha)
-  # a later failed run keeps the ok pair; an old event without the field still reduces
-  st <- list(runs = list(a = list(ok_key = "k1", ok_extract_sha = "s1")))
-  st <- .sr_reducer_get("run.completed")(st, list(payload = list(analysis = "a", key = "k2",
-                                                                extract_sha = "s2", ok = FALSE)))
+  # the library hash and hardware fingerprint the key was computed with
+  expect_match(r$ok_lib_hash, "^[0-9a-f]{64}$")
+  expect_identical(r$ok_lib_hash, sr_libsnap_hash())
+  expect_identical(r$ok_hw_fp, sr_hw_fingerprint())
+  red <- .sr_reducer_get("run.completed")
+  # an ok run records all three
+  st0 <- red(list(), list(payload = list(analysis = "a", key = "k1", extract_sha = "s1", ok = TRUE,
+                                         lib_hash = "l1", hw_fp = "h1")))
+  expect_identical(c(st0$runs$a$ok_key, st0$runs$a$ok_extract_sha, st0$runs$a$ok_lib_hash, st0$runs$a$ok_hw_fp),
+                   c("k1", "s1", "l1", "h1"))
+  # a later failed run keeps the ok quadruple, whatever it carries itself
+  st <- red(st0, list(payload = list(analysis = "a", key = "k2", extract_sha = "s2", ok = FALSE,
+                                     lib_hash = "l2", hw_fp = "h2")))
   expect_identical(st$runs$a$ok_key, "k1")
   expect_identical(st$runs$a$ok_extract_sha, "s1")
-  st2 <- .sr_reducer_get("run.completed")(list(), list(payload = list(analysis = "b", key = "k", ok = FALSE)))
+  expect_identical(st$runs$a$ok_lib_hash, "l1")
+  expect_identical(st$runs$a$ok_hw_fp, "h1")
+  # an old event without the new fields still reduces: NA
+  st2 <- red(list(), list(payload = list(analysis = "b", key = "k", ok = FALSE)))
   expect_true(is.na(st2$runs$b$ok_extract_sha))
+  expect_true(is.na(st2$runs$b$ok_lib_hash))
+  expect_true(is.na(st2$runs$b$ok_hw_fp))
+  st3 <- red(list(), list(payload = list(analysis = "c", key = "k", extract_sha = "s", ok = TRUE)))
+  expect_identical(st3$runs$c$ok_key, "k")
+  expect_true(is.na(st3$runs$c$ok_lib_hash))
+  expect_true(is.na(st3$runs$c$ok_hw_fp))
 })
 
 test_that("the script text parses, holds one block per run analysis, is ASCII and has no path", {
@@ -101,6 +131,31 @@ test_that("a spec edited after the run no longer matches: refused", {
   expect_error(sr_analysis_script(q, "a_lr"), "no longer matches")
   # the unedited analyses still export
   expect_error(sr_analysis_script(q, c("t1", "a_cox")), NA)
+})
+
+test_that("another machine or a package update does not matter, only the code does", {
+  p <- .fx_writer_project(environment())
+  s <- sr_analysis_script(p, .ws_ids)
+  # an old run without the recorded values exports on the machine it ran on (current values)
+  old <- p
+  for (id in .ws_ids) {
+    old$state$runs[[id]]$ok_lib_hash <- NA_character_
+    old$state$runs[[id]]$ok_hw_fp <- NA_character_
+  }
+  expect_identical(sr_analysis_script(old, .ws_ids), s)
+  .ws_pretend_other_machine(environment())
+  expect_identical(sr_analysis_script(p, .ws_ids), s)
+  # the edited spec is still refused on the other machine
+  q <- p
+  n <- length(q$state$analyses$a_lr$spec$terms)
+  q$state$analyses$a_lr$spec$terms[[n + 1L]] <- list(var = "stage")
+  expect_error(sr_analysis_script(q, "a_lr"), "no longer matches")
+  # a run recorded without the lib hash and fingerprint (an old event) falls back to the current values:
+  # here they are the other machine's, so the key no longer matches
+  o <- p
+  o$state$runs$a_lr$ok_lib_hash <- NA_character_
+  o$state$runs$a_lr$ok_hw_fp <- NA_character_
+  expect_error(sr_analysis_script(o, "a_lr"), "no longer matches")
 })
 
 test_that("sr_lockfile has the renv.lock shape", {

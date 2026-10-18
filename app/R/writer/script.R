@@ -5,7 +5,10 @@
 # worker, in a local() of their own. Sourced with SR_PROJECT_DIR set to the project folder it
 # reproduces the stored results. Before it writes a block, the script checks that the code still is the
 # code of the run: the content hash of (extract, route, spec, seed) must equal the key of the latest ok
-# run, otherwise a recompile changed the code and the analysis must be run again. The text is ASCII
+# run, otherwise a recompile changed the code and the analysis must be run again. The check is about the
+# code, not the machine: the key is recomputed with the library hash and hardware fingerprint recorded
+# with that run (ok_lib_hash, ok_hw_fp; the current values only for a run recorded without them), so an
+# export on another machine or after a package update still passes. The text is ASCII
 # (.sr_lit escapes data strings) and holds no path: the project folder comes from the environment.
 
 #' The analysis.R text for the analyses `ids`, each of which has an ok run, in SAP order (pre-specified
@@ -61,7 +64,12 @@ sr_analysis_script <- function(project, ids) {
   spec <- .sr_spec_from_state(a$spec)
   if (is.null(spec$seed)) stop("the spec of ", .sr_sap_q(id), " has no seed", call. = FALSE)
   body <- sr_compile(route, spec)
-  now <- sr_content_hash(sha, list(route = .sr_route_key(a$route, a$route_version), spec = spec), spec$seed)
+  lib <- r$ok_lib_hash
+  hw <- r$ok_hw_fp
+  if (is.null(lib) || length(lib) != 1L || is.na(lib)) lib <- sr_libsnap_hash()
+  if (is.null(hw) || length(hw) != 1L || is.na(hw)) hw <- sr_hw_fingerprint()
+  now <- sr_content_hash(sha, list(route = .sr_route_key(a$route, a$route_version), spec = spec), spec$seed,
+                         libsnap_hash = lib, hw_fp = hw)
   if (!identical(now, key)) {
     stop("the code of ", id, " no longer matches the run (recompile changed); run it again", call. = FALSE)
   }
