@@ -100,6 +100,25 @@ local({
   p
 }
 
+# Assess and decide every pre-specified primary analysis (no delta, reason "test fixture"), so that the
+# SAP lock gate (sap/feasibility.R) passes: p <- sr_sap_lock(.fx_feasible(p)). A clustered analysis is
+# given a test ICC (the engine refuses it without one). Returns the project.
+.fx_feasible <- function(p, decision = "proceed") {
+  an <- .sr_sap_analyses(p)
+  for (id in sort(as.character(names(an)), method = "radix")) {
+    a <- an[[id]]
+    if (!identical(a$label, "primary")) next
+    assumptions <- if (isTRUE(a$spec$layers$clustered)) {
+      list(icc = list(value = 0.05, justification = "test fixture"))
+    } else {
+      list()
+    }
+    p <- sr_feasibility_assess(p, id, assumptions = assumptions)
+    p <- sr_feasibility_decide(p, id, decision, reason = "test fixture")
+  }
+  p
+}
+
 # A project whose table `table` (from `df`) is analysis-ready: ingested, roles confirmed, the DQ
 # checks run, and every warn / block finding decided with the action the suggestor proposes -- except
 # keep_sensitivity, which would demand a sensitivity analysis and is decided as recheck instead.

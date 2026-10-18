@@ -23,7 +23,7 @@
   p <- .fx_ready_project(df, "t", roles, env = env)
   .tb_routes()
   p <- sr_sap_add(p, "a1", route, spec, "t", label = "primary")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_feasible(p))
   p <- sr_run(p, "a1")
   expect_true(p$state$runs$a1$ok, info = p$state$runs$a1$error)
   p
@@ -237,4 +237,24 @@ test_that("NHEFS: the standardised mean difference in weight change is 3.52 (2.6
   expect_lt(abs(m$lo - 2.6), 0.15)
   expect_lt(abs(m$hi - 4.5), 0.15)
   expect_identical(m$ci_method, "boot_percentile")
+})
+
+# Feasibility (spec catalogue O): the outcome-blind prediction from the marginal values (no r2_y
+# assumption) is conservative -- at least 0.9 x the SE the locked run actually obtains, taken from its
+# primary (marginal) MD row as the 95% interval width over 2 qnorm(0.975).
+test_that("NHEFS: the feasibility prediction of the MD SE is conservative (>= 0.9 x the run's SE)", {
+  skip_if(Sys.getenv("SR_NHEFS_CSV") == "", "SR_NHEFS_CSV is not set (the NHEFS CSV is never committed)")
+  raw <- utils::read.csv(Sys.getenv("SR_NHEFS_CSV"))
+  d <- .tb_nhefs_prep(raw[, .tb_nhefs_cols])
+  p <- .tb_run(d, c(id = "id", wt82_71 = "outcome"), "lm", .tb_nhefs_spec(B = 2000L, seed = 1L))
+  a <- sr_feasibility(p, "a1")$assessment
+  expect_true(is.na(a$assumptions$r2_y$value))     # the marginal SD: no r2_y assumption
+  ct <- as.data.frame(a$contrasts, stringsAsFactors = FALSE)
+  pred <- ct$se[ct$measure == "MD"]
+  expect_length(pred, 1L)
+  e <- sr_result(p, "a1")$effects
+  m <- e[grepl("marginal", e$term) & e$role == "primary" & e$measure == "MD", ]
+  expect_equal(nrow(m), 1L)
+  actual <- (m$hi - m$lo) / (2 * stats::qnorm(0.975))
+  expect_gte(pred, 0.9 * actual)
 })
