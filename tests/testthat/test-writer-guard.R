@@ -370,3 +370,21 @@ test_that("a figure caption finding carries the '<figure id>:caption' block id",
   expect_identical(g$block, "forest_ratio:caption")
   expect_identical(g$rule, "causal_language")
 })
+
+test_that("G4 negation is narrow: 'not clinically significant' and 'not only significant' are not negations", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  est <- .gd_est(m, "g4w", 1.5)
+  hi <- .gd_p(m, "g4whi", 0.2)
+  lo <- .gd_p(m, "g4wlo", 0.01)
+  s1 <- paste0("The OR was statistically significant but not clinically significant ", est, " (p = ", lo, ").")
+  expect_identical(nrow(sr_claim_check_text(s1, "a_lr", m)), 0L)
+  s2 <- paste0("The OR was not only significant ", est, " (p = ", hi, ").")
+  g <- sr_claim_check_text(s2, "a_lr", m)
+  expect_identical(g$rule, "significance")
+  expect_identical(g$severity, "block")
+  # the negated forms still behave as before
+  s3 <- paste0("The OR was not statistically significant ", est, " (p = ", hi, ").")
+  expect_identical(nrow(sr_claim_check_text(s3, "a_lr", m)), 0L)
+  expect_identical(sr_claim_check_text(sub(hi, lo, s3, fixed = TRUE), "a_lr", m)$rule, "significance")
+})
