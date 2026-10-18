@@ -183,7 +183,7 @@ test_that("a cannot_run verdict can only be revised or stopped", {
   p <- .ft_project(df)
   p <- sr_feasibility_assess(p, "p1")
   expect_identical(sr_feasibility(p, "p1")$assessment$tier, "cannot_run")
-  expect_true("exposure level '1' has no complete-case row" %in% sr_feasibility(p, "p1")$assessment$blockers)
+  expect_true("exposure level '1' is observed but has no complete-case row" %in% sr_feasibility(p, "p1")$assessment$blockers)
   expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "x"), "cannot run.*decide revise or stop")
   expect_error(sr_feasibility_decide(p, "p1", "exploratory", reason = "x"), "cannot run")
   p <- sr_feasibility_decide(p, "p1", "revise", reason = "collect z2 in the exposed")
@@ -648,4 +648,29 @@ test_that("the SAP hash of a project without feasibility records is pinned (F4)"
   expect_identical(sr_sap_hash(p), legacy)
   p$state$feasibility <- list(gone = list(assessment = list(tier = "adequate")))   # not an analysis of the SAP
   expect_identical(sr_sap_hash(p), legacy)
+})
+
+test_that("assumptions given as NULL are absent ones: r2_y = NULL warns and is not stored (F9)", {
+  n <- 200L
+  df <- withr::with_seed(7L, {
+    z1 <- stats::rnorm(n)
+    x <- stats::rbinom(n, 1L, stats::plogis(z1))
+    data.frame(id = seq_len(n), x = x, z1 = z1, bp = 120 + 10 * z1 + stats::rnorm(n, 0, 8),
+               stringsAsFactors = FALSE)
+  })
+  p <- .fx_ready_project(df, "t", c(id = "id", bp = "outcome", x = "exposure"))
+  p <- sr_sap_add(p, "bp", "lm", list(purpose = "explain-causal", outcome = "bp", exposure = "x",
+                                      terms = list(list(var = "z1")), layers = .ft_layers(), seed = 1L),
+                  "t", label = "primary")
+  w <- paste0("r2_y was not given: the MD standard error uses r2_y = 0 (the covariates are assumed to explain ",
+              "none of the outcome variance, which is conservative)")
+  a <- sr_feasibility(sr_feasibility_assess(p, "bp"), "bp")$assessment
+  b <- sr_feasibility(sr_feasibility_assess(p, "bp", assumptions = list(r2_y = NULL)), "bp")$assessment
+  expect_true(w %in% a$warnings)
+  expect_identical(b, a)
+  expect_identical(b$assumptions$r2_y, list(value = NA_real_, justification = NA_character_))
+  g <- sr_feasibility(sr_feasibility_assess(p, "bp", assumptions = list(
+    r2_y = list(value = 0.3, justification = "prior cohort"), icc = NULL)), "bp")$assessment
+  expect_false(w %in% g$warnings)
+  expect_identical(g$assumptions$r2_y$value, 0.3)
 })
