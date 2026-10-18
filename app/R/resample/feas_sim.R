@@ -33,8 +33,8 @@
 #                  censoring at t = 1.5; z ~ N(0,1) unrelated; icc = SR_FEAS_SIM_HR_CL_ICC
 # Ruling: rmst predicts on every 10th replication only. Its prediction is itself a 500-draw simulation
 # (option sr.feas_rmst_sims). Measured on the seed-1 cell (n 400, 1000 reps): one prediction has a
-# relative SD of 3.7% (3.3% of it the 500-draw error), so the mean of 100 predictions has a relative
-# Monte Carlo SE of about 0.37%. Clustered RMST is refused by the route, so it has no cell.
+# relative SD of 3.7% in all, of which the 500-draw error alone is 3.3% (the two add in variance), so
+# the mean of 100 predictions has a relative Monte Carlo SE of about 0.37%. Clustered RMST is refused by the route, so it has no cell.
 #
 # Random numbers: replication r ALWAYS uses the r-th L'Ecuyer-CMRG stream of `seed` (sr_streams). From
 # it the replication draws its dataset, then one integer, the seed of the run preamble its analysis

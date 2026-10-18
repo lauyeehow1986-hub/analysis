@@ -596,13 +596,16 @@ test_that("a stale secondary does not block the lock; a secondary decided stop d
   locked <- sr_sap_lock(p)
   expect_true(isTRUE(locked$state$sap$locked))
 
-  # the same stale secondary, now decided stop before the spec change: the stop blocks the lock
+  # a secondary decided stop, then made stale by a spec change: the stop still blocks the lock
   q <- .ft_project()
   q <- sr_sap_add(q, "s1", "logistic", .ft_spec(terms = list(list(var = "z3"))), "t", label = "secondary")
   q <- sr_feasibility_assess(q, "p1")
   q <- sr_feasibility_decide(q, "p1", "proceed", reason = "ok")
   q <- sr_feasibility_assess(q, "s1")
   q <- sr_feasibility_decide(q, "s1", "stop", reason = "no events")
+  q <- sr_sap_add(q, "s1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z3"))), "t",
+                  label = "secondary")
+  expect_identical(.sr_feas_stale(q, "s1"), "spec")
   expect_identical(.sr_feas_gate(q), "s1: decision is stop (no events)")
   expect_error(sr_sap_lock(q), "s1: decision is stop (no events)", fixed = TRUE)
 })

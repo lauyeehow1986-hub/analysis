@@ -201,9 +201,10 @@ ratio   = pred_se / emp_sd,   pass = |ratio - 1| <= 0.10
   replayed from their streams): one prediction has a relative SD of 3.7% around the mean predicted
   SE (0.0379), so the mean of 100 has a relative Monte Carlo SE of about 0.37%. Of that, the
   500-draw simulation error alone is about 0.33% (relative SD 3.3% per prediction, from 20 engine
-  seeds on each of 5 datasets); the rest is dataset-to-dataset spread. Each prediction runs with its own engine seed, drawn from its replication's stream after the
-  data, so the 100 simulations have independent Monte Carlo error. Clustered RMST is refused by the
-  route, so it has no cell.
+  seeds on each of 5 datasets); the rest is dataset-to-dataset spread (the two add in variance).
+  Each prediction runs with its own engine seed, drawn from its replication's stream after the data,
+  so the 100 simulations have independent Monte Carlo error. Clustered RMST is refused by the route,
+  so it has no cell.
 
 ### Cells
 

@@ -197,7 +197,9 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #'   * kind: "continuous" | "binary" | "surv" | "none" (.sr_feas_kind of the route id).
 #'   * n_rows: rows of df (every row: exclude_rows is ignored).
 #'   * n_cc: complete cases over the model columns present (outcome, time, status, exposure, term
-#'     variables, cluster, strata; not mi$aux), the n the compiled run fits; kind "none": over every
+#'     variables, cluster, strata; not mi$aux): the n the compiled run fits for cox, and for glm/lm
+#'     with se = "cluster"; a cluster or strata column the run does not use still drops rows here
+#'     (conservative); kind "none": over every
 #'     spec column present.
 #'   * n_obs: rows with a non-missing coded outcome (surv: time and event); the raw non-missing count
 #'     when the outcome cannot be coded; NA when a spec column is missing; kind "none": the non-NA
@@ -245,8 +247,9 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   n_rows <- nrow(df)
   want <- tryCatch(sr_spec_cols(spec), error = function(e) names(df))
   # the complete-case filter of the model: only the columns the analysis model uses (outcome, time,
-  # status, exposure, term variables, cluster, strata), as the compiled run filters them, so n_cc is
-  # the n the run fits. mi$aux (and table1's by / vars / nonnormal) never drop a row; kind "none" has
+  # status, exposure, term variables, cluster, strata). For cox, and for glm/lm with se = "cluster",
+  # this is the run's own filter, so n_cc is the n the run fits; a cluster or strata column the run
+  # does not use still drops rows here, which is conservative. mi$aux (and table1's by / vars / nonnormal) never drop a row; kind "none" has
   # no model and keeps every spec column.
   exv <- .sr_spec_chr(spec[["exposure"]])
   tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
@@ -651,7 +654,9 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
       block("the model has ", p, " parameters but only ", n_cc,
             " complete-case rows (it needs more rows than parameters)")
     } else if (fnum(p) && fnum(epv_n) && p > epv_n) {
-      block(p, " model parameters exceed the ", format(round(epv_n, 1)), " expected ",
+      # RMST fits no regression: its p is the number of exposure groups
+      block(if (grepl("^rmst", rid)) paste0("the ", p, " exposure groups") else paste0(p, " model parameters"),
+            " exceed the ", format(round(epv_n, 1)), " expected ",
             if (kind == "binary") "events (or non-events)" else "events", " among the complete cases")
     }
     if (!is.null(ci) && nrow(ci) && any(ci$separated, na.rm = TRUE)) {

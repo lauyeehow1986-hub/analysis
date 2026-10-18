@@ -1115,6 +1115,17 @@ test_that("the rmst events warning speaks of events per exposure group, not per 
   expect_true(any(grepl("^events per parameter \\(7.5\\) is below 10", cx$warnings)))
 })
 
+test_that("the rmst events blocker speaks of exposure groups, not model parameters", {
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 1L)
+  few <- .fe_hand(kind = "surv", type = "factor", params = 3L, events_cc = 2)
+  r <- .sr_feas_compute(few, rs, sr_route_get("rmst"))
+  expect_true("the 3 exposure groups exceed the 2 expected events among the complete cases" %in% r$blockers)
+  expect_false(any(grepl("model parameters", r$blockers)))
+  cx <- .sr_feas_compute(few, .fe_surv_spec(), sr_route_get("cox"))
+  expect_true("3 model parameters exceed the 2 expected events among the complete cases" %in% cx$blockers)
+})
+
 test_that("a clustered analysis whose cluster column has fewer than 2 clusters is blocked (F8)", {
   icc <- list(icc = list(value = 0.05, justification = "a prior audit"))
   sp <- .fe_surv_spec(status_event = 1, cluster = "g", layers = .fe_layers(clustered = TRUE))
@@ -1152,6 +1163,7 @@ test_that("an absent or NULL r2_y uses r2_y = 0 with a warning; a NULL icc is a 
 })
 
 test_that("clustered and multiple imputation together: the design effect and the MI factor both apply (F14)", {
+  # no route runs clustered + MI (.sr_mi_check refuses it): this pins only how the engine combines the two
   sp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE, missing = "mi"))
   cl <- list(G = 40L, m_bar = 10, cv = 0.5)
   as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))

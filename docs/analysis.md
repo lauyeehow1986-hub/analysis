@@ -106,7 +106,9 @@ selection, and power from an observed effect stays refused. The code is in `app/
 The verdict is computed from what the project can already show while blind:
 
 - the analysed n, after the complete-case filter over the columns the analysis model uses (outcome,
-  time, status, exposure, term variables, cluster, strata), the same filter the compiled run applies.
+  time, status, exposure, term variables, cluster, strata). This is the filter the compiled run
+  applies for cox, and for glm/lm when `se = "cluster"`; a cluster or strata column that the run does
+  not use still drops rows here, which is conservative.
   An `mi$aux` column never drops a row. `exclude_rows` is ignored, see below;
 - the outcome's own marginals: the marginal risk (binary), the marginal SD (continuous), and the
   total events and the pooled, exposure-blind (time, event) pairs (survival);
@@ -276,7 +278,9 @@ The overall tier is the worst tier among the rows of the delta's measure. Rows o
 - at least as many model parameters as complete-case rows (continuous outcome: "the model has <p>
   parameters but only <n> complete-case rows (it needs more rows than parameters)"), or more
   parameters than the expected events (survival) or the smaller of the expected events and
-  non-events (binary);
+  non-events (binary): "<p> model parameters exceed the <e> expected events among the complete
+  cases". On rmst, which fits no regression, the count is of exposure groups: "the <p> exposure
+  groups exceed the <e> expected events among the complete cases";
 - a clustered analysis whose cluster column has fewer than two distinct clusters among the complete
   cases: "design: the cluster column '<c>' has fewer than 2 clusters";
 - an exposure that the covariates predict perfectly (a positivity violation);

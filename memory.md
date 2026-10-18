@@ -39,6 +39,13 @@ design; this file holds *what has happened* and *what we learned*.
    - P1c.1 follow-ups F1-F15 done 2026-10-18 (branch `p1c1-followups`). Declined: a locale-independent
      level sort. The engine follows the run's (locale) order of `.h_levels` on purpose, and changing it
      would change the emitted analysis code (a test pins engine levels == run levels).
+   - Open feasibility follow-ups (from the p1c1-followups review):
+     - The glm/lm engine applies the cluster column and the design effect, and now the F8 "fewer than 2
+       clusters" blocker, even when `se != "cluster"`. Measured: deff 2.29 on an analysis the run fits
+       unclustered. Proposed fix, which needs the user's ruling: glm/lm refuse `layers$clustered = TRUE`
+       or a cluster column without `se = "cluster"`, mirroring cox.
+     - No engine version is stored with an assessment, so P1c.1-era assessments stay current after
+       engine changes.
 
 ## Decisions (with the user)
 | Topic | Decision |
@@ -164,7 +171,9 @@ design; this file holds *what has happened* and *what we learned*.
   stale, no-decision and revise checks apply to primaries only. A stop is replaced only with a reason,
   and that is allowed even when the assessment is stale.
 - **Feasibility `n_cc` counts the model columns only** (outcome, time, status, exposure, term
-  variables, cluster, strata), the same complete-case filter as the compiled run. `mi$aux`, `by`,
+  variables, cluster, strata). That is the compiled run's own complete-case filter for cox, and for
+  glm/lm with `se = "cluster"`; a cluster or strata column the run does not use still drops rows in
+  the engine (conservative). `mi$aux`, `by`,
   `vars` and `nonnormal` never drop a row (kind "none" still counts every spec column).
 - **R45 now surfaces before the lock:** an `event_value` that codes no row (for example "yes" on a
   column the store holds as logical) is a "no events" blocker in the feasibility verdict, not a failure
