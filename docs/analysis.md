@@ -105,7 +105,8 @@ selection, and power from an observed effect stays refused. The code is in `app/
 
 The verdict is computed from what the project can already show while blind:
 
-- the analysed n, after the analysis's exclusions and its complete-case filter;
+- the analysed n, after the complete-case filter over every column of the spec (`exclude_rows` is
+  ignored, see below);
 - the outcome's own marginals: the marginal risk (binary), the marginal SD (continuous), and the
   total events and the pooled, exposure-blind (time, event) pairs (survival);
 - the exposure's marginals and the exposure-on-covariate structure: its levels and counts, the R² of
@@ -119,8 +120,23 @@ It never computes an outcome-by-exposure or outcome-by-covariate statistic. The 
 taken over all rows with an observed outcome, not only the complete cases. Counting the events among
 the complete cases would cross the outcome with the missingness of the other columns, which is an
 outcome-by-covariate statistic. The expected events among the complete cases are therefore scaled
-(total events x n of complete cases / n with an observed outcome), never counted. A test permutes the
-outcome among its non-missing rows and checks that the stored assessment does not change.
+(total events x n of complete cases / n with an observed outcome), never counted.
+
+Two parts of a spec would let the outcome reach the exposure model, so the engine handles them apart:
+
+- **`exclude_rows` is ignored.** Its positions refer to the extract, which is sorted by every spec
+  column with the outcome first, so the rows it drops depend on the outcome values. The verdict is
+  computed on every row, and a non-empty `exclude_rows` gives the warning "exclude_rows is ignored by
+  the feasibility verdict (it is an influence sensitivity for the locked run)". It stays part of the
+  spec, so changing it still makes the assessment stale.
+- **An outcome column used as a covariate is blocked.** When the outcome (or, for a survival outcome,
+  the time or status column) is also a term, an interaction variable, a stratum or the cluster, it is
+  left out of the exposure model and the verdict is `cannot_run` with the blocker "design: the outcome
+  column '<c>' cannot be a term, stratum or cluster".
+
+A test permutes the outcome among its non-missing rows and checks that the stored assessment does not
+change, byte for byte. It runs with and without `exclude_rows`, and with the outcome used as a term,
+an interaction variable, a stratum and the cluster.
 
 Two quantities need an outcome-by-covariate statistic: the outcome R² explained by the covariates
 (continuous outcome) and the intra-cluster correlation (ICC). They are never estimated from the data.
@@ -199,7 +215,7 @@ Every number comes from the formula applied to the inputs above; nothing is fitt
 | RR | `sqrt((1 - pi) / (pi * v))` | log |
 | OR | `1 / sqrt(v * pi * (1 - pi))` | log |
 | HR | Schoenfeld: `1 / sqrt(D * Var(x) * (1 - R2x))`, where `D` is the expected events among the complete cases (for a contrast, `Var(x)` is `p_k (1 - p_k)` and `D` is scaled to the two groups) | log |
-| RMST_diff | simulation: draw both groups with replacement from the pooled (time, event) pairs at the observed group sizes, take each group's RMST up to `tau`, and take the SD of the difference over 500 draws (`sr.feas_rmst_sims`, environment `SR_FEAS_RMST_SIMS`). A draw that has no RMST is dropped. | identity |
+| RMST_diff | simulation: draw both groups with replacement from the pooled (time, event) pairs at the observed group sizes, take each group's RMST up to `tau`, and take the SD of the difference over 500 draws (`sr.feas_rmst_sims`, environment `SR_FEAS_RMST_SIMS`). A draw that has no RMST is dropped. The number of draws and the seed used are stored with the assessment (`inputs$rmst = list(sims, seed)`). | identity |
 
 - **Clustering.** A clustered analysis multiplies the variance by the design effect
   `1 + ((cv^2 + 1) * m - 1) * ICC` (Eldridge 2006), where `m` is the mean cluster size and `cv` the
@@ -231,7 +247,8 @@ With a `delta`, the rows of the delta's measure are tiered. With `d = |log(delta
 | `cannot_run` | at least one blocker | revise or stop |
 
 The overall tier is the worst tier among the rows of the delta's measure. Rows of the other measures
-(for example RR and OR when the delta is on RD) are `precision_only`.
+(for example RR and OR when the delta is on RD) are `precision_only`. A Table 1 or unknown route is
+`not_applicable`, but a primary one still needs a decision (`proceed`) before the lock.
 
 **Blockers** make the tier `cannot_run` whatever the delta is:
 
@@ -246,8 +263,10 @@ The overall tier is the worst tier among the rows of the delta's measure. Rows o
   (survival) or the smaller of the expected events and non-events (binary);
 - an exposure that the covariates predict perfectly (a positivity violation);
 - an rmst `tau` beyond the longest follow-up;
-- an outcome that cannot be coded or a design that cannot be built (for example `exclude_rows` beyond
-  the data), given as "outcome: ..." or "design: ...";
+- an outcome column (outcome, time or status) used as a term, an interaction variable, a stratum or
+  the cluster: "design: the outcome column '<c>' cannot be a term, stratum or cluster";
+- an outcome that cannot be coded or a design that cannot be built (for example a spec column missing
+  from the data), given as "outcome: ..." or "design: ...";
 - a precision that could not be computed.
 
 **Warnings** are shown and never pass or fail:
@@ -255,7 +274,9 @@ The overall tier is the worst tier among the rows of the delta's measure. Rows o
 - near-positivity: more than 5% of the rows have a propensity outside [0.01, 0.99];
 - fewer than 10 events per model parameter (sparse-data bias); for a logistic analysis the warning
   offers a pre-specified Firth penalty;
-- fewer than 30 clusters, where cluster-robust SEs are unreliable.
+- fewer than 30 clusters, where cluster-robust SEs are unreliable;
+- a non-empty `exclude_rows`, which the verdict ignores (it is an influence sensitivity for the locked
+  run).
 
 ### Decide
 
@@ -326,8 +347,9 @@ and the verdict is never recomputed: `sr_feasibility()` and the report show it a
   continuous exposure.
 - `sr_feasibility_fragment(project, analysis_id)` returns the inputs of the Methods sentence, as named
   values and a template id, not prose: `n`, `events`, `prevalence` (a named list of each level's
-  share of the complete cases), `h`, `mde`, `delta`, `delta_source` and `tier`. The prose is written in
-  P1d.
+  share of the complete cases), `h`, `mde`, `delta`, `delta_source` and `tier`. `h` and `mde` are those
+  of the least precise contrast (the largest MDE) of the delta's measure, or of the first measure when
+  there is no delta. The prose is written in P1d.
 
 ## 5. The run engine (`app/R/routes/run.R`)
 

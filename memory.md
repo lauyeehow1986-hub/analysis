@@ -33,9 +33,21 @@ design; this file holds *what has happened* and *what we learned*.
      chunk-level checkpoint/cancel and parallel workers for the bootstrap and MI (ExtendedTask).
    - Open P1c limitations to carry: interactions accept only linear and factor terms (no interaction
      with a quadratic or spline term); the censoring check ignores strata and uses Efron ties; a
-     logical (Yes/No) outcome given a text `event_value` such as "Yes" is not caught at add time and fails
-     at run with "no events" (refuse it at `sr_sap_add` in P1d); `sr_analysis_add` has no event-value
-     check (the run refuses instead).
+     logical (Yes/No) outcome given a text `event_value` such as "Yes" is still accepted by `sr_sap_add`,
+     but since P1c.1 it surfaces as a "no events" blocker in the feasibility verdict before the lock
+     (see the R45 gotcha below); `sr_analysis_add` has no event-value check (the run refuses instead).
+   - P1c.1 follow-ups:
+     - refuse a spec that uses an outcome column as a term, stratum or cluster at the route level (the
+       feasibility verdict blocks it today);
+     - a test that the data-over-spec stale precedence holds;
+     - pin the legacy (pre-P1c.1) SAP hash as a literal in a test;
+     - a locale-independent level sort, together with `.h_levels`;
+     - `n_cc` under MI should count the aux / by / vars / nonnormal columns;
+     - the EPV warning wording on rmst routes;
+     - a generic blocker for an unusable cluster column;
+     - `r2_y = NULL` is accepted silently;
+     - measure the "well under 1%" claim;
+     - minor T6 wording.
 
 ## Decisions (with the user)
 | Topic | Decision |
