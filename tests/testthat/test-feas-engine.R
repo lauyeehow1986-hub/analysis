@@ -38,6 +38,13 @@
   df
 }
 
+# The rows sorted by every column (radix), as .sr_extract_frame() orders them; row names reset.
+.fe_sort <- function(df) {
+  out <- df[do.call(order, c(unname(as.list(df)), list(method = "radix"))), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
 .fe_shuffle <- function(df, seed = 3L) {
   out <- df[withr::with_seed(seed, sample(nrow(df))), , drop = FALSE]
   rownames(out) <- NULL
@@ -117,18 +124,68 @@ test_that("inputs of a logistic analysis: n, marginals, r2x, params", {
   expect_identical(inp$blockers, character())
 })
 
-test_that("inputs are byte-identical when the outcome is permuted or the rows are shuffled", {
-  spec <- .fe_spec(terms = list(list(var = "z1", type = "rcs", knots = 4), list(var = "z2"),
-                                list(var = "site", type = "factor")))
-  df <- .fe_df(.fe_frame(), spec)
+test_that("inputs are byte-identical when the outcome is permuted or the rows are shuffled, with or without exclude_rows", {
+  terms <- list(list(var = "z1", type = "rcs", knots = 4), list(var = "z2"), list(var = "site", type = "factor"))
+  plain <- .fe_spec(terms = terms)
+  # the extract order: rows sorted by every column, the outcome first (exclude_rows positions refer to it)
+  df <- .fe_sort(.fe_df(.fe_frame(), plain))
   route <- sr_route_get("logistic")
-  ref <- sr_canonical_json(.sr_feas_inputs(df, spec, route))
+  ref <- sr_canonical_json(.sr_feas_inputs(df, plain, route))
   perm <- .fe_permute(df, "y")
   expect_false(identical(perm$y, df$y))
   expect_identical(is.na(perm$y), is.na(df$y))
-  expect_identical(sr_canonical_json(.sr_feas_inputs(perm, spec, route)), ref)
-  expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_shuffle(df), spec, route)), ref)
-  expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_shuffle(perm), spec, route)), ref)
+  # exclude_rows = the first 200 extract rows would select rows by outcome value if it were applied (R16)
+  for (spec in list(plain, .fe_spec(terms = terms, exclude_rows = seq_len(200L)))) {
+    info <- if (is.null(spec$exclude_rows)) "plain" else "exclude_rows"
+    expect_identical(sr_canonical_json(.sr_feas_inputs(df, spec, route)), ref, info = info)
+    expect_identical(sr_canonical_json(.sr_feas_inputs(perm, spec, route)), ref, info = info)
+    expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_sort(perm), spec, route)), ref, info = info)
+    expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_shuffle(df), spec, route)), ref, info = info)
+    expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_shuffle(perm), spec, route)), ref, info = info)
+    v <- sr_canonical_json(.sr_feas_compute(.sr_feas_inputs(df, spec, route), spec, route))
+    expect_identical(sr_canonical_json(.sr_feas_compute(.sr_feas_inputs(.fe_sort(perm), spec, route), spec, route)),
+                     v, info = info)
+  }
+})
+
+test_that("an outcome column as a term, interaction variable, stratum or cluster is blocked and kept out (R17)", {
+  df0 <- .fe_frame()
+  route <- sr_route_get("logistic")
+  msg <- "design: the outcome column 'y' cannot be a term, stratum or cluster"
+  base <- .fe_spec()$terms
+  cases <- list(
+    term = .fe_spec(terms = c(base, list(list(var = "y", type = "factor")))),
+    interaction = .fe_spec(interactions = list(c("x", "y"))),
+    strata = .fe_spec(strata = "y"),
+    cluster = .fe_spec(cluster = "y", layers = .fe_layers(clustered = TRUE)))
+  for (nm in names(cases)) {
+    sp <- cases[[nm]]
+    df <- .fe_sort(.fe_df(df0, sp))
+    inp <- .sr_feas_inputs(df, sp, route)
+    expect_true(msg %in% inp$blockers, info = paste(nm, paste(inp$blockers, collapse = " | ")))
+    expect_true(all(is.na(inp$contrasts_in$r2x)), info = nm)
+    expect_true(is.na(inp$params), info = nm)
+    expect_identical(inp$exposure$levels$level, c("0", "1"), info = nm)
+    perm <- .fe_permute(df, "y")
+    for (d in list(perm, .fe_sort(perm), .fe_shuffle(perm))) {
+      expect_identical(sr_canonical_json(.sr_feas_inputs(d, sp, route)), sr_canonical_json(inp), info = nm)
+    }
+    a <- if (nm == "cluster") list(icc = list(value = 0.05, justification = "pilot")) else list()
+    v <- .sr_feas_compute(inp, sp, route, assumptions = a)
+    expect_identical(v$tier, "cannot_run", info = nm)
+    expect_true(msg %in% v$blockers, info = nm)
+    if (nm == "cluster") expect_true(is.na(inp$clusters$G))
+  }
+  # survival: the time and status columns are outcome columns too
+  sp <- .fe_surv_spec(strata = "status")
+  sp$terms <- list(list(var = "z1"), list(var = "time"))       # set directly: modifyList merges term lists
+  df <- .fe_df(.fe_surv_frame(), sp)
+  inp <- .sr_feas_inputs(df, sp, sr_route_get("cox"))
+  expect_true(all(c("design: the outcome column 'time' cannot be a term, stratum or cluster",
+                    "design: the outcome column 'status' cannot be a term, stratum or cluster") %in% inp$blockers))
+  perm <- .fe_permute(df, c("time", "status"))
+  expect_identical(sr_canonical_json(.sr_feas_inputs(.fe_shuffle(perm), sp, sr_route_get("cox"))), sr_canonical_json(inp))
+  expect_identical(.sr_feas_compute(inp, sp, sr_route_get("cox"))$tier, "cannot_run")
 })
 
 test_that("a factor term adds its levels - 1 and an RCS(4) term adds 3 to params", {
@@ -396,16 +453,17 @@ test_that("rmst: the exposure as groups and params = the number of levels", {
   expect_identical(inp$blockers, character())
 })
 
-test_that("exclude_rows drops rows by position before anything else", {
+test_that("exclude_rows is ignored by the inputs (R16): no row is dropped and no blocker is raised", {
   spec <- .fe_spec()
   df <- .fe_df(.fe_frame(), spec)
-  sp <- .fe_spec(exclude_rows = c(1, 5, 9))
-  inp <- .sr_feas_inputs(df, sp, sr_route_get("logistic"))
-  expect_identical(sr_canonical_json(inp), sr_canonical_json(.sr_feas_inputs(df[-c(1, 5, 9), ], spec, sr_route_get("logistic"))))
-  expect_identical(inp$n_rows, 497L)
-  sp$exclude_rows <- 900
-  expect_no_error(inp <- .sr_feas_inputs(df, sp, sr_route_get("logistic")))
-  expect_true(any(grepl("^design: exclude_rows names row 900", inp$blockers)))
+  route <- sr_route_get("logistic")
+  ref <- sr_canonical_json(.sr_feas_inputs(df, spec, route))
+  for (ex in list(c(1, 5, 9), seq_len(200L), 900)) {
+    inp <- .sr_feas_inputs(df, .fe_spec(exclude_rows = ex), route)
+    expect_identical(sr_canonical_json(inp), ref)
+    expect_identical(inp$n_rows, 500L)
+    expect_identical(inp$blockers, character())
+  }
 })
 
 test_that("kind none (table1, unknown routes) gives only the counts and never errors", {
@@ -815,7 +873,24 @@ test_that("each blocker fires on a planted frame: tier cannot_run, advice revise
   spc <- .fe_spec()
   spc$event_value <- NULL
   expect_blocked(.fe_verdict(.fe_frame(), spc, "logistic"), "^outcome: ")
-  expect_blocked(.fe_verdict(.fe_frame(), .fe_spec(exclude_rows = 900), "logistic"), "^design: exclude_rows")
+  # exclude_rows beyond the data is not a blocker: the verdict ignores exclude_rows (R16)
+  expect_false(any(grepl("exclude_rows", .fe_verdict(.fe_frame(), .fe_spec(exclude_rows = 900), "logistic")$blockers)))
+})
+
+test_that("exclude_rows gives the R16 warning and the same contrasts, blockers and tier as without it", {
+  df <- .fe_frame()
+  w <- "exclude_rows is ignored by the feasibility verdict (it is an influence sensitivity for the locked run)"
+  a <- .fe_verdict(df, .fe_spec(), "logistic", delta = list(value = 1.5, measure = "OR", source = "MCID"))
+  expect_false(w %in% a$warnings)
+  for (ex in list(c(2, 4, 6), 900)) {
+    b <- .fe_verdict(df, .fe_spec(exclude_rows = ex), "logistic", delta = list(value = 1.5, measure = "OR", source = "MCID"))
+    expect_identical(b$contrasts, a$contrasts)
+    expect_identical(b$blockers, a$blockers)
+    expect_identical(b$tier, a$tier)
+    expect_identical(b$advice, a$advice)
+    expect_identical(setdiff(b$warnings, a$warnings), w)
+    expect_identical(intersect(b$warnings, a$warnings), a$warnings)
+  }
 })
 
 test_that("warnings: near-positivity, events per parameter (Firth advice), few clusters", {

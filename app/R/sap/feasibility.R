@@ -4,6 +4,7 @@
 #   state$feasibility[[analysis_id]] = list(assessment, decision)
 #   assessment = list(analysis, data_hash, spec_hash, delta, assumptions, inputs, contrasts, blockers,
 #                     warnings, tier, advice)   (inputs without the outcome pairs; contrasts a data.frame)
+#   inputs of an rmst route also carry rmst = list(sims, seed): the simulation settings used (R18)
 #   decision   = list(decision, reason)         (NULL until sr_feasibility_decide)
 # feasibility.assessed replaces the assessment and clears the decision; feasibility.decided sets it.
 #
@@ -79,28 +80,31 @@ SR_FEAS_DECISIONS <- c("proceed", "exploratory", "revise", "stop")
   inp <- p$inputs
   ex <- inp$exposure
   assm <- function(nm) .sr_feas_fields(p$assumptions[[nm]], c(value = "num", justification = "chr"))
+  inputs <- list(
+    kind = .sr_feas_one(inp$kind, "chr"), n_rows = .sr_feas_one(inp$n_rows, "int"),
+    n_cc = .sr_feas_one(inp$n_cc, "int"), n_obs = .sr_feas_one(inp$n_obs, "int"),
+    outcome = if (is.null(inp$outcome)) NULL else {
+      .sr_feas_fields(inp$outcome, c(sd = "num", risk = "num", events_total = "num", events_cc = "num",
+                                     followup_total = "num", max_time = "num"))
+    },
+    exposure = if (is.null(ex)) NULL else {
+      list(var = .sr_feas_one(ex$var, "chr"), type = .sr_feas_one(ex$type, "chr"),
+           ref = .sr_feas_one(ex$ref, "chr"), levels = .sr_feas_frame(ex$levels, .sr_feas_levels_types),
+           variance = .sr_feas_one(ex$variance, "num"))
+    },
+    contrasts_in = .sr_feas_frame(inp$contrasts_in, .sr_feas_cin_types),
+    clusters = if (is.null(inp$clusters)) NULL else {
+      .sr_feas_fields(inp$clusters, c(G = "int", m_bar = "num", cv = "num"))
+    },
+    params = .sr_feas_one(inp$params, "int"), blockers = .sr_sap_chrv(inp$blockers))
+  # rmst routes only: the simulation settings (R18); absent otherwise, so other records keep their shape
+  if (!is.null(inp$rmst)) inputs$rmst <- .sr_feas_fields(inp$rmst, c(sims = "int", seed = "int"))
   list(
     analysis = .sr_sap_chr1(p$analysis), data_hash = .sr_sap_chr1(p$data_hash),
     spec_hash = .sr_sap_chr1(p$spec_hash),
     delta = .sr_feas_fields(p$delta, c(value = "num", measure = "chr", source = "chr")),
     assumptions = list(r2_y = assm("r2_y"), icc = assm("icc")),
-    inputs = list(
-      kind = .sr_feas_one(inp$kind, "chr"), n_rows = .sr_feas_one(inp$n_rows, "int"),
-      n_cc = .sr_feas_one(inp$n_cc, "int"), n_obs = .sr_feas_one(inp$n_obs, "int"),
-      outcome = if (is.null(inp$outcome)) NULL else {
-        .sr_feas_fields(inp$outcome, c(sd = "num", risk = "num", events_total = "num", events_cc = "num",
-                                       followup_total = "num", max_time = "num"))
-      },
-      exposure = if (is.null(ex)) NULL else {
-        list(var = .sr_feas_one(ex$var, "chr"), type = .sr_feas_one(ex$type, "chr"),
-             ref = .sr_feas_one(ex$ref, "chr"), levels = .sr_feas_frame(ex$levels, .sr_feas_levels_types),
-             variance = .sr_feas_one(ex$variance, "num"))
-      },
-      contrasts_in = .sr_feas_frame(inp$contrasts_in, .sr_feas_cin_types),
-      clusters = if (is.null(inp$clusters)) NULL else {
-        .sr_feas_fields(inp$clusters, c(G = "int", m_bar = "num", cv = "num"))
-      },
-      params = .sr_feas_one(inp$params, "int"), blockers = .sr_sap_chrv(inp$blockers)),
+    inputs = inputs,
     contrasts = .sr_feas_frame(p$contrasts, .sr_feas_contrast_types),
     blockers = .sr_sap_chrv(p$blockers), warnings = .sr_sap_chrv(p$warnings),
     tier = .sr_sap_chr1(p$tier), advice = .sr_sap_chrv(p$advice))
@@ -194,6 +198,7 @@ sr_feasibility_assess <- function(project, analysis_id, delta = NULL, assumption
   df <- if (length(cols)) .sr_extract_frame(project, a$table, cols) else data.frame()
   inputs <- .sr_feas_inputs(df, spec, route)
   verdict <- .sr_feas_compute(inputs, spec, route, delta = delta, assumptions = assumptions)
+  if (grepl("^rmst", route$id)) inputs$rmst <- .sr_feas_sim_settings(spec, route)   # R18
   .sr_feas_blind_frame(inputs, spec)
   .sr_feas_blind_frame(verdict, spec)
   if (!is.null(inputs$outcome)) inputs$outcome$pairs <- NULL

@@ -4,7 +4,7 @@
 #
 # Inputs (.sr_feas_inputs). From the frame .sr_extract_frame() returns for sr_spec_cols(spec), the
 # engine takes only what catalogue A already shows while blind:
-#   * the analysed n (rows after exclude_rows, complete cases over every spec column);
+#   * the analysed n (complete cases over every spec column; spec$exclude_rows is ignored, R16);
 #   * the outcome's OWN marginals (risk, SD, total events and follow-up, the (time, event) pairs of
 #     the pooled exposure-blind Kaplan-Meier curve), over EVERY row with a non-missing outcome, coded
 #     by the route's own rule. Expected events among the complete cases are events_total * n_cc /
@@ -12,7 +12,14 @@
 #   * exposure marginals and the exposure-on-covariate structure (R2 of the exposure model, the
 #     propensity overlap, separation) on the complete-case covariate frame;
 #   * cluster sizes; the parameter count of the compiled design.
-# It never computes an outcome-by-exposure or outcome-by-covariate statistic.
+# It never computes an outcome-by-exposure or outcome-by-covariate statistic. Two spec fields would
+# otherwise carry the outcome into the covariate side, and are handled up front:
+#   * spec$exclude_rows is never applied (R16). Its positions refer to the extract, which is sorted
+#     by the outcome first, so dropping them would select rows by outcome value. The verdict warns
+#     that it is ignored (it is an influence sensitivity for the locked run).
+#   * an outcome column (outcome, time, status) named as a term, an interaction variable, a stratum
+#     or the cluster is the blocker "design: the outcome column '<c>' cannot be a term, stratum or
+#     cluster" (R17); it is left out of the covariate frame and no design is built.
 #
 # Byte-identical under outcome permutation: the outcome values are sorted (survival: the pairs) before
 # any sum, and the complete-case covariate frame (exposure, term variables, cluster, strata) is sorted
@@ -57,6 +64,11 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   }
   rownames(d) <- NULL
   d
+}
+
+# The outcome columns a spec names: outcome, time, status (character(0) when none).
+.sr_feas_outcome_cols <- function(spec) {
+  c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
 }
 
 # The levels of x the way .h_levels orders them (sorted in the original type, as text, `ref` first
@@ -178,14 +190,13 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 # ---- the inputs ------------------------------------------------------------------------------------
 
 #' The outcome-blind inputs of the feasibility verdict of one analysis. Pure.
-#' @param df the frame .sr_extract_frame() returns for sr_spec_cols(spec). Every result except the
-#'   effect of spec$exclude_rows is independent of its row order; exclude_rows positions refer to
-#'   the .sr_extract_frame() order (rows sorted by every column), the order the run's extract has.
+#' @param df the frame .sr_extract_frame() returns for sr_spec_cols(spec). Every result is
+#'   independent of its row order; spec$exclude_rows is ignored (R16), so no row is dropped.
 #' @param spec the analysis spec
 #' @param route the route (an sr_route) or its id
 #' @return a list:
 #'   * kind: "continuous" | "binary" | "surv" | "none" (.sr_feas_kind of the route id).
-#'   * n_rows: rows after exclude_rows.
+#'   * n_rows: rows of df (every row: exclude_rows is ignored).
 #'   * n_cc: complete cases over every spec column present (sr_spec_cols, incl. mi$aux).
 #'   * n_obs: rows with a non-missing coded outcome (surv: time and event); the raw non-missing count
 #'     when the outcome cannot be coded; NA when a spec column is missing; kind "none": the non-NA
@@ -199,8 +210,8 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #'     variance). type: "factor" (exposure_ref set, or an rmst route), else "binary" (numeric or
 #'     logical with values in {0, 1}), else "linear". ref: exposure_ref, else the first level (NA for
 #'     linear). levels: data.frame(level, n_all, n_cc) -- factor: the sorted observed levels with
-#'     ref first; binary: "0","1" (logical: "FALSE","TRUE"); linear: zero rows. n_all counts the
-#'     frame after exclude_rows, n_cc the complete cases. variance: the population variance over the
+#'     ref first; binary: "0","1" (logical: "FALSE","TRUE"); linear: zero rows. n_all counts every
+#'     row of df, n_cc the complete cases. variance: the population variance over the
 #'     complete cases (binary, linear), NA for factor.
 #'   * contrasts_in: data.frame(level, n_k, n_ref, r2x, ps_outside, separated), one row per
 #'     non-reference level (binary, factor) or one row with level NA, n_k = n_cc, n_ref NA (linear);
@@ -208,13 +219,16 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #'     level or ref) on the covariate design, 0 with no covariates, NA when constant. ps_outside: the
 #'     share of fitted propensities outside SR_FEAS_PS_RANGE (NA for linear). separated: the glm did
 #'     not converge or a propensity is within SR_FEAS_SEP_EPS of 0 or 1 (linear: r2x >=
-#'     SR_FEAS_R2X_MAX). n_k or n_ref 0, or a design failure, gives NA r2x, ps_outside, separated.
+#'     SR_FEAS_R2X_MAX). n_k or n_ref 0, a design failure, or an outcome column used as a covariate
+#'     gives NA r2x, ps_outside, separated.
 #'   * clusters: NULL unless spec$layers$clustered, else list(G, m_bar = n_cc / G, cv = the
-#'     population SD of the cluster sizes / m_bar); all NA when the cluster column is unavailable.
+#'     population SD of the cluster sizes / m_bar); all NA when the cluster column is unavailable
+#'     (also when it is an outcome column).
 #'   * params: the column count of the full design (spec minus the outcome fields), minus 1 for surv
-#'     (no intercept); rmst: the number of exposure levels; NA when the design fails.
-#'   * blockers: unique character; "outcome: ..." or "design: ..." (exclude_rows beyond the data,
-#'     missing columns, an unobserved reference level, a term-code or exposure-model error).
+#'     (no intercept); rmst: the number of exposure levels; NA when the design fails or is not built.
+#'   * blockers: unique character; "outcome: ..." or "design: ..." (missing columns, an outcome column
+#'     used as a term, interaction variable, stratum or cluster, an unobserved reference level, a
+#'     term-code or exposure-model error).
 #'   For kind "none" only n_rows, n_cc and n_obs are computed (outcome, exposure, contrasts_in and
 #'   clusters NULL, params NA).
 .sr_feas_inputs <- function(df, spec, route) {
@@ -223,16 +237,8 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
   blockers <- character()
   block <- function(...) blockers <<- c(blockers, paste0(...))
 
-  # 1. exclude_rows, by position in the frame as handed over
-  ex <- .sr_exclude_rows(spec)
-  ex <- ex[!is.na(ex)]
-  if (length(ex)) {
-    if (max(ex) > nrow(df)) {
-      block("design: exclude_rows names row ", max(ex), " but the data have ", nrow(df), " rows")
-    }
-    keep <- unique(ex[ex >= 1L & ex <= nrow(df)])
-    if (length(keep)) df <- df[-keep, , drop = FALSE]
-  }
+  # 1. every row: spec$exclude_rows is never applied (R16). Its positions refer to the extract, which
+  # is sorted by the outcome first, so dropping them would select rows by outcome value.
   rownames(df) <- NULL
   n_rows <- nrow(df)
   want <- tryCatch(sr_spec_cols(spec), error = function(e) names(df))
@@ -268,16 +274,23 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
     if (kind != "continuous" && n_obs > 0L) outcome$events_cc <- outcome$events_total * n_cc / n_obs
   }
 
-  # 5. the complete-case covariate frame, sorted by all its columns
+  # 5. the complete-case covariate frame, sorted by all its columns. An outcome column named as a term,
+  # an interaction variable, a stratum or the cluster is a blocker and is left out (R17): the frame
+  # never holds an outcome column, and no design is built on such a spec.
   exv <- .sr_spec_chr(spec[["exposure"]])
   tv <- tryCatch(.sr_spec_chr(lapply(spec[["terms"]], function(t) t[["var"]])), error = function(e) character())
-  cov_cols <- intersect(unique(c(exv, tv, .sr_spec_chr(spec[["cluster"]]), .sr_spec_chr(spec[["strata"]]))),
-                        names(df))
+  iv <- tryCatch(.sr_spec_chr(unlist(spec[["interactions"]])), error = function(e) character())
+  oc <- .sr_feas_outcome_cols(spec)
+  oc_cov <- intersect(oc, c(tv, iv, .sr_spec_chr(spec[["strata"]]), .sr_spec_chr(spec[["cluster"]])))
+  for (o in oc_cov) block("design: the outcome column '", o, "' cannot be a term, stratum or cluster")
+  cov_cols <- setdiff(intersect(unique(c(exv, tv, .sr_spec_chr(spec[["cluster"]]), .sr_spec_chr(spec[["strata"]]))),
+                                names(df)), oc)
   cf <- .sr_feas_sort(df[cc, cov_cols, drop = FALSE])
   rmst <- grepl("^rmst", rid)
 
   # 6. the compiled designs: covariates only (the exposure model), and the full spec minus the outcome
   design <- function(s) {
+    if (length(oc_cov)) return(NULL)
     tryCatch(.sr_feas_design(s, cf), error = function(e) {
       block("design: ", conditionMessage(e))
       NULL
@@ -378,7 +391,7 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 #' values are still walked. Returns x invisibly; stops naming the offending element.
 .sr_feas_blind_frame <- function(x, spec) {
   if (missing(spec) || !is.list(spec)) stop("spec must be the analysis spec (a list)", call. = FALSE)
-  oc <- c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
+  oc <- .sr_feas_outcome_cols(spec)
   chk <- x
   if (is.list(chk) && !is.data.frame(chk)) {
     for (p in .sr_feas_struct_paths) {
@@ -544,6 +557,13 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
   if (!whole(s)) 1L else s
 }
 
+# The RMST simulation settings the verdict uses: list(sims = .sr_feas_rmst_sims(), seed =
+# .sr_feas_seed(spec, route)), both integer. The assessment of an rmst route records them (R18), so the
+# stored record says why two machines with different settings store different RMST SEs.
+.sr_feas_sim_settings <- function(spec, route) {
+  list(sims = as.integer(.sr_feas_rmst_sims()), seed = as.integer(.sr_feas_seed(spec, route)))
+}
+
 # The tiers a delta can give, best first (the overall tier is the worst row).
 .sr_feas_delta_tiers <- c("adequate", "limited", "inadequate")
 
@@ -641,10 +661,14 @@ SR_FEAS_RATIO_MEASURES <- c("OR", "RR", "HR")
            "): cluster-robust standard errors are unreliable")
     }
   }
+  if (length(.sr_exclude_rows(spec))) {
+    warn("exclude_rows is ignored by the feasibility verdict (it is an influence sensitivity for the locked run)")
+  }
 
   # the rows: one per contrast x measure
-  seed <- .sr_feas_seed(spec, route)
-  sims <- .sr_feas_rmst_sims()
+  sim <- .sr_feas_sim_settings(spec, route)
+  seed <- sim$seed
+  sims <- sim$sims
   f_mi <- if (mi && fnum(inputs$n_obs) && n_cc > 0L) inputs$n_obs / n_cc else NA_real_
   deff_for <- function(f) {
     if (!clustered) return(1)

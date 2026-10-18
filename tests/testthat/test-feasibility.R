@@ -99,6 +99,38 @@ test_that("the verdict is outcome-blind end to end: permuting y among its non-mi
   expect_identical(sr_canonical_json(b), sr_canonical_json(a))
 })
 
+test_that("exclude_rows is ignored end to end (R16): outcome-blind, same verdict, one warning", {
+  # the extract is sorted by the outcome first: rows 1..229 are (about) the non-events, so applying
+  # exclude_rows would store the exposure distribution among the events
+  sp <- .ft_spec(exclude_rows = seq_len(229L))
+  assess <- function(df, spec) sr_feasibility_assess(.ft_project(df, spec = spec), "p1")$state$feasibility$p1$assessment
+  a <- assess(.ft_frame(), sp)
+  b <- assess(.ft_frame(permute_y = TRUE), sp)
+  c0 <- assess(.ft_frame(), .ft_spec())
+  a$data_hash <- b$data_hash <- NULL
+  expect_identical(sr_canonical_json(b), sr_canonical_json(a))
+  expect_identical(a$inputs, c0$inputs)
+  expect_identical(a$contrasts, c0$contrasts)
+  expect_identical(a$tier, c0$tier)
+  expect_identical(a$inputs$n_rows, 500L)
+  expect_identical(setdiff(a$warnings, c0$warnings),
+                   "exclude_rows is ignored by the feasibility verdict (it is an influence sensitivity for the locked run)")
+  expect_false(identical(a$spec_hash, c0$spec_hash))               # exclude_rows stays in the spec hash
+})
+
+test_that("an outcome column used as a term is blocked end to end and the record stays outcome-blind (R17)", {
+  sp <- .ft_spec(terms = list(list(var = "z1", type = "linear"), list(var = "y", type = "factor")))
+  p <- sr_feasibility_assess(.ft_project(.ft_frame(), spec = sp), "p1")
+  a <- p$state$feasibility$p1$assessment
+  b <- sr_feasibility_assess(.ft_project(.ft_frame(permute_y = TRUE), spec = sp), "p1")$state$feasibility$p1$assessment
+  expect_identical(a$tier, "cannot_run")
+  expect_true("design: the outcome column 'y' cannot be a term, stratum or cluster" %in% a$blockers)
+  expect_true(all(is.na(a$inputs$contrasts_in$r2x)))
+  a$data_hash <- b$data_hash <- NULL
+  expect_identical(sr_canonical_json(b), sr_canonical_json(a))
+  expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "x"), "cannot run")
+})
+
 test_that("decide: reasons are required, a cannot_run verdict cannot proceed, re-assessing clears the decision", {
   p <- .ft_project()
   expect_error(sr_feasibility_decide(p, "p1", "proceed"), "no feasibility assessment")
@@ -134,12 +166,16 @@ test_that("decide: reasons are required, a cannot_run verdict cannot proceed, re
 })
 
 test_that("a cannot_run verdict can only be revised or stopped", {
-  p <- .ft_project(spec = .ft_spec(exclude_rows = 9999L))
+  # exposure level 1 has no complete case: z2 is missing wherever x = 1
+  df <- .ft_frame()
+  df$z2[df$x == 1L] <- NA
+  p <- .ft_project(df)
   p <- sr_feasibility_assess(p, "p1")
   expect_identical(sr_feasibility(p, "p1")$assessment$tier, "cannot_run")
+  expect_true("exposure level '1' has no complete-case row" %in% sr_feasibility(p, "p1")$assessment$blockers)
   expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "x"), "cannot run.*decide revise or stop")
   expect_error(sr_feasibility_decide(p, "p1", "exploratory", reason = "x"), "cannot run")
-  p <- sr_feasibility_decide(p, "p1", "revise", reason = "drop the bad row list")
+  p <- sr_feasibility_decide(p, "p1", "revise", reason = "collect z2 in the exposed")
   expect_identical(sr_feasibility(p, "p1")$decision$decision, "revise")
   sr_project_close(p)
   p2 <- sr_project_open(p$paths$dir)
@@ -380,11 +416,16 @@ test_that("survival, rmst and continuous analyses replay identically and stay ou
   expect_equal(sr_feasibility_fragment(p, "cx")$values$prevalence[["1"]], mean(df$x == 1))
   expect_equal(rep$prevalence[rep$analysis == "bp"], mean(df$x == 1))
   expect_silent(.sr_assert_blind(rep, c("time", "status", "bp"), "z1"))
+  # the RMST simulation count and seed are recorded with the rmst assessment only (R18)
+  expect_identical(sr_feasibility(p, "rm")$assessment$inputs$rmst, list(sims = 20L, seed = 1L))
+  expect_null(sr_feasibility(p, "cx")$assessment$inputs$rmst)
+  expect_null(sr_feasibility(p, "bp")$assessment$inputs$rmst)
   p <- sr_feasibility_decide(p, "cx", "proceed", reason = "precision reported")
   sr_project_close(p)
   p2 <- sr_project_open(p$paths$dir)
   withr::defer(sr_project_close(p2))
   expect_identical(p2$state$feasibility, p$state$feasibility)
+  expect_identical(sr_feasibility(p2, "rm")$assessment$inputs$rmst, list(sims = 20L, seed = 1L))
 })
 
 test_that("exposure prevalence (R12): a factor exposure gives every level's share, a continuous one NA", {
@@ -423,9 +464,13 @@ test_that("exposure prevalence (R12): a factor exposure gives every level's shar
   withr::defer(sr_project_close(p2))
   expect_identical(p2$state$feasibility, p$state$feasibility)
 
-  # no complete case: NA
-  p <- .ft_project(df, spec = .ft_spec(exclude_rows = seq_len(500L)))
+  # no complete case: NA (z1 is missing in the first half of the rows, z2 in the second)
+  nc <- df
+  nc$z1[seq_len(250L)] <- NA
+  nc$z2[251:500] <- NA
+  p <- .ft_project(nc)
   p <- sr_feasibility_assess(p, "p1")
+  expect_identical(sr_feasibility(p, "p1")$assessment$inputs$n_cc, 0L)
   expect_true(all(is.na(sr_feasibility_report(p)$prevalence)))
   expect_identical(sr_feasibility_fragment(p, "p1")$values$prevalence, NA_real_)
 })
