@@ -1,12 +1,15 @@
 # StatRouter validation record
 
-This page records two kinds of evidence that the analysis engine gives correct numbers:
+This page records three kinds of evidence that the analysis engine gives correct numbers:
 
 1. A **confidence-interval coverage simulation**. Each cell simulates data with a known true effect,
    runs the route's own compiled analysis code on it, and counts how often the 95% interval contains
    the truth.
 2. **Textbook reproductions**. Published values are reproduced through the public path
    (SAP -> lock -> run -> result) on public data.
+3. A **feasibility SE validation**. The standard errors that the outcome-blind feasibility verdict
+   predicts before the lock (spec catalogue O) are compared with the empirical SD of the route's own
+   estimates over simulated datasets, and checked for conservativeness on NHEFS.
 
 These are research-software checks, not a clinical validation. Results still need review by a
 qualified statistician.
@@ -155,3 +158,145 @@ Rscript tools/run_tests.R textbook
 ```
 
 To include NHEFS, set `SR_NHEFS_CSV` to a local copy of the book's CSV first.
+
+## 3. Feasibility SE validation
+
+Before the SAP is locked, the feasibility verdict (spec catalogue O) predicts the null-effect
+standard error of each primary analysis from outcome-blind inputs only: n, the outcome's own
+marginals, the exposure-on-covariate structure, cluster sizes and the parameter count. This section
+checks those predictions against the spread of the estimates the analysis actually produces.
+
+### Run details
+
+| Item | Value |
+|---|---|
+| Harness | `app/R/resample/feas_sim.R`, `tools/feas_sim.R` (added in the commit that records this section) |
+| Engine | `app/R/sap/feas_engine.R` (`.sr_feas_inputs`, `.sr_feas_compute`), formulas as in spec catalogue O |
+| Date | 2026-10-18 |
+| Seed | 1 |
+| R | R version 4.5.2 (2025-10-31 ucrt) |
+| Packages | stats 4.5.2, parallel 4.5.2, survival 3.8.3, sandwich 3.1.1 (testthat 3.3.2 and withr 3.0.2 for the tests) |
+| Parallel workers | Workers do not change the results. Replication r always uses the r-th L'Ecuyer stream of the seed. |
+
+### Method and pass rule
+
+Every replication draws a dataset and runs the route's own compiled analysis on it, exactly as the
+coverage harness does. It keeps the estimate of the route's primary row of the cell's measure, on
+the log scale for OR, RR and HR. On the same dataset the feasibility engine predicts the SE of that
+row. The prediction is given the generator's true `r2_y` and `icc` as its assumptions.
+
+```
+emp_sd  = SD of the estimates over the successful replications
+pred_se = mean of the predicted SEs
+ratio   = pred_se / emp_sd,   pass = |ratio - 1| <= 0.10
+```
+
+- A failed replication is one whose generation, fit or prediction errors, whose primary row is not
+  finite, or whose verdict has blockers. Failed replications are counted, named, and left out of
+  both statistics.
+- **A failing cell is a finding about the method or the code. The 10% tolerance is never changed to
+  make a cell pass, and no engine formula is changed away from spec catalogue O.**
+- **Ruling: the rmst cell predicts on every 10th replication only.** Its prediction is itself a
+  500-draw simulation, and the mean of 100 predictions estimates the mean predicted SE to well under
+  1%. Clustered RMST is refused by the route, so it has no cell.
+
+### Cells
+
+Every cell has no true effect. Outside the clustered cells, the exposure depends on a covariate,
+x ~ Bern(plogis(0.8 z1)) with z1 ~ N(0,1), so the exposure model has R² > 0. In the clustered cells
+the exposure is assigned at cluster level (exactly half of the clusters, at random). Every cell has
+1000 replications.
+
+| Cell | Data generator | Analysis (row) | n | Assumptions given |
+|---|---|---|---|---|
+| md | z1, z2 ~ N(0,1); y = 1 + 0.8z1 + 0.4z2 + N(0,1) | lm y ~ x + z1 + z2 (MD) | 400 | r2_y = 0.8/1.8 |
+| rd | y ~ Bern(0.3) | logistic y ~ x + z1, marginal (RD) | 600 | none |
+| rr | as rd | modified Poisson, marginal = FALSE (RR) | 600 | none |
+| or | as rd | logistic, marginal = FALSE (OR) | 600 | none |
+| hr | T ~ Exp(1); C ~ U(0, 3.197), which censors 30% | Cox ~ x + z1 (HR) | 400 | none |
+| rmst | as hr, but x ~ Bern(0.5) and no covariate | RMST difference by x up to tau = 1.0077, the 75th percentile of the observed time min(T, C) | 400 | none (prediction on every 10th replication) |
+| md_cl | 40 clusters of 10; z ~ N(0,1); y = 1 + 0.5z + u + e, u ~ N(0, variance 0.2), e ~ N(0, variance 0.8) | lm y ~ x + z, cluster-robust SE (MD) | 400 | r2_y = 0.2, icc = 0.2 |
+| rd_cl | 40 clusters of 15; cluster risk ~ Beta(5.7, 13.3) (mean 0.3, a + b = 19, ICC 0.05); z ~ N(0,1) unrelated | as rd, cluster-robust SE | 600 | icc = 0.05 |
+| rr_cl | as rd_cl | as rr, cluster-robust SE | 600 | icc = 0.05 |
+| or_cl | as rd_cl | as or, cluster-robust SE | 600 | icc = 0.05 |
+| hr_cl | 40 clusters of 10; gamma frailty (variance 0.3) on Exp(1) times; administrative censoring at t = 1.5; z ~ N(0,1) unrelated | Cox ~ x + z, clustered (robust SE) | 400 | icc = 0.162553 |
+
+The hr_cl ICC is the ICC of the generator's event indicator. It was computed once with the one-way
+ANOVA estimator on 400 000 draws (40 000 clusters of 10) and is stored as a constant in
+`feas_sim.R`. The closed form gives 0.16386, which agrees within the Monte Carlo error.
+
+### Results (seed 1, 2026-10-18)
+
+| Cell | Reps | Failed | pred_se | emp_sd | Ratio | Pass |
+|---|---|---|---|---|---|---|
+| md | 1000 | 0 | 0.10717 | 0.10706 | 1.00107 | TRUE |
+| rd | 1000 | 0 | 0.04001 | 0.04020 | 0.99528 | TRUE |
+| rr | 1000 | 0 | 0.13362 | 0.13508 | 0.98917 | TRUE |
+| or | 1000 | 0 | 0.19088 | 0.19290 | 0.98951 | TRUE |
+| hr | 1000 | 0 | 0.12792 | 0.13099 | 0.97660 | TRUE |
+| rmst | 1000 | 0 | 0.03642 | 0.03696 | 0.98545 | TRUE |
+| md_cl | 1000 | 0 | 0.16699 | 0.16870 | 0.98987 | TRUE |
+| rd_cl | 1000 | 0 | 0.04868 | 0.04799 | 1.01449 | TRUE |
+| rr_cl | 1000 | 0 | 0.16373 | 0.16292 | 1.00498 | TRUE |
+| or_cl | 1000 | 0 | 0.23331 | 0.23166 | 1.00712 | TRUE |
+| hr_cl | 1000 | 0 | 0.18670 | 0.19176 | 0.97361 | TRUE |
+
+**ALL 11 CELLS PASS. There were 0 failed replications.** Every ratio is within 3% of 1.
+
+The exact CSV block of the tool output (the per-cell `seconds` column is left out because it records
+wall-clock time; it does not affect the results):
+
+```
+"cell","route","measure","clustered","n","reps","pred_every","pred_se","emp_sd","ratio","pass","failed"
+"md","lm","MD",FALSE,400,1000,1,0.107171676918117,0.107057511501151,1.00106639333724,TRUE,0
+"rd","logistic","RD",FALSE,600,1000,1,0.04001423266962,0.0402038611099723,0.995283327642746,TRUE,0
+"rr","modpois","RR",FALSE,600,1000,1,0.13361783028995,0.135081420277818,0.98916512733685,TRUE,0
+"or","logistic","OR",FALSE,600,1000,1,0.190875243864281,0.192898008065976,0.98951381498453,TRUE,0
+"hr","cox","HR",FALSE,400,1000,1,0.127920413894957,0.130985171281906,0.976602256904693,TRUE,0
+"rmst","rmst","RMST_diff",FALSE,400,1000,10,0.0364177745203621,0.0369554109253714,0.985451754112679,TRUE,0
+"md_cl","lm","MD",TRUE,400,1000,1,0.16699003695875,0.168699171610055,0.989868743070914,TRUE,0
+"rd_cl","logistic","RD",TRUE,600,1000,1,0.0486827297663007,0.0479871745908318,1.01449460572329,TRUE,0
+"rr_cl","modpois","RR",TRUE,600,1000,1,0.163728502675957,0.162916513731904,1.00498408003862,TRUE,0
+"or_cl","logistic","OR",TRUE,600,1000,1,0.23331074267355,0.231661763050188,1.00711804832032,TRUE,0
+"hr_cl","cox","HR",TRUE,400,1000,1,0.186696523407911,0.191757087939661,0.973609504680514,TRUE,0
+```
+
+### NHEFS: the marginal-value prediction is conservative
+
+Spec catalogue O requires that, on NHEFS, the prediction from the marginal values (no `r2_y`
+assumption) is at least 0.9 times the SE actually obtained after the lock. The check is in
+`tests/testthat/test-textbook.R`. It uses the NHEFS standardisation analysis of section 2, locked and
+run with the percentile bootstrap (B = 2000, seed 1). The actual SE is taken from the primary
+(marginal) MD row as (hi - lo) / (2 x qnorm(0.975)).
+
+| Quantity | Value |
+|---|---|
+| Complete cases | 1566 |
+| Marginal SD of wt82_71 | 7.8799 |
+| Exposure (qsmk) variance; R² of qsmk on the covariates | 0.19112; 0.06850 |
+| Predicted MD SE (marginal values, no assumptions) | 0.47194 |
+| Actual SE of the marginal MD, 95% CI (2.64414, 4.45720) | 0.46252 |
+| Predicted / actual | 1.020 (the requirement is >= 0.9) |
+
+The check passes. The prediction uses the marginal SD of the outcome, so it ignores the variance the
+covariates explain, and it is slightly wider than the interval the run obtains. The NHEFS dataset is
+never committed: the test reads the CSV named in `SR_NHEFS_CSV` and skips when that variable is
+unset.
+
+### How to re-run
+
+```
+Rscript tools/feas_sim.R [cells] [reps_scale]
+```
+
+- `cells` is `all` (the default) or a comma-separated list, for example `md,hr_cl`.
+- `reps_scale` multiplies each cell's replications (the default is 1).
+- Set the number of workers with the environment variable `SR_FEAS_SIM_WORKERS` (or the R option
+  `sr.feas_sim_workers`). The default is the number of cores minus 2. The worker count does not
+  change any result.
+- The tool prints the table and a CSV block to the console and writes nothing into the repository.
+- The recorded full run took 101 s on 6 workers; the rmst cell alone took 41 s.
+
+The smoke test `tests/testthat/test-feas-sim-smoke.R` runs every cell with 20 replications (rmst
+10). It checks the returned fields, that no replication fails, that the ratio is finite, and that one
+or two workers give identical results. It does not check `pass`.
