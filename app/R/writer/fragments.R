@@ -162,7 +162,8 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   } else {
     ";"
   }
-  paste0("Analyses were run in R ", r, " {{C:r_core}}", with, " the exact code is supplied as analysis.R.")
+  paste0("Analyses were run in R ", r, " {{C:r_core}}", with, " the exact code is supplied as analysis.R. ",
+         "Reporting follows the STROBE statement {{C:vonelm2007}}; the checklist is in the supplementary material.")
 }
 
 .sr_wr_r_version <- function(r = sr_libsnap(character())$r) {

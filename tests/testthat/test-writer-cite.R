@@ -337,7 +337,7 @@ test_that("sr_cite_order is the order of first use: main text, captions and foot
   expect_true("westreich2013" %in% ord)
   expect_false("westreich2013" %in% para_keys)   # only the footnote cites it, so it follows every paragraph key
   expect_gt(match("westreich2013", ord), length(para_keys))
-  # STROBE is appended when nothing cites it (Task 7 will cite it in place)
+  # STROBE is cited in place by the software sentence
   expect_true("vonelm2007" %in% ord)
   # the citation renders as the position in the list
   cite <- sr_cite_fn(ord)

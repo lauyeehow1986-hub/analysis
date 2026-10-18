@@ -6,6 +6,8 @@
 #   sr_writer_opts()  the validated options of a build
 #   sr_doc_model()    list(meta, reg, main, supplement, not_reported, dropped_families)
 #                     the last block of `main` is list(type = "refs", keys), the reference list
+#                     the last block of `supplement` is list(type = "checklist", id = "strobe", df), the
+#                     STROBE checklist scored from the other blocks (writer/checklist.R)
 
 #' The options of a manuscript build, validated.
 #'
@@ -263,6 +265,11 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   meta <- list(sap_hash = as.character(lock$sap_hash), locked_at = as.character(lock$locked_at),
                libsnap = sr_libsnap(), preset = opts$preset, alpha = opts$alpha, purposes = purposes,
                wording = wording, effects = .sr_wd_effects_info(res, rep_ids))
-  list(meta = meta, reg = reg, main = main, supplement = supplement, not_reported = not_reported,
-       dropped_families = dropped)
+  model <- list(meta = meta, reg = reg, main = main, supplement = supplement, not_reported = not_reported,
+                dropped_families = dropped)
+
+  # ---- the STROBE checklist: scored from the finished model, then the last block of the supplement ----
+  strobe <- sr_checklist_strobe(model, project)
+  model$supplement <- c(model$supplement, list(list(type = "checklist", id = "strobe", df = strobe)))
+  model
 }

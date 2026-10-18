@@ -1,0 +1,35 @@
+item,section,label,rule
+1a,Title and abstract,Study design named in title or abstract,author
+1b,Title and abstract,Balanced abstract of methods and findings,author
+2,Introduction,Scientific background and rationale,author
+3,Introduction,Objectives and prespecified hypotheses,author
+4,Methods,Key design elements stated early,author
+5,Methods,Setting and relevant dates,author
+6a,Methods,Eligibility and selection of participants,flow
+6b,Methods,Matching criteria and numbers matched,author
+7,Methods,Outcomes and exposures and confounders defined,roles
+8,Methods,Data sources and measurement per variable,author
+9,Methods,Steps taken against bias,author
+10,Methods,How the study size was reached,feasibility
+11,Methods,Handling of quantitative variables,terms
+12a,Methods,Statistical methods including confounder control,methods
+12b,Methods,Methods for subgroups and interactions,interactions
+12c,Methods,Handling of missing data,missing
+12d,Methods,Handling of loss to follow-up,author
+12e,Methods,Sensitivity analyses performed,sensitivity
+13a,Results,Numbers at each stage of the study,flow
+13b,Results,Reasons for non-participation per stage,flow
+13c,Results,Flow diagram shown,flow
+14a,Results,Participant characteristics and exposures,table1
+14b,Results,Missing data counts per variable,table1_missing
+14c,Results,Follow-up time summarised,followup
+15,Results,Outcome events or summary measures,events
+16a,Results,Unadjusted and adjusted estimates with precision,primary_ci
+16b,Results,Category boundaries of grouped variables,author
+16c,Results,Relative risk expressed as absolute risk,abs_risk
+17,Results,Other analyses such as subgroups and sensitivity,sensitivity
+18,Discussion,Key results against the objectives,author
+19,Discussion,Limitations and sources of bias,author
+20,Discussion,Cautious overall interpretation,author
+21,Discussion,Generalisability of the findings,author
+22,Other information,Funding and role of funders,author
