@@ -579,3 +579,73 @@ test_that("sr_run on a stopped project is refused before anything is extracted",
   expect_gt(length(list.files(ex_dir)), 0L)
   expect_true(ran$state$runs$p1$ok)
 })
+
+test_that("a stale secondary does not block the lock; a secondary decided stop does (F2)", {
+  # the gate is primary-only for missing / stale / undecided / revise (design catalogue O); only a stop
+  # on any analysis blocks
+  p <- .ft_project()
+  p <- sr_sap_add(p, "s1", "logistic", .ft_spec(terms = list(list(var = "z3"))), "t", label = "secondary")
+  p <- sr_feasibility_assess(p, "p1")
+  p <- sr_feasibility_decide(p, "p1", "proceed", reason = "ok")
+  p <- sr_feasibility_assess(p, "s1")
+  p <- sr_feasibility_decide(p, "s1", "proceed", reason = "ok")
+  p <- sr_sap_add(p, "s1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z3"))), "t",
+                  label = "secondary")
+  expect_identical(.sr_feas_stale(p, "s1"), "spec")
+  expect_identical(.sr_feas_gate(p), character())
+  locked <- sr_sap_lock(p)
+  expect_true(isTRUE(locked$state$sap$locked))
+
+  # the same stale secondary, now decided stop before the spec change: the stop blocks the lock
+  q <- .ft_project()
+  q <- sr_sap_add(q, "s1", "logistic", .ft_spec(terms = list(list(var = "z3"))), "t", label = "secondary")
+  q <- sr_feasibility_assess(q, "p1")
+  q <- sr_feasibility_decide(q, "p1", "proceed", reason = "ok")
+  q <- sr_feasibility_assess(q, "s1")
+  q <- sr_feasibility_decide(q, "s1", "stop", reason = "no events")
+  expect_identical(.sr_feas_gate(q), "s1: decision is stop (no events)")
+  expect_error(sr_sap_lock(q), "s1: decision is stop (no events)", fixed = TRUE)
+})
+
+test_that("when both the data and the spec changed, the stale reason names the data (F3)", {
+  p <- .ft_project()
+  p <- sr_feasibility_assess(p, "p1")
+  p <- sr_sap_add(p, "p1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z2"), list(var = "z3"))),
+                  "t", label = "primary")
+  expect_identical(.sr_feas_stale(p, "p1"), "spec")
+  df <- .ft_frame()
+  df$y[which(df$y == "dead")[1L]] <- "alive"
+  csv <- file.path(dirname(p$paths$dir), "t2.csv")
+  .fx_write_csv(df, csv)
+  p <- sr_ingest(p, csv, table = "t", options = list(drive_info = .ft_drive))
+  expect_identical(.sr_feas_stale(p, "p1"), "data")
+  expect_identical(sr_feasibility(p, "p1")$stale, "data")
+  expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "ok"), "stale (the data changed)", fixed = TRUE)
+})
+
+test_that("the SAP hash of a project without feasibility records is pinned (F4)", {
+  # a hand-built SAP state: a primary, a secondary with a sap_label, a non-pre-specified analysis (left
+  # out), a family and a rule. The literal was checked against sr_sap_hash as it was before P1c.1 (no
+  # feasibility element); a change that alters the hash of such a SAP must fail here.
+  rec <- function(id, label, prespecified = TRUE, sap_label = NULL) {
+    r <- list(id = id, route = "logistic", route_version = 1L, table = "t", label = label, family = NA_character_,
+              spec = list(purpose = "explain-causal", outcome = "y", event_value = "dead", exposure = "x",
+                          terms = list(list(var = "z1", type = "linear")), seed = 1L),
+              parent = NA_character_, trigger = NA_character_, addresses = character(),
+              prespecified = prespecified, reason = NA_character_)
+    if (!is.null(sap_label)) r$sap_label <- sap_label
+    r
+  }
+  p <- list(state = list(
+    analyses = list(s1 = rec("s1", "secondary", sap_label = "sensitivity"), p1 = rec("p1", "primary"),
+                    a9 = rec("a9", "secondary", prespecified = FALSE)),
+    sap = list(families = list(f1 = list(id = "f1", members = c("p1", "s1"), method = "holm")),
+               rules = list(r1 = list(id = "r1", analysis = "p1", check = "ph", action = "add_sensitivity",
+                                      alternative = "s1")))))
+  legacy <- "b11d9a49cfbb0f4146c4f9313af6c477464823738aca3b99fe57c571c15c4bb4"
+  expect_identical(sr_sap_hash(p), legacy)
+  p$state$feasibility <- list()
+  expect_identical(sr_sap_hash(p), legacy)
+  p$state$feasibility <- list(gone = list(assessment = list(tier = "adequate")))   # not an analysis of the SAP
+  expect_identical(sr_sap_hash(p), legacy)
+})
