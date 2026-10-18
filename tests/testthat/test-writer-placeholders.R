@@ -80,7 +80,7 @@ test_that("sr_ph_verify re-derives effects, fragments and labels from the fixtur
   sr_ph_put(reg, sr_fmt_p(res$effects$p[i]), "p", src("p"), analysis = "a_lr")
   sr_ph_put(reg, sprintf("%d", as.integer(res$effects$n[i])), "count", src("n"), analysis = "a_lr")
   sr_ph_put(reg, sprintf("%d", as.integer(res$effects$events[i])), "count", src("events"), analysis = "a_lr")
-  sr_ph_put(reg, "95", "num", src("level"), analysis = "a_lr")
+  sr_ph_put(reg, "95%", "label", "label:95%")
   sr_ph_put(reg, "grp", "label", "label:grp")
   note <- sr_ph_lift(res$fragments$glm_note, reg, "fragment:a_lr:glm_note", "a_lr")
   expect_identical(sr_ph_resolve(note, reg), res$fragments$glm_note)
@@ -104,12 +104,14 @@ test_that("sr_ph_verify turns a resolver error into ok = FALSE and passes a supp
   sr_ph_put(reg, "1.00", "est", "effect:no_such_analysis:1:est")
   sr_ph_put(reg, "1.00", "est", "effect:a_lr:99:est")
   sr_ph_put(reg, "1.00", "est", "effect:a_lr:1:bogus")
+  sr_ph_put(reg, "95", "num", "effect:a_lr:1:level")   # the CI level is a label, not an effect field
   sr_ph_put(reg, "1", "num", "fragment:a_lr:glm_note:99")
   sr_ph_put(reg, "1", "num", "mystery:thing")
   sr_ph_put(reg, "1", "num", "nocolon")
   v <- expect_no_error(sr_ph_verify(reg, p))
   expect_false(any(v$ok))
   expect_true(all(nzchar(v$got)))
+  expect_match(v$got[v$source == "effect:a_lr:1:level"], "unknown effect field")
   expect_match(v$got[1L], "no_such_analysis")
   # stage III is on exactly 3 rows: a count of 3 is a small cell and "<5" passes; a mask of 12 does not
   fx <- .fx_writer_frame()

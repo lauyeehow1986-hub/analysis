@@ -9,7 +9,7 @@
 #   {{C:<key>}} a citation, rendered as a Vancouver number [k] in order of first use
 #
 # A source is "<prefix>:<rest>"; the resolver registered for <prefix> turns it back into text:
-#   effect:<analysis>:<row>:<field>        field est | lo_hi | p | n | events | level
+#   effect:<analysis>:<row>:<field>        field est | lo_hi | p | n | events
 #   fragment:<analysis>:<name>:<k>         the k-th number of that fragment of sr_result()
 #   label:<text>                           the text itself
 
@@ -228,15 +228,6 @@ sr_ph_digits <- function(template) {
   v
 }
 
-# The CI level, in percent. The effects frame carries the level of the exposure contrast in its `level`
-# column (a factor level, not a number), so the interval level comes from there only when that column
-# holds a probability; every route of P1c computes its intervals at 0.95.
-.sr_ph_ci_level <- function(eff, i) {
-  v <- suppressWarnings(as.numeric(as.character(eff$level[i])))
-  if (length(v) == 1L && !is.na(v) && v > 0 && v < 1) v <- 100 * v else v <- 95
-  sprintf("%g", v)
-}
-
 .sr_ph_resolve_effect <- function(project, parts, kind) {
   if (length(parts) != 3L) stop("an effect source is effect:<analysis>:<row>:<field>", call. = FALSE)
   eff <- .sr_ph_result(project, parts[1L])$effects
@@ -251,7 +242,6 @@ sr_ph_digits <- function(template) {
     p = sr_fmt_p(eff$p[i]),
     n = whole(eff$n[i]),
     events = whole(eff$events[i]),
-    level = .sr_ph_ci_level(eff, i),
     stop("unknown effect field '", parts[3L], "'", call. = FALSE))
 }
 
