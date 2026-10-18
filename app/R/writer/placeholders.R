@@ -14,7 +14,18 @@
 #   label:<text>                           the text itself
 
 SR_PH_RE <- "\\{\\{(E[0-9]+|L[0-9]+|C:[a-z][a-z0-9_]*)\\}\\}"
-SR_NUM_RE <- "(?<![A-Za-z0-9_.])[-]?[0-9]+(?:\\.[0-9]+)?%?(?![A-Za-z0-9_])"
+# A bundled file under inst/templates/: next to app/ in the repo and in the portable bundle. `...` are the
+# path parts below inst/templates; `what` names the file in the error.
+.sr_wr_template <- function(..., what = "template file") {
+  rel <- file.path(...)
+  root <- get0("sr_root", envir = globalenv(), inherits = FALSE, ifnotfound = "app")
+  cand <- file.path(c(dirname(root), root), "inst", "templates", rel)
+  hit <- cand[file.exists(cand)]
+  if (!length(hit)) stop("the ", what, " (inst/templates/", rel, ") was not found", call. = FALSE)
+  hit[1L]
+}
+
+SR_NUM_RE <-"(?<![A-Za-z0-9_.])[-]?[0-9]+(?:\\.[0-9]+)?%?(?![A-Za-z0-9_])"
 
 # Small cells: a count of 1 to SR_SDC_K - 1 prints as "<5" (writer/sdc_out.R); zero is not suppressed.
 SR_SDC_K <- 5L

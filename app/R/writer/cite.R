@@ -23,13 +23,7 @@ SR_CITE_PKGS <- c("boot", "Hmisc", "logistf", "mice", "sandwich", "survival")
 .sr_cite_cache <- new.env(parent = emptyenv())
 
 # inst/templates/references.json: next to app/ in the repo and in the portable bundle.
-.sr_cite_db_path <- function() {
-  root <- get0("sr_root", envir = globalenv(), inherits = FALSE, ifnotfound = "app")
-  cand <- file.path(c(dirname(root), root), "inst", "templates", "references.json")
-  hit <- cand[file.exists(cand)]
-  if (!length(hit)) stop("the references file (inst/templates/references.json) was not found", call. = FALSE)
-  hit[1L]
-}
+.sr_cite_db_path <- function() .sr_wr_template("references.json", what = "references file")
 
 #' The method references, read once: a list of CSL-JSON items named by id.
 sr_cite_db <- function() {

@@ -21,7 +21,7 @@ SR_WR_MEASURE_NAMES <- c(
   SMD = "Standardised mean difference", coef = "Coefficient", risk = "Risk")
 
 SR_WR_ROUTE_NAMES <- c(
-  table1 = "Table 1", lm = "Linear regression", lm_describe = "Linear regression",
+  table1 = "Baseline characteristics", lm = "Linear regression", lm_describe = "Linear regression",
   logistic = "Logistic regression", logistic_describe = "Logistic regression",
   modpois = "Modified Poisson regression", cox = "Cox regression",
   rmst = "Restricted mean survival time")

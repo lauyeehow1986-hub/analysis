@@ -23,13 +23,7 @@ SR_DX_STATUS_FILL <- c(green = "#C6EFCE", amber = "#FFEB9C", red = "#FFC7CE")
 # ---- journal presets ------------------------------------------------------------------------------
 
 # inst/templates/journals.json: next to app/ in the repo and in the portable bundle.
-.sr_journal_path <- function() {
-  root <- get0("sr_root", envir = globalenv(), inherits = FALSE, ifnotfound = "app")
-  cand <- file.path(c(dirname(root), root), "inst", "templates", "journals.json")
-  hit <- cand[file.exists(cand)]
-  if (!length(hit)) stop("the journal presets file (inst/templates/journals.json) was not found", call. = FALSE)
-  hit[1L]
-}
+.sr_journal_path <- function() .sr_wr_template("journals.json", what = "journal presets file")
 
 # The presets in file order: a list of validated plain lists.
 .sr_journal_all <- function() {
@@ -263,7 +257,12 @@ sr_journal_preset <- function(name = "default") {
 # ---- the document -----------------------------------------------------------------------------------
 
 .sr_dx_time <- function(x) {
-  if (inherits(x, "POSIXt")) return(as.POSIXct(x))
+  if (inherits(x, "POSIXt")) {
+    # officer writes the clock reading of the object with a trailing "Z": express it in UTC first
+    x <- as.POSIXct(x)
+    attr(x, "tzone") <- "UTC"
+    return(x)
+  }
   if (is.character(x) && length(x) == 1L && !is.na(x)) {
     t <- tryCatch(as.POSIXct(sub("Z$", "", sub("T", " ", x)), tz = "UTC", tryFormats = c("%Y-%m-%d %H:%M:%OS", "%Y-%m-%d %H:%M", "%Y-%m-%d")),
                   error = function(e) as.POSIXct(NA))

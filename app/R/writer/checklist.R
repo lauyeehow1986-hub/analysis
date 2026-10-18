@@ -15,13 +15,7 @@ SR_CK_RULES <- c("author", "flow", "roles", "feasibility", "terms", "methods", "
 SR_CK_SURVIVAL_ROUTES <- c("cox", "rmst")
 
 # inst/templates/checklists/<name>.csv: next to app/ in the repo and in the portable bundle.
-.sr_ck_template_path <- function(name) {
-  root <- get0("sr_root", envir = globalenv(), inherits = FALSE, ifnotfound = "app")
-  cand <- file.path(c(dirname(root), root), "inst", "templates", "checklists", paste0(name, ".csv"))
-  hit <- cand[file.exists(cand)]
-  if (!length(hit)) stop("the checklist file (inst/templates/checklists/", name, ".csv) was not found", call. = FALSE)
-  hit[1L]
-}
+.sr_ck_template_path <- function(name) .sr_wr_template("checklists", paste0(name, ".csv"), what = "checklist file")
 
 # The STROBE items: data.frame(item, section, label, rule), every rule known.
 .sr_ck_template <- function() {

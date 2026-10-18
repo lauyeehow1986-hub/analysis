@@ -143,6 +143,8 @@ test_that("captions read Table 1. / Figure 1. / Table S1. and carry SEQ fields w
   expect_true(any(startsWith(sx, "Table S1. ")))
   expect_true(any(startsWith(sx, "Table S2. ")))
   expect_false(any(startsWith(sx, "Table 1. ")))
+  # a route table's caption does not repeat "Table 1" (the route name is "Baseline characteristics")
+  expect_false(any(grepl("Table 1 t1", c(tx, sx), fixed = TRUE)))
   seq_of <- function(path, name) {
     doc <- .dx_xml(path, "word/document.xml")
     ns <- xml2::xml_ns(doc)
@@ -206,6 +208,13 @@ test_that("the audit properties, the footer and the creator are written, and no 
   expect_identical(dp$value[dp$tag == "created"], "2026-10-18T09:30:00Z")
   dps <- officer::doc_properties(officer::read_docx(.dx_render("supplement")))
   expect_identical(dps$value[dps$tag == "title"], "Supplement")
+  # a POSIXct in another time zone is written as UTC, so the trailing "Z" is true
+  m <- .dx_mini()
+  pr2 <- .dx_props()
+  pr2$created <- as.POSIXct("2026-10-18 09:30:00", tz = "Asia/Singapore")
+  g <- sr_docx_render(m, "main", tempfile(fileext = ".docx"), tempfile("fig-"), pr2)
+  core <- paste(readLines(file.path(.dx_unzip(g), "docProps", "core.xml"), warn = FALSE), collapse = "")
+  expect_match(core, "<dcterms:created[^>]*>2026-10-18T01:30:00Z</dcterms:created>")
   # the OS user name is in no part of the package
   user <- Sys.getenv("USERNAME", Sys.getenv("USER", ""))
   if (nzchar(user) && nchar(user) > 3L) {
@@ -217,7 +226,7 @@ test_that("the audit properties, the footer and the creator are written, and no 
 
 test_that("a label with & < and an accented letter renders and reads back unchanged", {
   m <- .dx_mini()
-  hostile <- "R&D <b>level</b> café"
+  hostile <- paste0("R&D <b>level</b> caf", intToUtf8(233L))
   tok <- sr_ph_put(m$reg, hostile, "label", "label:hostile-demo")
   m$main <- c(list(.sr_wr_head(paste0("Heading ", tok), 1L)),
               list(.sr_wr_para("p_h", paste0("Level ", tok, " ends."), "a", "results")),

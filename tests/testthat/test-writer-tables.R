@@ -123,12 +123,12 @@ test_that("a table1 route goes to the main document with small cells hidden; the
   expect_true(any(unlist(main$df, use.names = FALSE) == "<5"))
   # stage III is 3 rows: its Overall cell is hidden, and the Missing column is left alone
   expect_true(all(main$df[["Missing, n"]] %in% c("0", "")))
-  expect_match(main$caption, "^Table \\{\\{L[0-9]+\\}\\} \\{\\{L[0-9]+\\}\\}: table1$")
-  expect_identical(sr_ph_resolve(main$caption, reg), "Table 1 t1: table1")
+  expect_match(main$caption, "^Baseline characteristics \\{\\{L[0-9]+\\}\\}: table1$")
+  expect_identical(sr_ph_resolve(main$caption, reg), "Baseline characteristics t1: table1")
   expect_identical(sr_ph_digits(c(main$caption, main$footnotes)), character(0))
   sup <- blocks[[which(where == "supplement")]]
   expect_identical(sup$analysis, "t1")
-  expect_identical(sr_ph_resolve(sup$caption, reg), "Table 1 t1: missing")
+  expect_identical(sr_ph_resolve(sup$caption, reg), "Baseline characteristics t1: missing")
   expect_identical(sup$n_suppressed, 0L)
   expect_length(unique(ids), 2L)
 })
