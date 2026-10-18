@@ -90,8 +90,22 @@ test_that("a bootstrap row carries the interval footnote and an NA p prints as a
   fn <- sr_ph_resolve(tb$footnotes, reg)
   expect_true(any(grepl("^Bootstrap interval \\(boot_[a-z_]+\\)\\.$", fn)))
   na_p <- is.na(prim$p)
-  if (any(na_p)) expect_true(all(tb$df$p[tb$df$Analysis == "a_mp"][na_p] == "-"))
+  pcell <- tb$df$p[tb$df$Analysis == "a_mp"]
   expect_true(all(sr_ph_verify(reg, p)$ok))
+  expect_length(pcell, nrow(prim))
+  expect_identical(pcell == "-", na_p)
+  expect_identical(grepl("^[{][{]E[0-9]+[}][}]$", pcell), !na_p)
+  # a constructed NA p prints as a dash, whatever the bootstrap yields
+  old <- sr_result
+  assign("sr_result", function(project, analysis_id) {
+    res <- old(project, analysis_id)
+    res$effects$p[res$effects$role == "primary"] <- NA_real_
+    res
+  }, envir = globalenv())
+  withr::defer(assign("sr_result", old, envir = globalenv()))
+  tb_na <- .sr_wr_main_table(p, "a_mp", sr_ph_registry(), .tb_opts())
+  expect_gt(nrow(tb_na$df), 0L)
+  expect_true(all(tb_na$df$p == "-"))
 })
 
 test_that("a table1 route goes to the main document with small cells hidden; the rest is supplement", {
@@ -325,4 +339,64 @@ test_that("every token of every table and figure caption verifies", {
   v <- sr_ph_verify(reg, p)
   expect_gt(nrow(v), 20L)
   expect_true(all(v$ok), info = paste(v$source[!v$ok], collapse = "; "))
+})
+
+test_that("a numeric-level term in a main or family cell is tokenised and resolves back to the term", {
+  skip_on_cran()
+  p <- .fx_writer_project(environment())
+  old <- sr_result
+  assign("sr_result", function(project, analysis_id) {
+    res <- old(project, analysis_id)
+    ok <- !is.null(res$effects) && nrow(res$effects) > 0L
+    if (ok) res$effects$term[res$effects$role == "primary"] <- "stage 2 vs 1"
+    res
+  }, envir = globalenv())
+  withr::defer(assign("sr_result", old, envir = globalenv()))
+
+  reg <- sr_ph_registry()
+  tb <- .sr_wr_main_table(p, c("a_lr", "a_cox"), reg, .tb_opts())
+  expect_gt(nrow(tb$df), 0L)
+  expect_identical(sr_ph_digits(unlist(tb$df[c("Analysis", "Comparison", "Measure")], use.names = FALSE)),
+                   character(0))
+  expect_match(tb$df$Comparison[1L], "^stage [{][{]L[0-9]+[}][}] vs [{][{]L[0-9]+[}][}]$")
+  expect_true(all(sr_ph_resolve(tb$df$Comparison, reg) == "stage 2 vs 1"))
+
+  ft <- .sr_wr_family_table(p, reg)
+  expect_identical(sr_ph_digits(unlist(ft$df[c("Family", "Analysis", "Comparison", "Method")], use.names = FALSE)),
+                   character(0))
+  expect_true(all(sr_ph_resolve(ft$df$Comparison, reg) == "stage 2 vs 1"))
+  expect_identical(sr_ph_resolve(ft$df$Analysis, reg), sr_family_adjust(p, "fam1")$analysis)
+  expect_true(all(sr_ph_verify(reg, p)$ok))
+})
+
+test_that("the flow block holds no raw small count: 1 to k - 1 is <k, zero stays 0", {
+  skip_on_cran()
+  p <- .fx_writer_project(environment())
+  fl <- data.frame(step = c("s1", "s2"), label = c("After age filter", "After sentinel filter"),
+                   n_before = c(120, 117), n_after = c(117, 117), n_excluded = c(3, 0),
+                   reason = c("age out of range", "none"), stringsAsFactors = FALSE)
+  attr(fl, "n_total") <- 120
+  attr(fl, "label") <- "All records"
+  old <- sr_flow
+  assign("sr_flow", function(project, table) fl, envir = globalenv())
+  withr::defer(assign("sr_flow", old, envir = globalenv()))
+
+  reg <- sr_ph_registry()
+  fb <- .sr_wr_figures(p, .tb_ids, reg, .tb_opts())
+  b <- fb[[which(vapply(fb, function(x) identical(x$kind, "flow"), NA))]]
+  d <- b$data
+  expect_identical(d$n_excluded, c("<5", "0"))
+  expect_identical(d$n_before, c("120", "117"))
+  expect_identical(d$n_after, c("117", "117"))
+  expect_identical(attr(d, "n_total"), "120")
+  expect_identical(attr(d, "label"), "All records")
+  expect_false(any(vapply(d[c("n_before", "n_after", "n_excluded")], is.numeric, NA)))
+  # suppress_k reaches the mask: k = 2 shows an exclusion of 3
+  b2 <- .sr_wr_figures(p, .tb_ids, sr_ph_registry(), list(table2 = "label", suppress_k = 2L))
+  d2 <- b2[[which(vapply(b2, function(x) identical(x$kind, "flow"), NA))]]$data
+  expect_identical(d2$n_excluded, c("3", "0"))
+  # the masked block renders
+  r <- sr_wr_figure_render(b, withr::local_tempdir(), .tb_preset())
+  expect_true(file.exists(r$path))
+  expect_match(r$sha, "^[0-9a-f]{64}$")
 })

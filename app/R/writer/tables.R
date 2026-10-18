@@ -128,6 +128,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
 #' tokens (a missing p, or a row outside a family, prints "-").
 #' @param opts plain list: table2, suppress_k.
 #' @return a table block, where "main".
+# Contract: `ids` are analyses that have run (an unrun id errors in sr_result); the caller filters them.
 .sr_wr_main_table <- function(project, ids, reg, opts) {
   opts <- .sr_wr_opts(opts)
   if (.sr_wr_cache_on()) on.exit(.sr_ph_ctx$cache <- NULL, add = TRUE)
@@ -188,8 +189,8 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
       if (!is.na(cm) && startsWith(cm, "boot_") && !(cm %in% boot_methods)) boot_methods <- c(boot_methods, cm)
       mn <- unname(SR_WR_MEASURE_NAMES[as.character(eff$measure[i])])
       cells[[length(cells) + 1L]] <- list(
-        analysis = id, comparison = as.character(eff$term[i]),
-        measure = if (is.na(mn)) as.character(eff$measure[i]) else mn,
+        analysis = .sr_wr_safe(reg, id), comparison = .sr_wr_safe(reg, as.character(eff$term[i])),
+        measure = if (is.na(mn)) .sr_wr_safe(reg, as.character(eff$measure[i])) else mn,
         estimate = paste0(est, " (", ci, ")"), p = p, padj = padj)
     }
   }
@@ -222,6 +223,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
 #' a table with a row for a flagged term gets the Table 2 footnote (opts$table2 "label") or loses
 #' those rows (opts$table2 "suppress").
 #' @return a list of table blocks.
+# Contract: `id` is an analysis that has run (an unrun id errors in sr_result); the caller filters it.
 .sr_wr_route_tables <- function(project, id, reg, opts) {
   opts <- .sr_wr_opts(opts)
   if (.sr_wr_cache_on()) on.exit(.sr_ph_ctx$cache <- NULL, add = TRUE)
@@ -261,6 +263,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
 
 #' The supplement table of the multiplicity families: one row per sr_family_adjust() row.
 #' @return a table block, or NULL when the SAP has no family.
+# Contract: the families name analyses that have run (an unrun id errors in sr_result); the caller filters them.
 .sr_wr_family_table <- function(project, reg) {
   fams <- names(project$state$sap$families %||% list())
   if (!length(fams)) return(NULL)
@@ -273,7 +276,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
         sr_ph_put(reg, sr_fmt_p(x), "p", sprintf("family:%s:%d:%s", fid, r, field), analysis = fa$analysis[r], value = x)
       }
       rows[[length(rows) + 1L]] <- c(
-        .sr_wr_label(reg, fid), fa$analysis[r], fa$term[r], one(fa$p[r], "p"), one(fa$p_adj[r], "p_adj"),
+        .sr_wr_label(reg, fid), .sr_wr_safe(reg, fa$analysis[r]), .sr_wr_safe(reg, fa$term[r]), one(fa$p[r], "p"), one(fa$p_adj[r], "p_adj"),
         .sr_wr_label(reg, fa$method[r]))
     }
   }
@@ -299,7 +302,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
     s <- dv$reason[r]
     if (is.na(s) || !nzchar(s)) "-" else sr_ph_lift(s, reg, sprintf("deviation:%d", r), dv$analysis[r])
   }, "")
-  df <- data.frame(Analysis = as.character(dv$analysis), Label = txt(dv$label), Kind = txt(dv$kind),
+  df <- data.frame(Analysis = vapply(as.character(dv$analysis), function(a) .sr_wr_safe(reg, a), "", USE.NAMES = FALSE), Label = txt(dv$label), Kind = txt(dv$kind),
                    Reason = reason, Trigger = txt(dv$trigger), stringsAsFactors = FALSE)
   .sr_wr_block("deviations", "Deviations from the locked analysis plan", df, character(), NA_character_,
                "supplement", 0L)

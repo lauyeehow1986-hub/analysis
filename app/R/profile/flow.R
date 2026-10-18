@@ -49,7 +49,12 @@ SR_FLOW_COLS <- c("step", "label", "n_before", "n_after", "n_excluded", "reason"
 }
 
 # A count for a box: a whole number, or "hidden" for NA.
-.sr_fl_n <- function(n) ifelse(is.na(n), "hidden", sprintf("%.0f", n))
+.sr_fl_n <- function(n, k = NULL) {
+  if (is.character(n)) return(ifelse(is.na(n), "hidden", n))   # already text (a writer flow with masked counts)
+  out <- ifelse(is.na(n), "hidden", sprintf("%.0f", n))
+  if (!is.null(k)) out[!is.na(n) & n >= 1 & n <= k - 1] <- paste0("<", k)   # small cells; zero stays "0"
+  out
+}
 
 # ---- the rows ---------------------------------------------------------------------------------------
 
@@ -195,8 +200,13 @@ sr_flow <- function(project, table) {
 #' @param flow what sr_flow() returns.
 #' @param path an .png file name.
 #' @param width,height inches.
+#' @param k NULL (default: every count prints as is) or a whole number: a count of 1 to k - 1 prints as
+#'   "<k" (small-cell suppression; zero stays "0"). A count column that is already text prints as it is.
 #' @return `path`.
-sr_flow_plot <- function(flow, path, width = 7, height = NULL) {
+sr_flow_plot <- function(flow, path, width = 7, height = NULL, k = NULL) {
+  if (!is.null(k) && !(is.numeric(k) && length(k) == 1L && is.finite(k) && k >= 2 && k == round(k))) {
+    stop("k must be NULL or a whole number of at least 2", call. = FALSE)
+  }
   n_total <- .sr_fl_check(flow, path, width, height)
   n <- nrow(flow)
   if (is.null(height)) height <- max(2, 1.5 * (n + 1L) + 0.5)
@@ -214,16 +224,16 @@ sr_flow_plot <- function(flow, path, width = 7, height = NULL) {
   }, add = TRUE)
 
   # the boxes are measured on the open device (the font and size they are drawn with)
-  first_txt <- sprintf("%s\nn = %s", .sr_fl_ascii(first), .sr_fl_n(n_total))
+  first_txt <- sprintf("%s\nn = %s", .sr_fl_ascii(first), .sr_fl_n(n_total, k))
   if (!n) {
     grid::grid.draw(consort::textbox(first_txt, txt_gp = gp, box_fn = grid::rectGrob, box_gp = grid::gpar(fill = "white")))
   } else {
     g <- consort::add_box(txt = first_txt, txt_gp = gp, text_width = tw)
     for (i in seq_len(n)) {
-      side <- sprintf("Excluded (n = %s):", .sr_fl_n(flow$n_excluded[i]))
+      side <- sprintf("Excluded (n = %s):", .sr_fl_n(flow$n_excluded[i], k))
       if (nzchar(flow$reason[i])) side <- paste0(side, "\n", .sr_fl_reason(flow$reason[i]))
       g <- consort::add_side_box(g, txt = side, txt_gp = gp, text_width = tw)
-      g <- consort::add_box(g, txt = sprintf("%s\nn = %s", flow$label[i], .sr_fl_n(flow$n_after[i])),
+      g <- consort::add_box(g, txt = sprintf("%s\nn = %s", flow$label[i], .sr_fl_n(flow$n_after[i], k)),
                             txt_gp = gp, text_width = tw)
     }
     plot(g)

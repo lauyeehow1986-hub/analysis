@@ -190,3 +190,46 @@ test_that("the diagram draws hidden counts and long non-ASCII reasons, and refus
   attr(nt, "n_total") <- NULL
   expect_error(sr_flow_plot(nt, path), "n_total")
 })
+
+# ---- small-cell masking (k) -------------------------------------------------------------------------
+
+test_that(".sr_fl_n masks counts of 1 to k - 1 only when k is given; zero and text are left alone", {
+  expect_identical(.sr_fl_n(c(0, 1, 4, 5, 120, NA)), c("0", "1", "4", "5", "120", "hidden"))
+  expect_identical(.sr_fl_n(c(0, 1, 4, 5, 120, NA), 5L), c("0", "<5", "<5", "5", "120", "hidden"))
+  expect_identical(.sr_fl_n(c("<5", "40", NA), 5L), c("<5", "40", "hidden"))
+})
+
+test_that("sr_flow_plot masks small counts with k, leaves the default alone, and rejects a bad k", {
+  fl <- data.frame(step = "s1", label = "After age filter", n_before = 120, n_after = 117, n_excluded = 3,
+                   reason = "age out of range", stringsAsFactors = FALSE)
+  attr(fl, "n_total") <- 120
+  big <- fl
+  big$n_after <- 100
+  big$n_excluded <- 20
+  p0 <- .fl_png_path()
+  p1 <- .fl_png_path()
+  p2 <- .fl_png_path()
+  sr_flow_plot(fl, p0)
+  sr_flow_plot(fl, p1, k = NULL)
+  expect_identical(.sr_sha256(.sr_read_bytes(p0)), .sr_sha256(.sr_read_bytes(p1)))
+  sr_flow_plot(fl, p2, k = 5L)
+  expect_true(file.exists(p2))
+  expect_false(identical(.sr_sha256(.sr_read_bytes(p0)), .sr_sha256(.sr_read_bytes(p2))))
+  # no small count: k changes nothing
+  q0 <- .fl_png_path()
+  q1 <- .fl_png_path()
+  sr_flow_plot(big, q0)
+  sr_flow_plot(big, q1, k = 5L)
+  expect_identical(.sr_sha256(.sr_read_bytes(q0)), .sr_sha256(.sr_read_bytes(q1)))
+  # a zero exclusion stays "0": same picture with and without k
+  z <- fl
+  z$n_after <- 120
+  z$n_excluded <- 0
+  z0 <- .fl_png_path()
+  z1 <- .fl_png_path()
+  sr_flow_plot(z, z0)
+  sr_flow_plot(z, z1, k = 5L)
+  expect_identical(.sr_sha256(.sr_read_bytes(z0)), .sr_sha256(.sr_read_bytes(z1)))
+  expect_error(sr_flow_plot(fl, .fl_png_path(), k = 1), "k must be")
+  expect_error(sr_flow_plot(fl, .fl_png_path(), k = "5"), "k must be")
+})

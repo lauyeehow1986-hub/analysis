@@ -63,9 +63,19 @@
   out
 }
 
+# A flow with every count as text, a count of 1 to k - 1 as "<k": the block never carries a raw small count.
+.sr_wr_flow_mask <- function(fl, k) {
+  txt <- function(x) vapply(x, function(v) if (is.na(v)) NA_character_ else sr_sdc_value(v, k)$text, "", USE.NAMES = FALSE)
+  out <- fl
+  for (cn in c("n_before", "n_after", "n_excluded")) out[[cn]] <- txt(fl[[cn]])
+  nt <- attr(fl, "n_total")
+  attr(out, "n_total") <- if (length(nt) == 1L) txt(nt) else nt
+  out
+}
+
 # The participant flow of the table of the primary analyses (all of `ids` when none is primary), when it
 # has at least one step.
-.sr_wr_fig_flow <- function(project, ids, reg) {
+.sr_wr_fig_flow <- function(project, ids, reg, k) {
   lab <- vapply(ids, function(id) as.character(.sr_wr_analysis(project, id)$label %||% NA_character_), "")
   use <- ids[!is.na(lab) & lab == "primary"]
   if (!length(use)) use <- ids
@@ -73,7 +83,7 @@
   flows <- list()
   for (tab in tabs) {
     fl <- sr_flow(project, tab)
-    if (nrow(fl) >= 1L) flows[[tab]] <- fl
+    if (nrow(fl) >= 1L) flows[[tab]] <- .sr_wr_flow_mask(fl, k)
   }
   out <- list()
   for (tab in names(flows)) {
@@ -92,12 +102,13 @@
 #' @param opts plain list: table2, suppress_k (the strip of a Kaplan-Meier plot hides counts of 1 to
 #'   suppress_k - 1).
 #' @return a list of figure blocks.
+# Contract: `ids` are analyses that have run (an unrun id errors in sr_result); the caller filters them.
 .sr_wr_figures <- function(project, ids, reg, opts) {
   opts <- .sr_wr_opts(opts)
   if (.sr_wr_cache_on()) on.exit(.sr_ph_ctx$cache <- NULL, add = TRUE)
   for (id in ids) .sr_wr_analysis(project, id)
   c(.sr_wr_fig_km(project, ids, reg, opts$suppress_k), .sr_wr_fig_forest(project, ids, reg),
-    .sr_wr_fig_flow(project, ids, reg))
+    .sr_wr_fig_flow(project, ids, reg, opts$suppress_k))
 }
 
 # ---- rendering --------------------------------------------------------------------------------------
