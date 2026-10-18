@@ -12,8 +12,8 @@
 # drive reruns from its cache. No event holds an absolute path.
 #
 # State: state$runs[[analysis]] = list(analysis, key, extract_sha, ok, cached, error, elapsed,
-#        lib_changed, ok_key); run.completed replaces it, and ok_key is the key of the latest ok run
-#        (kept across a later failed run), the result sr_result() shows.
+#        lib_changed, ok_key, ok_extract_sha); run.completed replaces it. ok_key and ok_extract_sha are the
+#        key and the extract of the latest ok run (kept across a later failed run); sr_result() shows that run.
 
 # ---- the spec as the state holds it (ruling R14) ----------------------------------------------------
 
@@ -52,7 +52,8 @@ sr_reducer_register("run.completed", function(state, event) {
   runs[[id]] <- list(analysis = id, key = key, extract_sha = .sr_sap_chr1(p$extract_sha), ok = ok,
                      cached = isTRUE(p$cached), error = .sr_sap_chr1(p$error), elapsed = elapsed,
                      lib_changed = isTRUE(p$lib_changed),
-                     ok_key = if (ok) key else (runs[[id]]$ok_key %||% NA_character_))
+                     ok_key = if (ok) key else (runs[[id]]$ok_key %||% NA_character_),
+                     ok_extract_sha = if (ok) .sr_sap_chr1(p$extract_sha) else (runs[[id]]$ok_extract_sha %||% NA_character_))
   state$runs <- runs
   state
 })
