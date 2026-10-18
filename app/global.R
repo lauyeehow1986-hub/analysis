@@ -33,7 +33,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "routes/emit", "routes/result", "routes/terms", "sap/sap", "routes/run", "routes/table1", "routes/se", "routes/lm", "routes/marginal", "routes/glm", "routes/cox", "routes/rmst",
   "impute/pool", "impute/impute", "resample/boot", "diagnostics/checks", "diagnostics/plots",
   "sap/deviations", "sap/feas_engine", "sap/feasibility", "resample/coverage", "resample/feas_sim",
-  "writer/placeholders"
+  "writer/placeholders", "writer/sdc_out"
 )
 
 for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {

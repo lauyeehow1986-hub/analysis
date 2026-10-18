@@ -11,7 +11,9 @@
 #   km          list(km, km_risk) = figures$km / figures$km_risk of the cox and rmst routes (a bare km
 #               frame also works: the strip is then read off its n.risk column at the pretty() times).
 #               km: strata, time, surv (+ lower, upper, n.event, n.censor, n.risk as survfit gives them);
-#               km_risk: strata, time, n.risk. One plot, two panels: the curves and the strip.
+#               km_risk: strata, time, n.risk (+ label, the strip text: sr_sdc_km_risk() sets "<5" for a
+#               small count; without it the strip prints n.risk). One plot, two panels: the curves and
+#               the strip.
 #   forest      an effects frame (SR_EFFECT_COLS): needs term, est, lo, hi, scale. est/lo/hi are
 #               already on the reported scale. All rows "ratio": log10 x axis, reference line at 1;
 #               all "difference": linear axis, reference line at 0. Mixed scales are refused. Rows with
@@ -127,7 +129,8 @@ SR_PLOT_RISK_BASE <- 100      # the strip rows sit at 100 + k * step, apart from
   cens <- if (!is.null(cens) && nrow(cens)) mk(cens[, c("strata", "time", "surv")]) else NULL
 
   risk$ypos <- SR_PLOT_RISK_BASE + SR_PLOT_RISK_STEP * (k - as.integer(risk$strata) + 1L)
-  risk$label <- sprintf("%.0f", risk$n.risk)
+  if (!"label" %in% names(risk)) risk$label <- sprintf("%.0f", risk$n.risk)
+  risk$label <- as.character(risk$label)
   risk$panel <- factor(rep(panel_lv[2L], nrow(risk)), levels = panel_lv)
   ylim_s <- data.frame(x = 0, y = c(0, 1), panel = factor(panel_lv[1L], levels = panel_lv))
   ylim_r <- data.frame(x = 0, y = SR_PLOT_RISK_BASE + SR_PLOT_RISK_STEP * c(0.4, k + 0.6),

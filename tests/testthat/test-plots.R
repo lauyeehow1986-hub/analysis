@@ -267,3 +267,20 @@ test_that("sr_figure_save validates its arguments", {
   expect_error(sr_figure_save(p, file.path(d, "x.png"), dpi = -1), "dpi")
   expect_false(file.exists(file.path(d, "x.png")))
 })
+
+test_that("km: a small number at risk prints as <5 in the strip when the frame has a label column", {
+  k <- .pl_km()
+  risk <- k$risk
+  risk$n.risk[1L] <- 3
+  lab <- sr_sdc_km_risk(risk)
+  expect_identical(lab$label[1L], "<5")
+  p <- sr_plot(list(km = k$km, km_risk = lab), "km")
+  texts <- Filter(function(l) inherits(l$geom, "GeomText"), p$layers)
+  expect_length(texts, 1L)
+  expect_true("<5" %in% texts[[1]]$data$label)
+  .pl_built(p)
+  # without a label column the strip still draws n.risk
+  p0 <- sr_plot(list(km = k$km, km_risk = risk), "km")
+  t0 <- Filter(function(l) inherits(l$geom, "GeomText"), p0$layers)
+  expect_false("<5" %in% t0[[1]]$data$label)
+})
