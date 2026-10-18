@@ -12,6 +12,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-03 | P1a foundation done (branch `p1a-foundation`, Tasks 1-12): core (util, audit, events, project, hardware, libsnap, hash, lint, exec), design spec/compose, writer numfmt, and the bslib shell with the project create/open module. final-review fixes (I1 torn/failed audit writes, I2 parse_json only, I3 events/audit cross-check on open, M1 atomic rewrites). 2295 tests pass, `LINT OK` |
 | 2026-10-10 | P1b data layer done (branch `p1b-data`, Tasks 1-23): DuckDB ingest to a Parquet store (chunked, resumable, external mode, pre-flight), dictionaries (CSV, REDCap CSV / ODM), join and cohort builder, profiling, the DQ check library (6 domains), Data Action Suggestor, recipe, readiness panel and the Data tab; `docs/data.md` user guide; `tools/scale_test.R`. Full suite 6558 pass, 0 fail, 2 skip (no fst package, no sas7bdat fixture), `LINT OK (41 files)`. Scale smoke 2M x 20 on the laptop and with `--profile=locked16`: PASS (peak RSS 1.07 GB / 0.83 GB) |
 | 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Final review fixed: `sr_sap_add` compiles every spec and checks binary event coding before the lock. Full suite 9967 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
+| 2026-10-18 | P1c.1 study feasibility verdict done (branch `p1c1-feasibility`, Tasks 1-6): the outcome-blind engine (`app/R/sap/feas_engine.R`: SEs, design effect, h, MDE, tiers, blockers, warnings), the `feasibility.assessed` / `feasibility.decided` events, assess / decide / report / fragment API (`app/R/sap/feasibility.R`), the lock gate (`sr_sap_check` feasibility rows, the verdict frozen into `sr_sap_hash`, `sr_sap_remove` and `sr_run` honour a stop). Validation: the predicted null-effect SE is within 10% of the empirical SD in 11/11 cells at 1000 reps (with and without clustering), and on NHEFS the marginal-value prediction is conservative (predicted MD SE 0.472 vs actual 0.463); `tools/feas_sim.R`, `docs/validation.md` section 3. `docs/analysis.md` section 4. Full suite 10691 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), `LINT OK (63 files)` |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -20,13 +21,15 @@ design; this file holds *what has happened* and *what we learned*.
 3. ~~Execute P1a in a worktree (branch `p1a-foundation`)~~ done 2026-10-03; review and merge the branch.
 4. ~~P1b data layer~~ done 2026-10-10 (branch `p1b-data`); review and merge the branch.
 5. ~~P1c analysis~~ done 2026-10-18 (branch `p1c-analysis`), merged to `main` (PR #1).
-6. **Next: execute P1c.1** (study feasibility verdict, spec catalogue O; plan
-   `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`, branch `p1c1-feasibility`). The SAP lock
-   requires its verdict, so it comes before P1d.
-7. Then **write the P1d plan** (router + writer + freeze + UI), then the new **P1e scale** plan
+6. ~~P1c.1 study feasibility verdict~~ done 2026-10-18 (branch `p1c1-feasibility`; plan
+   `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`); review and merge the branch. The SAP lock
+   requires its verdict.
+7. **Next: write the P1d plan** (router + writer + freeze + UI), then the **P1e scale** plan
    (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
    them in that order.
-   - P1d also owns: the SAP_v1.docx and lock UI, Methods/Results prose from the P1c fragment inputs,
+   - P1d also owns: the SAP_v1.docx and lock UI, the feasibility panel and report docx, the Methods
+     sentence from the `sr_feasibility_fragment` inputs and the claim-guard rule that an exploratory
+     analysis needs hypothesis-generating language, Methods/Results prose from the P1c fragment inputs,
      chunk-level checkpoint/cancel and parallel workers for the bootstrap and MI (ExtendedTask).
    - Open P1c limitations to carry: interactions accept only linear and factor terms (no interaction
      with a quadratic or spline term); the censoring check ignores strata and uses Efron ties; a
@@ -141,6 +144,25 @@ design; this file holds *what has happened* and *what we learned*.
 - **Coverage simulation:** `Rscript tools/coverage_sim.R [cells] [reps_scale]` takes about 40 minutes
   on the laptop with parallel workers (`SR_COVERAGE_WORKERS`; results do not depend on the worker
   count) and hours serially. A failing cell is a finding; never widen the tolerance.
+- **Feasibility SE simulation:** `Rscript tools/feas_sim.R [cells] [reps_scale]` runs the 11 cells at
+  1000 replications in about 95 s with 6 parallel workers (`SR_FEAS_SIM_WORKERS`; results do not depend
+  on the worker count), and a few times that serially. A failing cell is a finding; never widen the 10%
+  tolerance or change a formula away from spec catalogue O. Recorded results: `docs/validation.md`
+  section 3.
+- **Every new lock needs `.fx_feasible` in tests:** `sr_sap_lock` refuses a primary analysis with no
+  current feasibility decision, so a test that locks calls `sr_sap_lock(.fx_feasible(p))` (it assesses
+  and decides every primary; a clustered analysis gets a test ICC).
+- **Feasibility is blind, so expected events are scaled, not counted:** the events among the complete
+  cases are `events_total * n_cc / n_obs`. Counting them would cross the outcome with the missingness
+  of the other columns. The permutation test (outcome shuffled among non-missing rows) must leave the
+  assessment unchanged.
+- **The feasibility element of the SAP hash is omitted when empty,** so locks made before P1c.1 keep
+  their hash. A stop on any pre-specified analysis (secondary included) blocks the lock; missing,
+  stale, no-decision and revise checks apply to primaries only. A stop is replaced only with a reason,
+  and that is allowed even when the assessment is stale.
+- **R45 now surfaces before the lock:** an `event_value` that codes no row (for example "yes" on a
+  column the store holds as logical) is a "no events" blocker in the feasibility verdict, not a failure
+  at the run.
 - **Claude Code subagents and docs:** a hook can refuse a subagent's Write of a `.md` deliverable as a
   "report file"; write such docs from the main session.
 - **Claude Code Bash tool and big heredocs:** a very large single heredoc can be rejected with

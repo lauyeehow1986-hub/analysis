@@ -1,10 +1,11 @@
-# StatRouter analysis guide (P1c)
+# StatRouter analysis guide (P1c, P1c.1)
 
-This guide covers the analysis layer built in phase P1c: the statistical analysis plan (SAP) and its
-lock, the run engine, the analysis routes, multiple imputation, the bootstrap, diagnostics, sensitivity
-nodes, deviations and multiplicity. The data layer (ingest, store, profiling, data quality) is described
-in [data.md](data.md). The validation record (CI-coverage simulation and textbook reproductions) is in
-[validation.md](validation.md).
+This guide covers the analysis layer built in phases P1c and P1c.1: the statistical analysis plan (SAP)
+and its lock, the study feasibility verdict that the lock requires, the run engine, the analysis
+routes, multiple imputation, the bootstrap, diagnostics, sensitivity nodes, deviations and
+multiplicity. The data layer (ingest, store, profiling, data quality) is described in
+[data.md](data.md). The validation record (CI-coverage simulation, feasibility SE simulation and
+textbook reproductions) is in [validation.md](validation.md).
 
 StatRouter is a research and governance tool, not for clinical or diagnostic use. Every output needs
 review by a qualified statistician.
@@ -23,7 +24,8 @@ review by a qualified statistician.
   sensitivity node; the primary analysis changes only through a rule written into the locked SAP.
 - **Effect sizes, not p-values.** Diagnostic verdicts are effect-size thresholds. Descriptive routes
   (Table 1 and the `*_describe` twins) carry no p-values.
-- **Event-sourced.** Every SAP change, lock, run and post-lock analysis is an event in `events.jsonl`;
+- **Event-sourced.** Every SAP change, feasibility assessment and decision, lock, run and post-lock
+  analysis is an event in `events.jsonl`;
   replaying the events gives the same state as the live session.
 
 ## 2. The analysis spec
@@ -31,7 +33,7 @@ review by a qualified statistician.
 Every analysis is a route id plus a spec (a named list). Every spec carries a `purpose` (`describe`,
 `predict` or `explain-causal`) that must match the route's; every model route also requires `layers`
 and `seed` (Table 1 requires `seed`, and also a `layers` list because the composition check reads
-it). Each route's own fields are in section 5. `sr_spec_validate()`
+it). Each route's own fields are in section 6. `sr_spec_validate()`
 checks the spec against the route's schema, and `sr_compose_check()` checks that the layers can be
 combined (disallowed combinations and unresolved choices such as `choices$mi_x_boot`).
 
@@ -39,8 +41,8 @@ combined (disallowed combinations and unresolved choices such as `choices$mi_x_b
 
 | layer | values |
 |---|---|
-| `missing` | `cc` (complete cases) or `mi` (multiple imputation, section 6) |
-| `resampling` | `none` or `bootstrap` (section 7) |
+| `missing` | `cc` (complete cases) or `mi` (multiple imputation, section 7) |
+| `resampling` | `none` or `bootstrap` (section 8) |
 | `clustered` | `TRUE` / `FALSE` |
 | `weights` | `none`, `ipw`, `overlap`, `survey` |
 | `matching` | `TRUE` / `FALSE` |
@@ -60,9 +62,11 @@ an interaction (enter a squared column as a linear term instead).
 sensitivity. The positions refer to the row order of the analysis extract, which `sr_extract()` sorts by
 the selected columns, not to the order of the store. `exclude_rows` is refused on rmst.
 
-## 3. The SAP workflow: add, family, rule, lock
+## 3. The SAP workflow: add, assess, decide, family, rule, lock
 
-The SAP is drafted before any outcome data is seen and locked before anything runs.
+The SAP is drafted before any outcome data is seen and locked before anything runs. The order is add,
+assess, decide, family, rule, lock. A lock without an assessment and a decision for every primary
+analysis is refused (section 4).
 
 1. **Add.** `sr_sap_add()` adds an analysis (id, route, table, label, spec, parent, addresses) or
    replaces the analysis with the same id. The id must match `^[a-z][a-z0-9_]{0,39}$`. It refuses a bad
@@ -71,20 +75,261 @@ The SAP is drafted before any outcome data is seen and locked before anything ru
    route ..."): a layer P1c cannot run (weighting, matching, Bayesian), invalid MI settings (no `m`,
    `m = 1`, MI with clustered data or Firth) or a bootstrap with B below 20. A binary outcome or survival
    status with no `event_value` / `status_event` is refused unless the stored column is logical or all
-   0/1. `sr_sap_remove()` removes an analysis before the lock.
-2. **Family.** `sr_sap_family()` groups analyses into a multiplicity family with a p-value adjustment
+   0/1. `sr_sap_remove()` removes an analysis before the lock; it refuses one whose feasibility decision is
+   `stop`.
+2. **Assess.** `sr_feasibility_assess()` computes the outcome-blind feasibility verdict of an
+   analysis and records it (section 4).
+3. **Decide.** `sr_feasibility_decide()` records the decision on that verdict: `proceed`,
+   `exploratory`, `revise` or `stop` (section 4).
+4. **Family.** `sr_sap_family()` groups analyses into a multiplicity family with a p-value adjustment
    method: `holm`, `hochberg`, `hommel`, `bonferroni`, `BH`, `BY` or `none`.
-3. **Rule.** `sr_sap_rule()` pre-specifies the response when a check fails for an analysis: show the
+5. **Rule.** `sr_sap_rule()` pre-specifies the response when a check fails for an analysis: show the
    pre-specified alternative as a sensitivity result (`add_sensitivity`) or make it the primary result
    (`replace_primary`). For both actions the alternative must be a sensitivity analysis whose parent is
    that analysis.
-4. **Lock.** `sr_sap_check()` lists anything that blocks the lock (including an `event value` row,
-   re-checked against the current data); `sr_sap_lock()` refuses while any
-   block remains, then records the SAP hash (`sap_hash`), the store hash of every table used
-   (`tables$store_hash`), the library snapshot hash (`libsnap_hash`) and `locked_at`. Every run requires
-   the lock. Amending a locked SAP is a later phase (section 11).
+6. **Lock.** `sr_sap_check()` lists anything that blocks the lock (including an `event value` row,
+   re-checked against the current data, and the `feasibility` rows of section 4); `sr_sap_lock()`
+   refuses while any block remains, then records the SAP hash (`sap_hash`), the store hash of every
+   table used (`tables$store_hash`), the library snapshot hash (`libsnap_hash`) and `locked_at`. Every
+   run requires the lock, and `sr_run()` refuses a project with a stopped analysis. Amending a locked SAP is a later phase (section 12).
 
-## 4. The run engine (`app/R/routes/run.R`)
+## 4. Study feasibility (before the lock)
+
+Before the SAP is locked, each primary analysis gets a feasibility verdict: can this dataset estimate
+the analysis precisely enough to be worth running? The verdict is the expected precision of the
+estimate, never the expected result. Choosing whether to analyse from an expected effect is outcome
+selection, and power from an observed effect stays refused. The code is in `app/R/sap/feas_engine.R`
+(the pure engine) and `app/R/sap/feasibility.R` (the events, decisions and the lock gate).
+
+### What is blind, and why
+
+The verdict is computed from what the project can already show while blind:
+
+- the analysed n, after the analysis's exclusions and its complete-case filter;
+- the outcome's own marginals: the marginal risk (binary), the marginal SD (continuous), and the
+  total events and the pooled, exposure-blind (time, event) pairs (survival);
+- the exposure's marginals and the exposure-on-covariate structure: its levels and counts, the R² of
+  the exposure on the planned covariates, the overlap of the propensity (near-positivity) and
+  separation;
+- cluster counts and sizes, and the number of model parameters of the compiled design (the engine
+  evaluates the route's own term builder, so the parameters and the exposure model are those that
+  will run).
+
+It never computes an outcome-by-exposure or outcome-by-covariate statistic. The outcome marginals are
+taken over all rows with an observed outcome, not only the complete cases. Counting the events among
+the complete cases would cross the outcome with the missingness of the other columns, which is an
+outcome-by-covariate statistic. The expected events among the complete cases are therefore scaled
+(total events x n of complete cases / n with an observed outcome), never counted. A test permutes the
+outcome among its non-missing rows and checks that the stored assessment does not change.
+
+Two quantities need an outcome-by-covariate statistic: the outcome R² explained by the covariates
+(continuous outcome) and the intra-cluster correlation (ICC). They are never estimated from the data.
+You enter each as an assumption with a written justification, or the verdict uses the marginal value,
+which is conservative (wider than the eventual adjusted interval). A clustered analysis must state an
+ICC, because no conservative marginal value exists.
+
+### Assess
+
+```r
+sr_feasibility_assess(project, analysis_id,
+                      delta = list(value = , measure = , source = ),
+                      assumptions = list(r2_y = list(value = , justification = ),
+                                         icc  = list(value = , justification = )))
+```
+
+It returns the project with a `feasibility.assessed` event appended. Both `delta` and `assumptions`
+are optional (an ICC is required for a clustered analysis).
+
+- **`delta`** is the smallest clinically important difference on the scale of the estimand, with its
+  source (an MCID from the literature, a guideline, a trial convention). `measure` must be one the
+  analysis reports. A difference measure takes an absolute value above 0. A ratio measure takes a
+  ratio above 0 and not 1; the effect is taken as |log(delta)|. Without a delta the verdict reports
+  precision only and says so.
+- **`assumptions$r2_y`** (a number in [0, 1)) applies to a continuous outcome only. **`assumptions$icc`**
+  (a number in [0, 1)) applies to a clustered analysis only. Each needs a non-empty justification.
+
+One example per measure (the route that reports it is in the comment):
+
+```r
+# MD (lm): 5 mmHg, with an assumed outcome R2 explained by the covariates
+p <- sr_feasibility_assess(p, "bp",
+  delta = list(value = 5, measure = "MD", source = "difference the clinical team agreed matters"),
+  assumptions = list(r2_y = list(value = 0.20, justification = "similar models in prior cohort work")))
+
+# RD (logistic or modpois with marginal effects): 2 percentage points
+p <- sr_feasibility_assess(p, "mortality",
+  delta = list(value = 0.02, measure = "RD", source = "guideline threshold for a worthwhile change"))
+
+# RR (modpois, or logistic with marginal effects): a 20% relative reduction
+p <- sr_feasibility_assess(p, "readmit_rr",
+  delta = list(value = 0.80, measure = "RR", source = "trial convention for this endpoint"))
+
+# OR (logistic): clustered by ward, so an ICC is required
+p <- sr_feasibility_assess(p, "infection",
+  delta = list(value = 0.70, measure = "OR", source = "minimum odds ratio the unit would act on"),
+  assumptions = list(icc = list(value = 0.05, justification = "ICC reported for infection by ward in a prior audit")))
+
+# HR (cox): total events are what matters
+p <- sr_feasibility_assess(p, "survival",
+  delta = list(value = 0.80, measure = "HR", source = "hazard ratio the steering group set as important"))
+
+# RMST_diff (rmst): in the unit of the time column
+p <- sr_feasibility_assess(p, "rmst_36m",
+  delta = list(value = 3, measure = "RMST_diff", source = "3 months of event-free time at tau, from the protocol"))
+```
+
+The assessment is tied to the data and the spec it was made on (the store hash of the table and a
+hash of the route, version, table and spec). If either changes, the assessment is stale.
+
+### The formulas
+
+The engine computes the approximate standard error of each (contrast x measure) under no effect.
+Every number comes from the formula applied to the inputs above; nothing is fitted to the outcome.
+
+- `x` is the exposure. `v = n * Var(x) * (1 - R2x)`, where `n` is the number of complete cases, `Var(x)`
+  is `p(1 - p)` for a binary exposure and the variance for a continuous one, and `R2x` is the R² of the
+  exposure on the planned covariates. For a factor exposure each contrast against the reference has
+  `v = (1 - R2x) / (1 / n_k + 1 / n_ref)`.
+- `pi` is the marginal risk and `sigma_y` the marginal SD of the outcome.
+
+| measure | standard error | scale |
+|---|---|---|
+| MD | `sigma_y * sqrt(1 - R2y) / sqrt(v)`, with `R2y` the assumed value (default 0) | identity |
+| RD | `sqrt(pi * (1 - pi) / v)` | identity |
+| RR | `sqrt((1 - pi) / (pi * v))` | log |
+| OR | `1 / sqrt(v * pi * (1 - pi))` | log |
+| HR | Schoenfeld: `1 / sqrt(D * Var(x) * (1 - R2x))`, where `D` is the expected events among the complete cases (for a contrast, `Var(x)` is `p_k (1 - p_k)` and `D` is scaled to the two groups) | log |
+| RMST_diff | simulation: draw both groups with replacement from the pooled (time, event) pairs at the observed group sizes, take each group's RMST up to `tau`, and take the SD of the difference over 500 draws (`sr.feas_rmst_sims`, environment `SR_FEAS_RMST_SIMS`). A draw that has no RMST is dropped. | identity |
+
+- **Clustering.** A clustered analysis multiplies the variance by the design effect
+  `1 + ((cv^2 + 1) * m - 1) * ICC` (Eldridge 2006), where `m` is the mean cluster size and `cv` the
+  coefficient of variation of the cluster sizes.
+- **Missing data.** The verdict is computed at the complete-case n. Under multiple imputation the
+  report also gives `se_upper`, the SE at n with an observed outcome, so the range from the
+  complete-case end to the other end is visible. The tier uses the complete-case end.
+- **Results.** The 95% CI half-width is `h = 1.96 * SE` and the minimum detectable effect at 80% power
+  is `MDE = 2.80 * SE`. Both are on the reporting scale, so ratio measures are exponentiated.
+
+The predicted SEs are checked against the spread of the estimates the analysis actually produces,
+over 1000 simulated datasets per cell, in [validation.md](validation.md) (section 3). All 11 cells
+(each of MD, RD, RR, OR, HR and RMST, with and without clustering; clustered RMST is refused by the
+route and has no cell) are within 10%. On NHEFS the predicted SE of the marginal MD, from the marginal
+values with no assumptions, is 0.472 against 0.463 actually obtained.
+
+### Tiers, blockers and warnings
+
+With a `delta`, the rows of the delta's measure are tiered. With `d = |log(delta)|` for a ratio and
+`d = delta` for a difference:
+
+| tier | rule | advice |
+|---|---|---|
+| `adequate` | `2.80 * SE <= d` (the MDE is no larger than the effect that matters) | proceed |
+| `limited` | `1.96 * SE <= d < 2.80 * SE`: the study can probably rule out an effect that large but has under 80% power to detect one | proceed, stating the precision in the Methods |
+| `inadequate` | `1.96 * SE > d`: the study can neither reliably detect nor rule out the effect | revise, stop, or exploratory |
+| `precision_only` | no `delta`, or a row of another measure than the delta's | proceed |
+| `not_applicable` | the route reports no effect measure (Table 1 and other descriptive or unknown routes) | proceed |
+| `cannot_run` | at least one blocker | revise or stop |
+
+The overall tier is the worst tier among the rows of the delta's measure. Rows of the other measures
+(for example RR and OR when the delta is on RD) are `precision_only`.
+
+**Blockers** make the tier `cannot_run` whatever the delta is:
+
+- no complete-case row; the analysis has no single exposure column;
+- a continuous exposure that does not vary (`Var(x) == 0`); a continuous exposure has no level blocker;
+- a categorical exposure with fewer than two levels that have a complete-case row, or a level with no
+  complete-case row;
+- a constant outcome: no events (or every row an event) for a binary outcome, no events for a
+  survival outcome, an SD of 0 for a continuous outcome. An `event_value` that codes no row shows up
+  here as "no events", now before the lock rather than at the run;
+- more model parameters than the complete-case rows (continuous outcome), or than the expected events
+  (survival) or the smaller of the expected events and non-events (binary);
+- an exposure that the covariates predict perfectly (a positivity violation);
+- an rmst `tau` beyond the longest follow-up;
+- an outcome that cannot be coded or a design that cannot be built (for example `exclude_rows` beyond
+  the data), given as "outcome: ..." or "design: ...";
+- a precision that could not be computed.
+
+**Warnings** are shown and never pass or fail:
+
+- near-positivity: more than 5% of the rows have a propensity outside [0.01, 0.99];
+- fewer than 10 events per model parameter (sparse-data bias); for a logistic analysis the warning
+  offers a pre-specified Firth penalty;
+- fewer than 30 clusters, where cluster-robust SEs are unreliable.
+
+### Decide
+
+```r
+sr_feasibility_decide(project, analysis_id, decision, reason)
+```
+
+`decision` is one of:
+
+- `proceed`: the analysis stays primary.
+- `exploratory`: the analysis is labelled exploratory. The decision is stored and appears in the report;
+  the writer (P1d) will require hypothesis-generating language for it.
+- `revise`: go back and change the design before the lock (fewer terms, pooled sparse levels, a
+  different estimand, a composite outcome, a longer horizon). A revise decision blocks the lock.
+  Assessing again clears it. Revisions are outcome-blind and are not deviations, because nothing is
+  locked yet.
+- `stop`: the project is stopped with the reason.
+
+A `reason` is required for `exploratory`, `revise` and `stop`, for any decision that replaces a stop,
+and for `proceed` when the tier is `inadequate` or `precision_only`. `proceed` and `exploratory` are
+refused when the tier is `cannot_run`. A decision needs a current assessment: with none, or with a stale
+one (the data or the spec changed since it was made), the call is refused and you assess again. The
+one exception is replacing a stop, which is allowed on a stale assessment (with a reason).
+
+### Stop
+
+A stop is sticky. While an analysis carries one:
+
+- it cannot be assessed again, and `sr_sap_remove()` refuses it;
+- `sr_run()` refuses the whole project ("the project is stopped: ...");
+- the lock is blocked.
+
+Reverse it with `sr_feasibility_decide()` and a reason, which replaces the stop with another decision.
+A stop on any pre-specified analysis, a secondary one included, blocks the lock.
+
+### The lock gate
+
+`sr_sap_check()` adds one `feasibility` row per problem, and `sr_sap_lock()` refuses while any is a
+block. The rows are, per analysis:
+
+| row | applies to |
+|---|---|
+| `<id>: no feasibility assessment` | primary |
+| `<id>: the feasibility assessment is stale (the data changed)` or `(the spec changed)` | primary |
+| `<id>: no feasibility decision` | primary |
+| `<id>: decision is revise: change the design, assess and decide again` | primary |
+| `<id>: decision is stop (<reason>)` | any pre-specified analysis |
+
+A secondary analysis can be assessed but is never gated, other than by a stop. When nothing blocks,
+the row reads "every primary analysis has a current feasibility decision".
+
+### Frozen at the lock
+
+The feasibility record (assessment and decision) of every pre-specified analysis is part of the SAP
+hash, so changing a verdict afterwards would change the hash. The element is left out of the hash when
+there is none, so a SAP locked before P1c.1 keeps its hash. After the lock, `sr_feasibility_assess()`
+and `sr_feasibility_decide()` are refused with "the SAP is locked: the feasibility verdict is frozen",
+and the verdict is never recomputed: `sr_feasibility()` and the report show it as recorded.
+
+### Report and Methods inputs
+
+- `sr_feasibility(project, analysis_id)` returns `list(assessment, decision, stale)`.
+- `sr_feasibility_report(project)` returns one row per pre-specified, assessed analysis and contrast
+  and measure: `analysis`, `label`, `route`, `contrast`, `measure`, `n_cc`, `events` (expected events
+  among the complete cases), `prevalence`, `se`, `h`, `mde`, `se_upper`, `delta`, `delta_measure`,
+  `delta_source`, `tier`, `decision`, `reason`, `stale`, `blockers` and `warnings`. `prevalence` is the
+  exposure prevalence among the complete cases (`n_k / n_cc` for the row's level), and NA for a
+  continuous exposure.
+- `sr_feasibility_fragment(project, analysis_id)` returns the inputs of the Methods sentence, as named
+  values and a template id, not prose: `n`, `events`, `prevalence` (a named list of each level's
+  share of the complete cases), `h`, `mde`, `delta`, `delta_source` and `tier`. The prose is written in
+  P1d.
+
+## 5. The run engine (`app/R/routes/run.R`)
 
 - **Extract.** `sr_extract()` selects the analysis columns from the store, ordered by every selected
   column (`SELECT cols FROM t ORDER BY cols`), so row positions are stable for a given column set. The
@@ -101,7 +346,7 @@ The SAP is drafted before any outcome data is seen and locked before anything ru
   locked one, the run is flagged `lib_changed` (and listed as a deviation). `sr_result()` returns the
   stored result: effect rows, tables, figure data, fragment inputs and flags.
 
-## 5. Routes
+## 6. Routes
 
 All rows a route reports share the effect columns (`term`, `measure`, `est`, `lo`, `hi`, `p`, `role`,
 ...). The primary-role rows are the estimand; covariate rows are reported for completeness; descriptive
@@ -151,7 +396,7 @@ Notes per route:
   measure, conditional or marginal level). The population is "complete cases", or "all analysed (MI)"
   under multiple imputation.
 
-## 6. Multiple imputation (`layers$missing = "mi"`)
+## 7. Multiple imputation (`layers$missing = "mi"`)
 
 - Options in `spec$mi`: `m` (a whole number of at least 2, or `"auto"`), `maxit` (default 10) and `aux`
   (auxiliary columns used only in the imputation model). A categorical auxiliary column with more than
@@ -169,7 +414,7 @@ Notes per route:
   limit of the largest fmi, never below the pilot's 20 and capped at 200.
 - Refused: MI with clustered data, and MI with Firth.
 
-## 7. Bootstrap (`layers$resampling = "bootstrap"`)
+## 8. Bootstrap (`layers$resampling = "bootstrap"`)
 
 - Options: `spec$boot$B` (a whole number of at least 20, default 2000) and `spec$boot$type`:
   `percentile` (default), `bca` or `normal`. With `layers$clustered = TRUE` the spec must set
@@ -191,7 +436,7 @@ Notes per route:
 - The coverage of the MI, bootstrap, MI-bootstrap and cluster intervals is checked by simulation; see
   [validation.md](validation.md).
 
-## 8. Diagnostics (`app/R/diagnostics/`)
+## 9. Diagnostics (`app/R/diagnostics/`)
 
 `sr_diag_checks()` is the catalogue; `sr_diag_applicable()` picks the checks that apply to an analysis.
 `sr_diag_run()` runs the applicable checks (or the ones named) of an analysis that has run
@@ -220,7 +465,7 @@ verdict. A value that cannot be computed is a `warn`.
 - Figures (`app/R/diagnostics/plots.R`) are ggplot objects exported deterministically with ragg;
   plot data are capped at 5000 points by a seeded sample.
 
-## 9. After the lock: sensitivity nodes and post-lock analyses
+## 10. After the lock: sensitivity nodes and post-lock analyses
 
 - **`sr_analysis_add()`** adds an analysis after the lock (an exploratory, post hoc or unplanned
   sensitivity analysis). It needs a reason, an id matching `^[a-z][a-z0-9_]{0,39}$`, and the spec is
@@ -230,7 +475,7 @@ verdict. A value that cannot be computed is a `warn`.
   - if a SAP rule covers the analysis and check, the rule fires (`sap.rule_fired`). `replace_primary`
     makes the pre-specified alternative the primary result and the analysis a sensitivity analysis;
     `add_sensitivity` adds nothing new, because the alternative is already pre-specified;
-  - otherwise it adds the check's sensitivity analysis (the mapping in section 8) as
+  - otherwise it adds the check's sensitivity analysis (the mapping in section 9) as
     `<analysis>_<check>`: the analysis part is lower-cased, characters outside `[a-z0-9_]` become `_`,
     an `a` is prefixed if it does not start with a letter, and it is shortened so the whole id stays within 40 characters; an id already held by another
     analysis is refused before anything is written;
@@ -239,7 +484,7 @@ verdict. A value that cannot be computed is a `warn`.
 
   The primary analysis never changes without a rule. Applying twice changes nothing.
 
-## 10. Deviations and multiplicity
+## 11. Deviations and multiplicity
 
 - **`sr_deviations()`** lists every departure from the locked SAP, by kind: `exploratory`, `post_hoc`,
   `unplanned_sensitivity`, `rule_fired` and `lib_changed`.
@@ -251,9 +496,17 @@ verdict. A value that cannot be computed is a `warn`.
   `replace_primary` rule is represented by its alternative. It is refused for an unknown family or when
   a member has not run successfully.
 
-## 11. Out of scope in P1c
+## 12. Out of scope in P1c and P1c.1
 
 The phase that owns each item is in brackets.
+
+- The feasibility panel and the feasibility-report docx [P1d]. P1c.1 returns the report as a data
+  frame and the Methods inputs as a fragment. The Methods sentence from the fragment, and the
+  claim-guard rule that an exploratory analysis needs hypothesis-generating language [P1d writer].
+  Plain-language guided wording [P4].
+- The Riley (pmsampsize) criteria for prediction routes [P6]. No prediction route exists yet; the
+  engine marks a route it does not know as `not_applicable`.
+- Clustered RMST. The route refuses it, so it has no feasibility cell.
 
 - The SAP_v1.docx document and the lock UI [P1d]. P1c owns the `sap.*` events, the lock and its
   refusals, because every run needs them.
