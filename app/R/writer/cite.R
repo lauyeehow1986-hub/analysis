@@ -119,47 +119,108 @@ SR_CITE_ACCENTS <- data.frame(
   trimws(gsub("[[:space:]]+", " ", x))
 }
 
-# CSL authors from a person object: {family, given}, or {literal} for an organisation.
+# A trailing Jr, Sr, II, III or IV (with or without a stop) of a family name moves to the suffix:
+# "Harrell Jr" -> family "Harrell", suffix "Jr".
+.sr_cite_author <- function(family, given) {
+  family <- .sr_cite_clean(family)
+  given <- .sr_cite_clean(given)
+  m <- regmatches(family, regexec("^(.*[^ ,])[ ,]+(Jr|Sr|II|III|IV)[.]?$", family))[[1L]]
+  if (length(m) == 3L) {
+    list(family = m[2L], given = given, suffix = m[3L])
+  } else {
+    list(family = family, given = given)
+  }
+}
+
+# CSL authors from a person object: {family, given[, suffix]}, or {literal} for an organisation.
 .sr_cite_authors <- function(a) {
   if (is.null(a) || !length(a)) return(list())
   lapply(seq_along(a), function(i) {
     p <- a[i]
-    fam <- .sr_cite_clean(paste(as.character(p$family), collapse = " "))
-    giv <- .sr_cite_clean(paste(as.character(p$given), collapse = " "))
-    if (nzchar(fam)) list(family = fam, given = giv) else list(literal = giv)
+    fam <- paste(as.character(p$family), collapse = " ")
+    giv <- paste(as.character(p$given), collapse = " ")
+    if (nzchar(fam)) .sr_cite_author(fam, giv) else list(literal = .sr_cite_clean(giv))
   })
 }
 
-# The CSL item of a bibentry, as a software item (so it is cited as a package, not as its article).
-.sr_cite_software <- function(id, cit, version, genre) {
-  yr <- suppressWarnings(as.integer(as.character(cit$year)[1L]))
-  it <- list(id = id, type = "software", author = .sr_cite_authors(cit$author),
-             title = .sr_cite_clean(cit$title), version = version, genre = genre)
-  if (length(yr) == 1L && !is.na(yr)) it[["issued"]] <- list(`date-parts` = list(list(yr)))
-  doi <- cit$doi
-  if (is.character(doi) && length(doi) == 1L && nzchar(doi)) it[["DOI"]] <- doi
+# The authors of an installed package, from its DESCRIPTION: the "aut" persons of Authors@R; else the
+# Author field; else the maintainer's name.
+.sr_cite_desc_authors <- function(d) {
+  a <- d[["Authors@R"]]
+  if (is.character(a) && length(a) == 1L && nzchar(a)) {
+    ps <- tryCatch(eval(parse(text = a), envir = list(person = utils::person), enclos = baseenv()),
+                   error = function(e) NULL)
+    if (inherits(ps, "person")) {
+      keep <- vapply(seq_along(ps), function(i) "aut" %in% ps[i]$role, NA)
+      if (any(keep)) return(.sr_cite_authors(ps[keep]))
+    }
+  }
+  by_name <- function(nm) {
+    nm <- .sr_cite_clean(nm)
+    if (!nzchar(nm)) return(NULL)
+    suf <- regmatches(nm, regexec("^(.*[^ ,])[ ,]+(Jr|Sr|II|III|IV)[.]?$", nm))[[1L]]
+    base <- if (length(suf) == 3L) suf[2L] else nm
+    toks <- strsplit(base, " ", fixed = TRUE)[[1L]]
+    if (length(toks) < 2L) return(list(literal = nm))
+    fam <- toks[length(toks)]
+    giv <- paste(toks[-length(toks)], collapse = " ")
+    .sr_cite_author(if (length(suf) == 3L) paste(fam, suf[3L]) else fam, giv)
+  }
+  au <- d[["Author"]]
+  if (is.character(au) && length(au) == 1L && nzchar(au)) {
+    # "A B [aut, cre], C D [ctb] (note)": split at commas outside brackets; keep "aut" (or unmarked) names
+    parts <- trimws(strsplit(gsub("[[:space:]]+", " ", au), ",[[:space:]]*(?![^[]*[]])|;| and | & ", perl = TRUE)[[1L]])
+    parts <- parts[nzchar(parts)]
+    role <- ifelse(grepl("[[][^]]*[]]", parts), grepl("[[][^]]*aut", parts), TRUE)
+    parts <- gsub("[[:space:]]*([[][^]]*[]]|[(][^)]*[)])", "", parts[role])
+    out <- Filter(Negate(is.null), lapply(parts, by_name))
+    if (length(out)) return(out)
+  }
+  mt <- sub("[[:space:]]*<.*$", "", as.character(d[["Maintainer"]] %||% ""))
+  Filter(Negate(is.null), list(by_name(mt)))
+}
+
+# The CSL item of an R package or of R: type software, "<genre> version <v>".
+.sr_cite_software <- function(id, authors, title, year, version, genre, doi = NA_character_) {
+  it <- list(id = id, type = "software", author = authors, title = title, version = version, genre = genre)
+  if (length(year) == 1L && !is.na(year)) it[["issued"]] <- list(`date-parts` = list(list(as.integer(year))))
+  if (length(doi) == 1L && !is.na(doi) && nzchar(doi)) it[["DOI"]] <- doi
   it
 }
 
-#' The CSL item of an installed R package, from utils::citation(pkg)[[1]] (installed metadata only).
+#' The CSL item of an installed R package, written from its installed DESCRIPTION (ruling R23; no network).
 #'
-#' The id is pkg_<name> in lower case. The version is the installed one. A package that is not installed
-#' is an error naming it: no broken entry is written.
+#' The id is pkg_<name> in lower case, the title "<pkg>: <Title>", the authors the "aut" persons of
+#' Authors@R (else the Author field, else the maintainer), the year that of Date/Publication, else
+#' Packaged, else Date, and the version the installed one. The DOI is 10.32614/CRAN.package.<pkg> for a
+#' package of CRAN, and absent otherwise (base and recommended packages have no Repository). Nothing
+#' of the authors' article leaks in. A package that is not installed is an error naming it.
 .sr_cite_pkg <- function(pkg) {
   pkg <- as.character(pkg)
   if (length(pkg) != 1L || is.na(pkg) || !nzchar(pkg)) stop("`pkg` must be one package name", call. = FALSE)
   if (!nzchar(system.file(package = pkg))) {
     stop("the reference for R package '", pkg, "' cannot be written: the package is not installed", call. = FALSE)
   }
-  cit <- suppressWarnings(suppressMessages(utils::citation(pkg)))[[1L]]
-  ver <- as.character(utils::packageVersion(pkg))
-  .sr_cite_software(.sr_cite_pkg_key(pkg), cit, ver, "R package")
+  d <- utils::packageDescription(pkg)
+  yr <- NA_integer_
+  for (f in c("Date/Publication", "Packaged", "Date")) {
+    v <- d[[f]]
+    if (is.character(v) && length(v) == 1L && grepl("^[0-9]{4}", v)) {
+      yr <- as.integer(substr(v, 1L, 4L))
+      break
+    }
+  }
+  doi <- if (identical(as.character(d[["Repository"]] %||% ""), "CRAN")) paste0("10.32614/CRAN.package.", pkg) else NA_character_
+  .sr_cite_software(.sr_cite_pkg_key(pkg), .sr_cite_desc_authors(d), paste0(pkg, ": ", .sr_cite_clean(d[["Title"]])), yr,
+                    as.character(utils::packageVersion(pkg)), "R package", doi)
 }
 
 # R itself, from citation().
 .sr_cite_r_core <- function() {
   cit <- suppressWarnings(suppressMessages(utils::citation()))[[1L]]
-  .sr_cite_software("r_core", cit, paste(R.version$major, R.version$minor, sep = "."), "R")
+  yr <- suppressWarnings(as.integer(as.character(cit$year)[1L]))
+  .sr_cite_software("r_core", .sr_cite_authors(cit$author), .sr_cite_clean(cit$title), yr,
+                    paste(R.version$major, R.version$minor, sep = "."), "R")
 }
 
 # The item of a key: a method reference, an R package or R itself; an unknown key is an error.

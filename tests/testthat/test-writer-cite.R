@@ -127,6 +127,82 @@ test_that("package items come from installed metadata, with no network", {
   expect_length(spy$calls, 0L)
 })
 
+test_that("package entries are written from the installed DESCRIPTION, not from citation() (R23)", {
+  desc_year <- function(pk) {
+    d <- utils::packageDescription(pk)
+    for (f in c("Date/Publication", "Packaged", "Date")) {
+      v <- d[[f]]
+      if (is.character(v) && length(v) == 1L && grepl("^[0-9]{4}", v)) return(as.integer(substr(v, 1L, 4L)))
+    }
+    NA_integer_
+  }
+  for (pk in intersect(c("survival", "sandwich", "mice"), rownames(utils::installed.packages()))) {
+    it <- .sr_cite_pkg(pk)
+    d <- utils::packageDescription(pk)
+    expect_identical(it[["type"]], "software", info = pk)
+    expect_match(it[["title"]], paste0("^", pk, ": "), info = pk)
+    expect_identical(it[["title"]], paste0(pk, ": ", gsub("[[:space:]]+", " ", trimws(d[["Title"]]))), info = pk)
+    expect_identical(it[["issued"]][["date-parts"]][[1L]][[1L]], desc_year(pk), info = pk)
+    expect_identical(it[["version"]], as.character(utils::packageVersion(pk)), info = pk)
+    # the CRAN form of the DOI, or none: never the authors' article
+    doi <- it[["DOI"]]
+    if (identical(d[["Repository"]], "CRAN")) {
+      expect_identical(doi, paste0("10.32614/CRAN.package.", pk), info = pk)
+    } else {
+      expect_null(doi)
+    }
+    # nothing of citation(pkg) leaks in: neither its article DOI, nor its title
+    cit <- suppressWarnings(utils::citation(pk))
+    art_dois <- unlist(lapply(seq_along(cit), function(i) cit[i]$doi))
+    expect_false(!is.null(doi) && doi %in% art_dois, info = pk)
+    expect_false(it[["title"]] %in% vapply(seq_along(cit), function(i) as.character(cit[i]$title), ""), info = pk)
+    # and the Vancouver line prints the package, its version, the DESCRIPTION year and the DOI
+    vl <- .sr_cite_vanc_one(it)
+    expect_match(vl, paste0(" ", pk, ": "), fixed = TRUE, info = pk)
+    expect_match(vl, paste0(" R package version ", it[["version"]], ". ", desc_year(pk), "."), fixed = TRUE, info = pk)
+  }
+  # the mice DESCRIPTION year is the package's, not that of the 2011 article
+  skip_if_not_installed("mice")
+  expect_identical(.sr_cite_pkg("mice")[["issued"]][["date-parts"]][[1L]][[1L]], desc_year("mice"))
+  expect_false(identical(.sr_cite_pkg("mice")[["issued"]][["date-parts"]][[1L]][[1L]], 2011L))
+  # a base package has no Repository, so no DOI is invented
+  stat <- .sr_cite_pkg("stats")
+  expect_null(stat[["DOI"]])
+  expect_match(stat[["title"]], "^stats: ")
+  expect_false(grepl("doi:", .sr_cite_vanc_one(stat), fixed = TRUE))
+  # r_core still comes from citation()
+  expect_identical(.sr_cite_r_core()[["author"]][[1L]][["literal"]], "R Core Team")
+})
+
+test_that("a trailing Jr, Sr, II, III or IV moves from the family name to the suffix", {
+  a <- .sr_cite_author("Harrell Jr", "Frank E")
+  expect_identical(a[["family"]], "Harrell")
+  expect_identical(a[["suffix"]], "Jr")
+  expect_identical(a[["given"]], "Frank E")
+  for (s in c("Jr", "Jr.", "Sr", "Sr.", "II", "III", "IV")) {
+    b <- .sr_cite_author(paste("Smith", s), "Pat Q")
+    expect_identical(b[["family"]], "Smith", info = s)
+    expect_identical(b[["suffix"]], sub("[.]$", "", s), info = s)
+  }
+  b <- .sr_cite_author("Smith, Jr.", "Pat Q")
+  expect_identical(b[["family"]], "Smith")
+  expect_identical(b[["suffix"]], "Jr")
+  # no suffix on a plain name, nor on a name that merely ends like one
+  expect_null(.sr_cite_author("Harrell", "Frank E")[["suffix"]])
+  expect_null(.sr_cite_author("Ivy", "Al")[["suffix"]])
+  expect_null(.sr_cite_author("Mii", "Al")[["suffix"]])
+  # through a person object and to Vancouver
+  p <- utils::person("Frank E", "Harrell Jr", role = c("aut", "cre"))
+  au <- .sr_cite_authors(p)
+  expect_identical(au[[1L]][["suffix"]], "Jr")
+  it <- list(id = "x", type = "software", author = au, title = "Hmisc: Test", version = "1.0", genre = "R package")
+  expect_match(.sr_cite_vanc_one(it), "^Harrell FE Jr\\. Hmisc: Test\\.")
+  skip_if_not_installed("Hmisc")
+  hm <- .sr_cite_vanc_one(.sr_cite_pkg("Hmisc"))
+  expect_match(hm, "^Harrell FE Jr[,.]")
+  expect_false(grepl("Harrell Jr", hm, fixed = TRUE))
+})
+
 test_that("a package that is not installed is a clear error, not a broken entry", {
   expect_error(.sr_cite_pkg("srNoSuchPackageXyz"), "srNoSuchPackageXyz.*not installed")
   expect_error(.sr_cite_item("zzz_unknown"), "no reference item for citation key 'zzz_unknown'")
@@ -178,7 +254,9 @@ test_that("Vancouver entries follow the plan", {
   # an R package and R itself
   pkg <- .sr_cite_pkg("survival")
   pv <- .sr_cite_vanc_one(pkg)
-  expect_match(pv, paste0(" R package version ", gsub(".", "\\.", pkg$version, fixed = TRUE), "\\. [0-9]{4}\\.$"))
+  expect_match(pv, "^Therneau TM[^.]*\\. survival: .+\\. R package version ")
+  expect_true(endsWith(pv, paste0(" R package version ", pkg$version, ". ", .sr_cite_year(pkg),
+                                  ". doi:10.32614/CRAN.package.survival")))
   expect_match(.sr_cite_vanc_one(.sr_cite_r_core()), "^R Core Team\\. R: A Language and Environment for Statistical Computing\\. R version [0-9.]+\\. [0-9]{4}\\.$")
   expect_identical(sr_cite_vancouver(list()), character())
 })
@@ -257,7 +335,8 @@ test_that("sr_cite_order is the order of first use: main text, captions and foot
   fn_keys <- unique(.sr_cite_tokens(unlist(lapply(tabs, function(b) b$footnotes))))
   expect_true("westreich2013" %in% fn_keys)
   expect_true("westreich2013" %in% ord)
-  if (!("westreich2013" %in% para_keys)) expect_gt(match("westreich2013", ord), length(para_keys))
+  expect_false("westreich2013" %in% para_keys)   # only the footnote cites it, so it follows every paragraph key
+  expect_gt(match("westreich2013", ord), length(para_keys))
   # STROBE is appended when nothing cites it (Task 7 will cite it in place)
   expect_true("vonelm2007" %in% ord)
   # the citation renders as the position in the list
