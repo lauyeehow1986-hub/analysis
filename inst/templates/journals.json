@@ -1,0 +1,6 @@
+[
+  {"name": "default", "font": "Calibri", "size_pt": 11, "fig_width_mm": 170, "fig_height_mm": 120, "dpi": 300, "verified": false},
+  {"name": "bmj", "font": "Arial", "size_pt": 11, "fig_width_mm": 171, "fig_height_mm": 120, "dpi": 300, "verified": false},
+  {"name": "lancet", "font": "Times New Roman", "size_pt": 12, "fig_width_mm": 170, "fig_height_mm": 120, "dpi": 300, "verified": false},
+  {"name": "jama", "font": "Arial", "size_pt": 12, "fig_width_mm": 178, "fig_height_mm": 120, "dpi": 600, "verified": false}
+]
