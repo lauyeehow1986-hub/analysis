@@ -30,7 +30,8 @@ SR_GUARD_CAUSAL <- c("cause", "causes", "caused", "causal", "effect of", "effect
                      "prevented", "protective", "impact of", "attributable to", "due to")
 SR_GUARD_RISK <- c("risk factor", "determinant")
 SR_GUARD_SIGNIFICANT <- c("significant", "significantly")
-SR_GUARD_NOT_SIGNIFICANT <- c("non-significant", "not significant", "non-significantly", "not significantly")
+# "not (statistically) significant(ly)" is one regular expression; a phrase's spaces match any run of white space
+SR_GUARD_NOT_SIGNIFICANT <- c("non-significant", "non-significantly", "not (\\w+ )?significant(ly)?")
 SR_GUARD_ABSENCE <- c("no difference", "no effect", "no association", "did not differ", "was not associated",
                       "were not associated")
 SR_GUARD_UP <- c("higher", "greater", "increased", "more", "elevated", "longer")

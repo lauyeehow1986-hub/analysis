@@ -332,3 +332,41 @@ test_that("the writer's own document is clean when a primary analysis is explora
   g2 <- sr_claim_guard(sr_doc_model(p2))
   expect_identical(nrow(g2), 0L, info = paste(g2$block, g2$rule, g2$detail, collapse = "\n"))
 })
+
+test_that("G4 reads 'not statistically significant' and 'not significantly' as no-significance claims", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  est <- .gd_est(m, "g4n", 1.5)
+  hi <- .gd_p(m, "g4nhi", 0.2)
+  lo <- .gd_p(m, "g4nlo", 0.01)
+  say <- function(phrase, pt) sr_claim_check_text(paste0("The OR ", phrase, " ", est, " (p = ", pt, ")."), "a_lr", m)
+  for (ph in c("was not statistically significant", "was not significantly different", "was not significantly associated",
+               "was Not Statistically Significant")) {
+    expect_identical(nrow(say(ph, hi)), 0L, info = ph)
+    g <- say(ph, lo)
+    expect_identical(g$rule, "significance", info = ph)
+    expect_identical(g$severity, "block", info = ph)
+  }
+  # a positive claim is still judged as positive
+  expect_identical(say("was statistically significant", hi)$rule, "significance")
+  expect_identical(nrow(say("was statistically significant", lo)), 0L)
+})
+
+test_that("G2 applies when the analysis is NA", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  g <- sr_claim_check_text("Smoking causes the outcome.", NA_character_, m)
+  expect_identical(g$rule, "causal_language")
+  expect_true(is.na(g$analysis))
+})
+
+test_that("a figure caption finding carries the '<figure id>:caption' block id", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  i <- which(vapply(m$main, function(b) identical(b$type, "figure") && identical(b$id, "forest_ratio"), NA))
+  expect_length(i, 1L)
+  m$main[[i]]$caption <- "Estimates showing the effect of age"
+  g <- sr_claim_guard(m)
+  expect_identical(g$block, "forest_ratio:caption")
+  expect_identical(g$rule, "causal_language")
+})
