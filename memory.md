@@ -24,7 +24,17 @@ design; this file holds *what has happened* and *what we learned*.
 6. ~~P1c.1 study feasibility verdict~~ done 2026-10-18 (branch `p1c1-feasibility`; plan
    `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`); review and merge the branch. The SAP lock
    requires its verdict.
-7. **Next: write the P1d plan** (router + writer + freeze + UI), then the **P1e scale** plan
+7. **P1d is split into four plans: writer, router, freeze, UI.** The writer plan is written
+   (`docs/superpowers/plans/2026-10-18-p1d-writer.md`, branch `p1d-writer`, 12 tasks); next, the user
+   reviews it and picks the execution method, then the router, freeze and UI plans follow.
+   - Writer open items:
+     - The bibliographic data of the 16 method references in the plan (Task 5) must be re-checked
+       against the publisher records before release.
+     - The journal presets are `verified: false` until checked against each journal's author guide.
+     - "Refresh numbers" in an edited docx is P2; the writer only stores bookmarks and
+       `placeholders.json`.
+     - STROBE items 1-5 stay amber until the router records PICO and the study design.
+   Then the **P1e scale** plan
    (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
    them in that order.
    - P1d also owns: the SAP_v1.docx and lock UI, the feasibility panel and report docx, the Methods
