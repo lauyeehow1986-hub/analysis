@@ -178,12 +178,45 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 # ---- the inputs ------------------------------------------------------------------------------------
 
 #' The outcome-blind inputs of the feasibility verdict of one analysis. Pure.
-#' @param df the frame .sr_extract_frame() returns for sr_spec_cols(spec) (any row order)
+#' @param df the frame .sr_extract_frame() returns for sr_spec_cols(spec). Every result except the
+#'   effect of spec$exclude_rows is independent of its row order; exclude_rows positions refer to
+#'   the .sr_extract_frame() order (rows sorted by every column), the order the run's extract has.
 #' @param spec the analysis spec
 #' @param route the route (an sr_route) or its id
-#' @return list(kind, n_rows, n_cc, n_obs, outcome, exposure, contrasts_in, clusters, params,
-#'   blockers); see the Task 1 report of P1c.1 for every field. For kind "none" only n_rows, n_cc and
-#'   n_obs are computed (outcome, exposure, contrasts_in and clusters NULL, params NA).
+#' @return a list:
+#'   * kind: "continuous" | "binary" | "surv" | "none" (.sr_feas_kind of the route id).
+#'   * n_rows: rows after exclude_rows.
+#'   * n_cc: complete cases over every spec column present (sr_spec_cols, incl. mi$aux).
+#'   * n_obs: rows with a non-missing coded outcome (surv: time and event); the raw non-missing count
+#'     when the outcome cannot be coded; NA when a spec column is missing; kind "none": the non-NA
+#'     count of spec$outcome when present, else NA.
+#'   * outcome: list(sd, risk, events_total, events_cc, followup_total, max_time, pairs). sd:
+#'     continuous only. risk: binary only. events_total: binary sum(y), surv sum(event).
+#'     events_cc = events_total * n_cc / n_obs (binary, surv). followup_total, max_time and pairs
+#'     (data.frame(time, event) sorted by time then event): surv only. Fields not of the kind are
+#'     NA (pairs NULL); an outcome that cannot be coded is all NA plus the blocker "outcome: <msg>".
+#'   * exposure: NULL unless spec$exposure is one column, else list(var, type, ref, levels,
+#'     variance). type: "factor" (exposure_ref set, or an rmst route), else "binary" (numeric or
+#'     logical with values in {0, 1}), else "linear". ref: exposure_ref, else the first level (NA for
+#'     linear). levels: data.frame(level, n_all, n_cc) -- factor: the sorted observed levels with
+#'     ref first; binary: "0","1" (logical: "FALSE","TRUE"); linear: zero rows. n_all counts the
+#'     frame after exclude_rows, n_cc the complete cases. variance: the population variance over the
+#'     complete cases (binary, linear), NA for factor.
+#'   * contrasts_in: data.frame(level, n_k, n_ref, r2x, ps_outside, separated), one row per
+#'     non-reference level (binary, factor) or one row with level NA, n_k = n_cc, n_ref NA (linear);
+#'     zero rows without an exposure. r2x: R2 of the exposure (or the level indicator among rows at
+#'     level or ref) on the covariate design, 0 with no covariates, NA when constant. ps_outside: the
+#'     share of fitted propensities outside SR_FEAS_PS_RANGE (NA for linear). separated: the glm did
+#'     not converge or a propensity is within SR_FEAS_SEP_EPS of 0 or 1 (linear: r2x >=
+#'     SR_FEAS_R2X_MAX). n_k or n_ref 0, or a design failure, gives NA r2x, ps_outside, separated.
+#'   * clusters: NULL unless spec$layers$clustered, else list(G, m_bar = n_cc / G, cv = the
+#'     population SD of the cluster sizes / m_bar); all NA when the cluster column is unavailable.
+#'   * params: the column count of the full design (spec minus the outcome fields), minus 1 for surv
+#'     (no intercept); rmst: the number of exposure levels; NA when the design fails.
+#'   * blockers: unique character; "outcome: ..." or "design: ..." (exclude_rows beyond the data,
+#'     missing columns, an unobserved reference level, a term-code or exposure-model error).
+#'   For kind "none" only n_rows, n_cc and n_obs are computed (outcome, exposure, contrasts_in and
+#'   clusters NULL, params NA).
 .sr_feas_inputs <- function(df, spec, route) {
   rid <- if (is.character(route)) route else route$id
   kind <- .sr_feas_kind(rid)
@@ -336,19 +369,21 @@ SR_FEAS_R2X_MAX <- 0.999                 # a continuous exposure with R2 on the 
 .sr_feas_struct_paths <- list(c("outcome", "pairs"), c("exposure", "levels"), "contrasts_in")
 
 #' `x` (inputs or an assessment) through the outcome-blind gate (.sr_assert_blind), with the
-#' analysis's outcome columns (outcome, time, status) against its other spec columns. Without a spec
-#' only the names are checked. The engine's own frames (.sr_feas_struct_paths) are walked with their
-#' column names dropped, so a spec column that happens to share one (a covariate named `event`, an
-#' outcome named `level`) is not taken for a crossing; their values are still walked. Returns x
-#' invisibly; stops naming the offending element.
-.sr_feas_blind_frame <- function(x, spec = NULL) {
+#' analysis's outcome columns (outcome, time, status) against its other spec columns. `spec` is
+#' required. The engine's own frames (.sr_feas_struct_paths) are walked as plain named lists, not as
+#' data.frames: a spec column that happens to share one of their column names (a covariate named
+#' `event`, an outcome named `level`) is not taken for a crossing, while every column name is still
+#' checked against the forbidden outcome-statistic names (a `contrasts_in$or` is refused) and the
+#' values are still walked. Returns x invisibly; stops naming the offending element.
+.sr_feas_blind_frame <- function(x, spec) {
+  if (missing(spec) || !is.list(spec)) stop("spec must be the analysis spec (a list)", call. = FALSE)
   oc <- c(.sr_spec_chr(spec[["outcome"]]), .sr_spec_chr(spec[["time"]]), .sr_spec_chr(spec[["status"]]))
   chk <- x
   if (is.list(chk) && !is.data.frame(chk)) {
     for (p in .sr_feas_struct_paths) {
       el <- chk
       for (k in p) el <- if (is.list(el) && !is.data.frame(el)) el[[k]] else NULL
-      if (is.data.frame(el)) chk[[p]] <- unname(as.list(el))
+      if (is.data.frame(el)) chk[[p]] <- as.list(el)      # names kept: only the crossing check is off
     }
   }
   .sr_assert_blind(chk, oc, setdiff(sr_spec_cols(spec), oc))

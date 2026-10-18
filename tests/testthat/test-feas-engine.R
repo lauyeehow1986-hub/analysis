@@ -185,14 +185,14 @@ test_that("a hostile term name reaches the in-process term code only as data", {
 test_that(".sr_feas_blind_frame passes on the inputs", {
   spec <- .fe_spec(terms = list(list(var = "z1"), list(var = "site", type = "factor")))
   inp <- .sr_feas_inputs(.fe_df(.fe_frame(), spec), spec, sr_route_get("logistic"))
-  expect_identical(.sr_feas_blind_frame(inp), inp)
   expect_identical(.sr_feas_blind_frame(inp, spec), inp)
+  expect_error(.sr_feas_blind_frame(inp), "spec")            # the spec is required
   sv <- .fe_surv_spec()
   si <- .sr_feas_inputs(.fe_df(.fe_surv_frame(), sv), sv, sr_route_get("cox"))
   expect_identical(.sr_feas_blind_frame(si, sv), si)
   bad <- inp
   bad$outcome$or <- 1
-  expect_error(.sr_feas_blind_frame(bad), "outcome-blind gate")
+  expect_error(.sr_feas_blind_frame(bad, spec), "outcome-blind gate")
 })
 
 test_that("the engine's own frames never trip the gate when spec columns share their column names", {
@@ -213,6 +213,23 @@ test_that("the engine's own frames never trip the gate when spec columns share t
   bad <- si
   bad$extra <- data.frame(time = 1, event = 1)
   expect_error(.sr_feas_blind_frame(bad, sv), "outcome-blind gate")
+})
+
+test_that("an outcome statistic named as a column of an engine frame is still refused", {
+  spec <- .fe_spec()
+  inp <- .sr_feas_inputs(.fe_df(.fe_frame(), spec), spec, sr_route_get("logistic"))
+  for (nm in c("or", "effect")) {
+    bad <- inp
+    bad$contrasts_in[[nm]] <- 1
+    expect_error(.sr_feas_blind_frame(bad, spec), paste0("contrasts_in\\$", nm))
+  }
+  bad <- inp
+  bad$exposure$levels$estimate <- 0L
+  expect_error(.sr_feas_blind_frame(bad, spec), "exposure\\$levels\\$estimate")
+  sv <- .fe_surv_spec()
+  si <- .sr_feas_inputs(.fe_df(.fe_surv_frame(), sv), sv, sr_route_get("cox"))
+  si$outcome$pairs$hr <- 1
+  expect_error(.sr_feas_blind_frame(si, sv), "outcome\\$pairs\\$hr")
 })
 
 # ---- exposures ----------------------------------------------------------------------------------
