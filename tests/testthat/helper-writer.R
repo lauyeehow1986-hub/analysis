@@ -50,6 +50,9 @@
   df <- .fx_writer_frame()
   tau <- round(unname(stats::quantile(df$time, 0.8)), 3)
   p <- .fx_ready_project(df, "t", c(id = "id", y = "outcome"), env = env)
+  # one exclusion step, for the flow figure: the analyses read the table, not the recipe output
+  p <- sr_recipe_add(p, "t", list(op = "drop_cases", args = list(where = list(col = "age", op = ">", value = 70)),
+                                  reason = "age above the study range"))
   lay <- .fx_writer_layers()
   reg <- function(p, id, route, spec, label, family = NA) {
     if (id %in% drop) return(p)
