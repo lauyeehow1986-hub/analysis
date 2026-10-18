@@ -49,6 +49,7 @@
   .sr_rmst_tau_check(spec[["tau"]])
   .sr_exclude_refuse(spec, "rmst")
   .sr_surv_check(spec)
+  .sr_outcome_cov_refuse(spec)
   if (isTRUE(spec[["layers"]][["clustered"]])) {
     stop("clustered RMST is not supported in P1c", call. = FALSE)
   }

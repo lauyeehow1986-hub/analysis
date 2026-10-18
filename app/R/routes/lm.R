@@ -3,6 +3,8 @@
 #   outcome ~ exposure + terms (+ interactions)
 # fitted by stats::lm on the complete cases (rows with a missing outcome, term or cluster value are
 # dropped and counted), with the standard errors of .h_vcov (model, robust HC3 or cluster HC1).
+# layers$clustered = TRUE or a cluster column needs se = "cluster", and se = "cluster" needs both
+# (.sr_cluster_se_check, routes/se.R), so the clustering the SAP declares is the one the fit uses.
 #
 # The compiled code is data-free: sr_terms_code() supplies the setup (factor levels and spline knots
 # fixed from `sr_data`) and the design builder, so every column the model sees is a generated name
@@ -56,15 +58,9 @@
   if (identical(spec[["outcome"]], spec[["exposure"]])) {
     stop("the outcome and the exposure must be different columns", call. = FALSE)
   }
+  .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
-  if (identical(.sr_lm_se(spec), "cluster")) {
-    if (!one(spec[["cluster"]])) {
-      stop("se = \"cluster\" needs a cluster column (spec$cluster)", call. = FALSE)
-    }
-    if (!isTRUE(spec[["layers"]][["clustered"]])) {
-      stop("se = \"cluster\" needs layers$clustered = TRUE", call. = FALSE)
-    }
-  }
+  .sr_cluster_se_check(spec, .sr_lm_se(spec))
   invisible(TRUE)
 }
 

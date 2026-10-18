@@ -353,3 +353,46 @@ test_that("no exposure and no terms gives an intercept-only rhs", {
   expect_identical(nrow(tc$coef_map), 0L)
   expect_identical(names(tc$coef_map), c("coef", "source_var", "kind"))
 })
+
+test_that(".sr_outcome_cov_refuse names the first outcome column used as a term, interaction, stratum or cluster", {
+  msg <- function(c) paste0("^the outcome column '", c, "' cannot be a term, stratum or cluster$")
+  expect_invisible(.sr_outcome_cov_refuse(list(outcome = "y", exposure = "x", terms = list(list(var = "z")))))
+  expect_error(.sr_outcome_cov_refuse(list(outcome = "y", terms = list(list(var = "y")))), msg("y"))
+  expect_error(.sr_outcome_cov_refuse(list(outcome = "y", interactions = list(c("x", "y")))), msg("y"))
+  expect_error(.sr_outcome_cov_refuse(list(time = "t", status = "s", strata = "s")), msg("s"))
+  expect_error(.sr_outcome_cov_refuse(list(time = "t", status = "s", cluster = "t")), msg("t"))
+  # the first offending outcome column in the order outcome, time, status
+  expect_error(.sr_outcome_cov_refuse(list(time = "t", status = "s", strata = "s", cluster = "t")), msg("t"))
+})
+
+test_that("the glm, lm, cox and rmst checks refuse an outcome column as a covariate (positive controls pass)", {
+  msg <- function(c) paste0("^the outcome column '", c, "' cannot be a term, stratum or cluster$")
+  put <- function(s, v) { s[names(v)] <- v; s }    # replaces fields whole (modifyList would merge terms)
+  lay <- .sr_cov_layers()
+  bin <- list(purpose = "explain-causal", outcome = "y", exposure = "x", terms = list(list(var = "z")),
+              layers = lay)
+  expect_invisible(.sr_glm_check(bin, "logistic"))
+  expect_error(.sr_glm_check(put(bin, list(terms = list(list(var = "y")))), "logistic"), msg("y"))
+  expect_error(.sr_glm_check(put(bin, list(cluster = "y", se = "cluster",
+                                          layers = .sr_cov_layers(clustered = TRUE))), "modpois"),
+               msg("y"))
+  expect_invisible(.sr_lm_check(bin))
+  expect_error(.sr_lm_check(put(bin, list(interactions = list(c("x", "y"))))), msg("y"))
+  expect_error(.sr_lm_check(put(bin, list(strata = "y"))), msg("y"))
+  surv <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x",
+               terms = list(list(var = "z")), layers = lay)
+  expect_invisible(.sr_cox_check(surv))
+  expect_error(.sr_cox_check(put(surv, list(strata = "status"))), msg("status"))
+  expect_error(.sr_cox_check(put(surv, list(terms = list(list(var = "time"))))), msg("time"))
+  expect_error(.sr_cox_check(put(surv, list(cluster = "time", layers = .sr_cov_layers(clustered = TRUE)))),
+               msg("time"))
+  rm <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 5,
+             layers = lay, seed = 1)
+  expect_invisible(.sr_rmst_check(rm))
+  expect_error(.sr_rmst_check(put(rm, list(cluster = "status"))), msg("status"))
+  expect_error(.sr_rmst_check(put(rm, list(terms = list(list(var = "time"))))), msg("time"))
+  # through the route: spec validation reports the refusal from the function-form estimand
+  v <- sr_spec_validate(put(surv, list(strata = "status", seed = 1)), .sr_cox_route())
+  expect_false(v$ok)
+  expect_true(any(grepl("the outcome column 'status' cannot be a term, stratum or cluster", v$errors, fixed = TRUE)))
+})

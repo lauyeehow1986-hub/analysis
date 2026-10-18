@@ -120,9 +120,20 @@ test_that("exclude_rows is ignored end to end (R16): outcome-blind, same verdict
 
 test_that("an outcome column used as a term is blocked end to end and the record stays outcome-blind (R17)", {
   sp <- .ft_spec(terms = list(list(var = "z1", type = "linear"), list(var = "y", type = "factor")))
-  p <- sr_feasibility_assess(.ft_project(.ft_frame(), spec = sp), "p1")
+  # the route refuses such a spec when it is added (F1) ...
+  expect_error(.ft_project(.ft_frame(), spec = sp), "the outcome column 'y' cannot be a term, stratum or cluster",
+               fixed = TRUE)
+  # ... and the engine blocker stays as defence in depth: a SAP state that holds the spec anyway (written
+  # in memory here) still gets a cannot_run, outcome-blind verdict
+  tenv <- environment()
+  with_spec <- function(df) {
+    p <- .ft_project(df, env = tenv)
+    p$state$analyses$p1$spec <- sp
+    sr_feasibility_assess(p, "p1")
+  }
+  p <- with_spec(.ft_frame())
   a <- p$state$feasibility$p1$assessment
-  b <- sr_feasibility_assess(.ft_project(.ft_frame(permute_y = TRUE), spec = sp), "p1")$state$feasibility$p1$assessment
+  b <- with_spec(.ft_frame(permute_y = TRUE))$state$feasibility$p1$assessment
   expect_identical(a$tier, "cannot_run")
   expect_true("design: the outcome column 'y' cannot be a term, stratum or cluster" %in% a$blockers)
   expect_true(all(is.na(a$inputs$contrasts_in$r2x)))
@@ -172,7 +183,7 @@ test_that("a cannot_run verdict can only be revised or stopped", {
   p <- .ft_project(df)
   p <- sr_feasibility_assess(p, "p1")
   expect_identical(sr_feasibility(p, "p1")$assessment$tier, "cannot_run")
-  expect_true("exposure level '1' has no complete-case row" %in% sr_feasibility(p, "p1")$assessment$blockers)
+  expect_true("exposure level '1' is observed but has no complete-case row" %in% sr_feasibility(p, "p1")$assessment$blockers)
   expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "x"), "cannot run.*decide revise or stop")
   expect_error(sr_feasibility_decide(p, "p1", "exploratory", reason = "x"), "cannot run")
   p <- sr_feasibility_decide(p, "p1", "revise", reason = "collect z2 in the exposed")
@@ -567,4 +578,102 @@ test_that("sr_run on a stopped project is refused before anything is extracted",
   expect_true(dir.exists(ex_dir))
   expect_gt(length(list.files(ex_dir)), 0L)
   expect_true(ran$state$runs$p1$ok)
+})
+
+test_that("a stale secondary does not block the lock; a secondary decided stop does (F2)", {
+  # the gate is primary-only for missing / stale / undecided / revise (design catalogue O); only a stop
+  # on any analysis blocks
+  p <- .ft_project()
+  p <- sr_sap_add(p, "s1", "logistic", .ft_spec(terms = list(list(var = "z3"))), "t", label = "secondary")
+  p <- sr_feasibility_assess(p, "p1")
+  p <- sr_feasibility_decide(p, "p1", "proceed", reason = "ok")
+  p <- sr_feasibility_assess(p, "s1")
+  p <- sr_feasibility_decide(p, "s1", "proceed", reason = "ok")
+  p <- sr_sap_add(p, "s1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z3"))), "t",
+                  label = "secondary")
+  expect_identical(.sr_feas_stale(p, "s1"), "spec")
+  expect_identical(.sr_feas_gate(p), character())
+  locked <- sr_sap_lock(p)
+  expect_true(isTRUE(locked$state$sap$locked))
+
+  # a secondary decided stop, then made stale by a spec change: the stop still blocks the lock
+  q <- .ft_project()
+  q <- sr_sap_add(q, "s1", "logistic", .ft_spec(terms = list(list(var = "z3"))), "t", label = "secondary")
+  q <- sr_feasibility_assess(q, "p1")
+  q <- sr_feasibility_decide(q, "p1", "proceed", reason = "ok")
+  q <- sr_feasibility_assess(q, "s1")
+  q <- sr_feasibility_decide(q, "s1", "stop", reason = "no events")
+  q <- sr_sap_add(q, "s1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z3"))), "t",
+                  label = "secondary")
+  expect_identical(.sr_feas_stale(q, "s1"), "spec")
+  expect_identical(.sr_feas_gate(q), "s1: decision is stop (no events)")
+  expect_error(sr_sap_lock(q), "s1: decision is stop (no events)", fixed = TRUE)
+})
+
+test_that("when both the data and the spec changed, the stale reason names the data (F3)", {
+  p <- .ft_project()
+  p <- sr_feasibility_assess(p, "p1")
+  p <- sr_sap_add(p, "p1", "logistic", .ft_spec(terms = list(list(var = "z1"), list(var = "z2"), list(var = "z3"))),
+                  "t", label = "primary")
+  expect_identical(.sr_feas_stale(p, "p1"), "spec")
+  df <- .ft_frame()
+  df$y[which(df$y == "dead")[1L]] <- "alive"
+  csv <- file.path(dirname(p$paths$dir), "t2.csv")
+  .fx_write_csv(df, csv)
+  p <- sr_ingest(p, csv, table = "t", options = list(drive_info = .ft_drive))
+  expect_identical(.sr_feas_stale(p, "p1"), "data")
+  expect_identical(sr_feasibility(p, "p1")$stale, "data")
+  expect_error(sr_feasibility_decide(p, "p1", "proceed", reason = "ok"), "stale (the data changed)", fixed = TRUE)
+})
+
+test_that("the SAP hash of a project without feasibility records is pinned (F4)", {
+  # a hand-built SAP state: a primary, a secondary with a sap_label, a non-pre-specified analysis (left
+  # out), a family and a rule. The literal was checked against sr_sap_hash as it was before P1c.1 (no
+  # feasibility element); a change that alters the hash of such a SAP must fail here.
+  rec <- function(id, label, prespecified = TRUE, sap_label = NULL) {
+    r <- list(id = id, route = "logistic", route_version = 1L, table = "t", label = label, family = NA_character_,
+              spec = list(purpose = "explain-causal", outcome = "y", event_value = "dead", exposure = "x",
+                          terms = list(list(var = "z1", type = "linear")), seed = 1L),
+              parent = NA_character_, trigger = NA_character_, addresses = character(),
+              prespecified = prespecified, reason = NA_character_)
+    if (!is.null(sap_label)) r$sap_label <- sap_label
+    r
+  }
+  p <- list(state = list(
+    analyses = list(s1 = rec("s1", "secondary", sap_label = "sensitivity"), p1 = rec("p1", "primary"),
+                    a9 = rec("a9", "secondary", prespecified = FALSE)),
+    sap = list(families = list(f1 = list(id = "f1", members = c("p1", "s1"), method = "holm")),
+               rules = list(r1 = list(id = "r1", analysis = "p1", check = "ph", action = "add_sensitivity",
+                                      alternative = "s1")))))
+  legacy <- "b11d9a49cfbb0f4146c4f9313af6c477464823738aca3b99fe57c571c15c4bb4"
+  expect_identical(sr_sap_hash(p), legacy)
+  p$state$feasibility <- list()
+  expect_identical(sr_sap_hash(p), legacy)
+  p$state$feasibility <- list(gone = list(assessment = list(tier = "adequate")))   # not an analysis of the SAP
+  expect_identical(sr_sap_hash(p), legacy)
+})
+
+test_that("assumptions given as NULL are absent ones: r2_y = NULL warns and is not stored (F9)", {
+  n <- 200L
+  df <- withr::with_seed(7L, {
+    z1 <- stats::rnorm(n)
+    x <- stats::rbinom(n, 1L, stats::plogis(z1))
+    data.frame(id = seq_len(n), x = x, z1 = z1, bp = 120 + 10 * z1 + stats::rnorm(n, 0, 8),
+               stringsAsFactors = FALSE)
+  })
+  p <- .fx_ready_project(df, "t", c(id = "id", bp = "outcome", x = "exposure"))
+  p <- sr_sap_add(p, "bp", "lm", list(purpose = "explain-causal", outcome = "bp", exposure = "x",
+                                      terms = list(list(var = "z1")), layers = .ft_layers(), seed = 1L),
+                  "t", label = "primary")
+  w <- paste0("r2_y was not given: the MD standard error uses r2_y = 0 (the covariates are assumed to explain ",
+              "none of the outcome variance, which is conservative)")
+  a <- sr_feasibility(sr_feasibility_assess(p, "bp"), "bp")$assessment
+  b <- sr_feasibility(sr_feasibility_assess(p, "bp", assumptions = list(r2_y = NULL)), "bp")$assessment
+  expect_true(w %in% a$warnings)
+  expect_identical(b, a)
+  expect_identical(b$assumptions$r2_y, list(value = NA_real_, justification = NA_character_))
+  g <- sr_feasibility(sr_feasibility_assess(p, "bp", assumptions = list(
+    r2_y = list(value = 0.3, justification = "prior cohort"), icc = NULL)), "bp")$assessment
+  expect_false(w %in% g$warnings)
+  expect_identical(g$assumptions$r2_y$value, 0.3)
 })

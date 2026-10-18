@@ -157,7 +157,7 @@ test_that("an outcome column as a term, interaction variable, stratum or cluster
     term = .fe_spec(terms = c(base, list(list(var = "y", type = "factor")))),
     interaction = .fe_spec(interactions = list(c("x", "y"))),
     strata = .fe_spec(strata = "y"),
-    cluster = .fe_spec(cluster = "y", layers = .fe_layers(clustered = TRUE)))
+    cluster = .fe_spec(cluster = "y", se = "cluster", layers = .fe_layers(clustered = TRUE)))
   for (nm in names(cases)) {
     sp <- cases[[nm]]
     df <- .fe_sort(.fe_df(df0, sp))
@@ -668,7 +668,7 @@ test_that("a linear exposure uses n_cc * Var(x) * (1 - r2x) and a factor contras
 })
 
 test_that("clustering multiplies the SE by sqrt of the design effect", {
-  sp <- .fe_spec(cluster = "site", layers = .fe_layers(clustered = TRUE))
+  sp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE))
   cl <- list(G = 20L, m_bar = 10, cv = 0.5)
   as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))
   base <- .sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"))
@@ -809,8 +809,8 @@ test_that("each blocker fires on a planted frame: tier cannot_run, advice revise
   df$z2[df$site == "c"] <- NA
   sp <- .fe_spec(exposure = "site", exposure_ref = "a", terms = list(list(var = "z1"), list(var = "z2")))
   r <- .fe_verdict(df, sp, "logistic")
-  expect_blocked(r, "exposure level 'c' has no complete-case row")
-  expect_identical(r$blockers[grepl("level 'c'", r$blockers)], "exposure level 'c' has no complete-case row")
+  expect_blocked(r, "exposure level 'c' is observed but has no complete-case row")
+  expect_identical(r$blockers[grepl("level 'c'", r$blockers)], "exposure level 'c' is observed but has no complete-case row")
 
   df <- .fe_frame()                                             # an all-"no" outcome
   df$y[!is.na(df$y)] <- "no"
@@ -851,7 +851,8 @@ test_that("each blocker fires on a planted frame: tier cannot_run, advice revise
   small$x <- c(0, 1, 0, 1, 1)
   spw <- .fe_spec(outcome = "w", terms = lapply(c("z1", "z2", "z3"), function(v) list(var = v, type = "linear")))
   spw$event_value <- NULL
-  expect_blocked(.fe_verdict(small, spw, "lm"), "model parameters")
+  expect_blocked(.fe_verdict(small, spw, "lm"),
+                 "^the model has 5 parameters but only 5 complete-case rows [(]it needs more rows than parameters[)]$")
 
   df <- .fe_frame()                                             # x equal to z1 > 0 (positivity)
   df$x <- as.integer(df$z1 > 0)
@@ -938,7 +939,7 @@ test_that("RMST SE: deterministic, order-free, symmetric, RNG-neutral", {
   .sr_feas_rmst_se(pr, 100L, 100L, 8, 10L, 1L)
   expect_identical(get(".Random.seed", envir = globalenv()), before)
   expect_identical(RNGkind(), kind)
-  # through the compute: the seed is spec$seed, else the route default, else 1
+  # through the compute: the seed is spec$seed, else 1
   res <- .sr_feas_compute(inp, sp, sr_route_get("rmst"))
   expect_identical(res$contrasts$measure, "RMST_diff")
   expect_identical(res$contrasts$scale, "identity")
@@ -1037,4 +1038,207 @@ test_that("an uncodable survival outcome gives cannot_run without simulating, an
     expect_no_error(r <- .sr_feas_compute(inp, rs, sr_route_get("rmst")))
     expect_identical(r$contrasts$se, base$contrasts$se)
   }
+})
+
+# ---- P1c.1 follow-ups ---------------------------------------------------------------------------
+
+test_that("the engine's exposure levels are the run's levels, in the run's (locale) order (F5)", {
+  df <- .fe_frame()
+  df$site <- withr::with_seed(8L, sample(c("b", "B", "a", "A", "c"), nrow(df), replace = TRUE))
+  route <- sr_route_get("logistic")
+  for (ref in c("B", "a")) {
+    sp <- .fe_spec(exposure = "site", exposure_ref = ref)
+    d <- .fe_df(df, sp)
+    inp <- .sr_feas_inputs(d, sp, route)
+    env <- new.env(parent = globalenv())
+    env$sr_data <- d
+    eval(parse(text = sr_terms_code(sp)$setup), envir = env)
+    expect_identical(inp$exposure$levels$level, env$.sr_fixed$levels[["t1"]])
+    expect_identical(inp$exposure$levels$level[1L], ref)
+  }
+  # rmst: the levels of the groups the compiled run reports
+  sf <- .fe_surv_frame()
+  sf$x <- withr::with_seed(9L, sample(c("b", "B", "a", "A"), nrow(sf), replace = TRUE))
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", status_event = 1, exposure = "x",
+             tau = 5, layers = .fe_layers(), seed = 1L)
+  d <- .fe_df(sf, rs)
+  inp <- .sr_feas_inputs(d, rs, sr_route_get("rmst"))
+  env <- new.env(parent = globalenv())
+  env$sr_data <- d
+  run <- eval(parse(text = sr_compile(sr_route_get("rmst"), rs)), envir = env)
+  expect_identical(inp$exposure$levels$level, run$groups$level)
+})
+
+test_that("n_cc counts only the model columns: mi$aux does not change it, and it is the run's n (F6)", {
+  df <- .fe_frame()
+  df$zaux <- df$z3
+  df$zaux[seq(1L, 500L, by = 4L)] <- NA
+  route <- sr_route_get("logistic")
+  model_cc <- sum(stats::complete.cases(df[c("y", "x", "z1", "z2")]))
+  sp_mi <- .fe_spec(layers = .fe_layers(missing = "mi"), mi = list(m = 5, aux = "zaux"))
+  sp_mi0 <- .fe_spec(layers = .fe_layers(missing = "mi"), mi = list(m = 5))
+  inp <- .sr_feas_inputs(.fe_df(df, sp_mi), sp_mi, route)
+  inp0 <- .sr_feas_inputs(.fe_df(df, sp_mi0), sp_mi0, route)
+  expect_identical(inp$n_cc, model_cc)
+  expect_identical(inp$n_cc, inp0$n_cc)
+  # the MI factor follows: se_upper = se * sqrt(n_cc / n_obs)
+  res <- .sr_feas_compute(inp, sp_mi, route)
+  expect_equal(res$contrasts$se_upper, res$contrasts$se * sqrt(model_cc / inp$n_obs), tolerance = 1e-12)
+  # a non-MI spec: n_cc is the n the compiled analysis fits
+  run_n <- function(sp, d, rid) {
+    env <- new.env(parent = globalenv())
+    env$sr_data <- d
+    eval(parse(text = sr_compile(sr_route_get(rid), sp)), envir = env)$n
+  }
+  sp <- .fe_spec()
+  d <- .fe_df(df, sp)
+  expect_identical(.sr_feas_inputs(d, sp, route)$n_cc, as.integer(run_n(sp, d, "logistic")))
+  sf <- .fe_surv_frame()
+  sf$z1[1:15] <- NA
+  cs <- .fe_surv_spec(status_event = 1, strata = "g")
+  d <- .fe_df(sf, cs)
+  expect_identical(.sr_feas_inputs(d, cs, sr_route_get("cox"))$n_cc, as.integer(run_n(cs, d, "cox")))
+})
+
+test_that("the rmst events warning speaks of events per exposure group, not per parameter (F7)", {
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 1L)
+  low <- .fe_hand(kind = "surv", type = "factor", params = 2L, events_cc = 15)
+  r <- .sr_feas_compute(low, rs, sr_route_get("rmst"))
+  expect_true(paste0("expected events per exposure group (7.5) is below 10: the Kaplan-Meier estimates ",
+                     "behind the RMST rest on few events") %in% r$warnings)
+  expect_false(any(grepl("per parameter|sparse-data|firth", r$warnings)))
+  ok <- .sr_feas_compute(.fe_hand(kind = "surv", type = "factor", params = 2L, events_cc = 40), rs,
+                         sr_route_get("rmst"))
+  expect_false(any(grepl("events per", ok$warnings)))
+  cx <- .sr_feas_compute(low, .fe_surv_spec(), sr_route_get("cox"))
+  expect_true(any(grepl("^events per parameter \\(7.5\\) is below 10", cx$warnings)))
+})
+
+test_that("the rmst events blocker speaks of exposure groups, not model parameters", {
+  rs <- list(purpose = "explain-causal", time = "time", status = "status", exposure = "x", tau = 8,
+             layers = .fe_layers(), seed = 1L)
+  few <- .fe_hand(kind = "surv", type = "factor", params = 3L, events_cc = 2)
+  r <- .sr_feas_compute(few, rs, sr_route_get("rmst"))
+  expect_true("the 3 exposure groups exceed the 2 expected events among the complete cases" %in% r$blockers)
+  expect_false(any(grepl("model parameters", r$blockers)))
+  cx <- .sr_feas_compute(few, .fe_surv_spec(), sr_route_get("cox"))
+  expect_true("3 model parameters exceed the 2 expected events among the complete cases" %in% cx$blockers)
+})
+
+test_that("a clustered analysis whose cluster column has fewer than 2 clusters is blocked (F8)", {
+  icc <- list(icc = list(value = 0.05, justification = "a prior audit"))
+  sp <- .fe_surv_spec(status_event = 1, cluster = "g", layers = .fe_layers(clustered = TRUE))
+  ok <- .fe_verdict(.fe_surv_frame(), sp, "cox", assumptions = icc)
+  expect_false(any(grepl("cluster column", ok$blockers)))
+  one <- .fe_surv_frame()
+  one$g <- "g01"
+  r <- .fe_verdict(one, sp, "cox", assumptions = icc)
+  expect_identical(r$tier, "cannot_run")
+  expect_true("design: the cluster column 'g' has fewer than 2 clusters" %in% r$blockers)
+  # one cluster among the complete cases: the other clusters only have rows with a missing value
+  cc1 <- .fe_surv_frame()
+  cc1$g[cc1$g != "g01"] <- NA
+  inp <- .sr_feas_inputs(.fe_df(cc1, sp), sp, sr_route_get("cox"))
+  expect_identical(inp$clusters$G, 1L)
+  expect_true("design: the cluster column 'g' has fewer than 2 clusters" %in% inp$blockers)
+})
+
+test_that("an absent or NULL r2_y uses r2_y = 0 with a warning; a NULL icc is a missing icc (F9)", {
+  sp <- .fe_spec()
+  w <- paste0("r2_y was not given: the MD standard error uses r2_y = 0 (the covariates are assumed to explain ",
+              "none of the outcome variance, which is conservative)")
+  a <- .sr_feas_compute(.fe_hand(kind = "continuous"), sp, sr_route_get("lm"))
+  b <- .sr_feas_compute(.fe_hand(kind = "continuous"), sp, sr_route_get("lm"), assumptions = list(r2_y = NULL))
+  expect_true(w %in% a$warnings)
+  expect_identical(b, a)
+  given <- .sr_feas_compute(.fe_hand(kind = "continuous"), sp, sr_route_get("lm"),
+                            assumptions = list(r2_y = list(value = 0.2, justification = "prior cohort")))
+  expect_false(any(grepl("r2_y", given$warnings)))
+  expect_false(any(grepl("r2_y", .sr_feas_compute(.fe_hand(), sp, sr_route_get("logistic"))$warnings)))
+  csp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE))
+  expect_error(.sr_feas_compute(.fe_hand(clusters = list(G = 20L, m_bar = 10, cv = 0.5)), csp,
+                                sr_route_get("logistic"), assumptions = list(icc = NULL)),
+               "a clustered analysis needs assumptions$icc", fixed = TRUE)
+})
+
+test_that("clustered and multiple imputation together: the design effect and the MI factor both apply (F14)", {
+  # no route runs clustered + MI (.sr_mi_check refuses it): this pins only how the engine combines the two
+  sp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE, missing = "mi"))
+  cl <- list(G = 40L, m_bar = 10, cv = 0.5)
+  as <- list(icc = list(value = 0.05, justification = "similar trials report 0.05"))
+  base <- .sr_feas_compute(.fe_hand(), .fe_spec(), sr_route_get("logistic"))
+  res <- .sr_feas_compute(.fe_hand(n_obs = 500L, clusters = cl), sp, sr_route_get("logistic"), assumptions = as)
+  deff <- function(f) 1 + ((0.5^2 + 1) * 10 * f - 1) * 0.05
+  for (m in c("OR", "RD", "RR")) {
+    r <- .fe_row(res, m)
+    expect_equal(r$deff, deff(1))
+    expect_equal(r$se, .fe_row(base, m)$se * sqrt(deff(1)), tolerance = 1e-12)
+    expect_equal(r$se_upper, .fe_row(base, m)$se * sqrt(400 / 500) * sqrt(deff(500 / 400)), tolerance = 1e-12)
+  }
+  expect_identical(res$blockers, character())
+  # on real inputs the verdict computes
+  rsp <- .fe_spec(cluster = "site", se = "cluster", layers = .fe_layers(clustered = TRUE, missing = "mi"), mi = list(m = 5))
+  rr <- .fe_verdict(.fe_frame(), rsp, "logistic", assumptions = as)
+  expect_identical(rr$blockers, character())
+  expect_true(all(is.finite(rr$contrasts$se)) && all(is.finite(rr$contrasts$se_upper)))
+  expect_true(all(rr$contrasts$deff > 1))
+})
+
+test_that("RMST SE: the mixed case really drops a draw beyond tau (F14, R13)", {
+  mixed <- data.frame(time = c(1, 2, 3, 4, 30), event = c(1L, 1L, 0L, 1L, 1L))
+  se2 <- .sr_feas_rmst_se(mixed, 1L, 1L, 5, 60L, 1L)
+  # replay the draws of the simulation: stream 1 of sr_streams(1, 1), the two groups in turn
+  genv <- globalenv()
+  had <- exists(".Random.seed", envir = genv, inherits = FALSE)
+  old <- if (had) get(".Random.seed", envir = genv) else NULL
+  kind <- RNGkind()
+  withr::defer({
+    suppressWarnings(RNGkind(kind[1L], kind[2L], kind[3L]))
+    if (had) assign(".Random.seed", old, envir = genv) else if (exists(".Random.seed", envir = genv)) {
+      rm(".Random.seed", envir = genv)
+    }
+  })
+  assign(".Random.seed", sr_streams(1L, 1L)[[1L]], envir = genv)
+  ix <- t(vapply(seq_len(60L), function(s) c(sample.int(5L, 1L, replace = TRUE), sample.int(5L, 1L, replace = TRUE)),
+                 c(0, 0)))
+  rmean <- function(i) {
+    fit <- survival::survfit(survival::Surv(time, event) ~ 1, data = mixed[i, , drop = FALSE])
+    tryCatch(summary(fit, rmean = 5)$table[["rmean"]], error = function(e) NA_real_)
+  }
+  d <- apply(ix, 1L, function(r) rmean(r[1L]) - rmean(r[2L]))
+  dropped <- !is.finite(d)
+  expect_true(any(dropped))
+  expect_true(all(dropped == (ix[, 1L] == 5L | ix[, 2L] == 5L)))
+  expect_true(sum(!dropped) >= 2L)
+  expect_equal(se2, stats::sd(d[!dropped]), tolerance = 1e-12)
+})
+
+test_that("a valid interaction design: params and r2x are populated and nothing is blocked (F14)", {
+  sp <- .fe_spec(interactions = list(c("x", "z1"), c("z1", "z2")))
+  d <- .fe_df(.fe_frame(), sp)
+  inp <- .sr_feas_inputs(d, sp, sr_route_get("logistic"))
+  expect_identical(inp$blockers, character())
+  expect_identical(inp$params, 6L)                       # 1 + x + z1 + z2 + x:z1 + z1:z2
+  cc <- d[stats::complete.cases(d), ]
+  expect_equal(inp$contrasts_in$r2x, summary(stats::lm(x ~ z1 + z2 + z1:z2, cc))$r.squared, tolerance = 1e-10)
+  res <- .sr_feas_compute(inp, sp, sr_route_get("logistic"))
+  expect_identical(res$blockers, character())
+  expect_true(all(is.finite(res$contrasts$se)))
+})
+
+test_that("the RMST seed is spec$seed when it is a whole number, else 1 (F13)", {
+  route <- sr_route_get("rmst")
+  expect_null(route$spec_schema[["seed"]][["default"]])
+  expect_identical(.sr_feas_seed(list(seed = 7L), route), 7L)
+  expect_identical(.sr_feas_seed(list(seed = 12), route), 12)
+  expect_identical(.sr_feas_seed(list(), route), 1L)
+  expect_identical(.sr_feas_seed(list(seed = 2.5), route), 1L)
+  expect_identical(.sr_feas_seed(list(seed = 7L), "rmst"), 7L)
+  expect_identical(.sr_feas_seed(list(seed = NA), "rmst"), 1L)
+  # a schema default would not be used: only spec$seed and 1
+  fake <- route
+  fake$spec_schema$seed$default <- 99L
+  expect_identical(.sr_feas_seed(list(), fake), 1L)
+  expect_identical(.sr_feas_sim_settings(list(seed = 3), route), list(sims = .sr_feas_rmst_sims(), seed = 3L))
 })

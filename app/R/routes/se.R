@@ -6,6 +6,29 @@
 #   se = "robust"   sandwich::vcovHC: HC3 for an lm (the small-sample choice), HC0 for a glm (HC3 is
 #                   not defined for the working weights of a glm)
 #   se = "cluster"  sandwich::vcovCL(type = "HC1"), one cluster id per fitted row
+#
+# The lm and glm routes use the cluster column when and only when se = "cluster", and that is the
+# one SE that layers$clustered = TRUE or spec$cluster allow (.sr_cluster_se_check, the rule Cox
+# applies with cluster()), so the clustering the SAP declares and the clustering the fit uses agree.
+
+# Cross-field rule of the lm and glm routes: se = "cluster" needs one cluster column and
+# layers$clustered = TRUE; any other SE refuses both. `se` is the effective SE. Stops with the reason.
+.sr_cluster_se_check <- function(spec, se) {
+  cl <- spec[["cluster"]]
+  clustered <- isTRUE(spec[["layers"]][["clustered"]])
+  if (identical(se, "cluster")) {
+    if (!(is.character(cl) && length(cl) == 1L && !is.na(cl) && nzchar(cl))) {
+      stop("se = \"cluster\" needs a cluster column (spec$cluster)", call. = FALSE)
+    }
+    if (!clustered) stop("se = \"cluster\" needs layers$clustered = TRUE", call. = FALSE)
+  } else if (clustered) {
+    stop("layers$clustered = TRUE needs se = \"cluster\" (the cluster-robust SE); a ",
+         if (identical(se, "model")) "model-based" else se, " SE would ignore the clustering", call. = FALSE)
+  } else if (length(.sr_spec_chr(cl))) {
+    stop("a cluster column needs se = \"cluster\" and layers$clustered = TRUE", call. = FALSE)
+  }
+  invisible(TRUE)
+}
 
 #' Covariance matrix of the coefficients of `fit`. `cluster` is the cluster id of every fitted row
 #' (needed, and only used, for se = "cluster").

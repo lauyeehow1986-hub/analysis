@@ -162,10 +162,13 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
 #'                      (mi, boot) kept; tau of a pre-specified rmst analysis of this parent, else
 #'                      tau_suggest; a clustered Cox parent gives an unclustered RMST (and says so)
 #'   influence          same route, exclude_rows += the flagged rows (positions in the analysis table)
-#'   separation         logistic with penalty = "firth" (model SE, no marginal effects)
+#'   separation         logistic with penalty = "firth" (model SE, no marginal effects); a clustered
+#'                      parent gives an unclustered Firth analysis (and says so), Firth having no
+#'                      cluster SE
 #'   few_clusters       same route, the cluster bootstrap with B = 2000, percentile interval
 #'   linearity          same route, the flagged term as RCS with 4 knots
-#'   heteroscedasticity same route, se = "robust"
+#'   heteroscedasticity same route, se = "robust"; a limitation for a clustered parent, whose
+#'                      cluster-robust SE is already heteroscedasticity-robust
 #'   inf_censoring      a limitation (IPCW is P9)
 .sr_diag_sensitivity <- function(check, parent, rec, analyses = list()) {
   lim <- function(...) list(limitation = paste0(...))
@@ -241,6 +244,15 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
         notes <- c(notes, paste0("model-based (profile likelihood) intervals instead of se = ", sp$se))
         sp$se <- "model"
       }
+      if (isTRUE(sp$layers$clustered) || length(.sr_spec_chr(sp$cluster))) {
+        notes <- c(notes, "the logistic analysis is clustered but Firth has no cluster-robust SE, so this Firth analysis is unclustered")
+        sp$layers$clustered <- FALSE
+        sp$cluster <- NULL
+        if (!is.null(sp$boot_type)) {
+          notes <- c(notes, paste0("boot_type ", sp$boot_type, " is not carried over (the bootstrap resamples individuals)"))
+          sp$boot_type <- NULL
+        }
+      }
       if (isTRUE(sp$marginal)) {
         notes <- c(notes, "no marginal effects (Firth has none)")
         sp$marginal <- FALSE
@@ -278,6 +290,10 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
     },
     heteroscedasticity = {
       if (base != "lm") return(lim("the heteroscedasticity sensitivity analysis needs an lm analysis"))
+      if (identical(ps$se, "cluster")) {
+        return(lim("the analysis already has cluster-robust (HC1) standard errors, which are robust to ",
+                   "heteroscedasticity; no sensitivity analysis is built"))
+      }
       sp <- ps
       sp$se <- "robust"
       list(route = route, spec = sp, note = "robust (HC3) standard errors")

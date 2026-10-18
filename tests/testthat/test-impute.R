@@ -232,7 +232,8 @@ test_that("MI with clustered data or with the Firth penalty is refused at compil
   lmr <- .im_route("lm")
   s <- .im_lm_spec(se = "cluster", cluster = "age", layers = .im_layers(clustered = TRUE))
   expect_error(sr_compile(lmr, s), "multiple imputation.*clustered")
-  expect_error(sr_compile(lmr, .im_lm_spec(layers = .im_layers(clustered = TRUE))), "multiple imputation.*clustered")
+  # clustered data without the cluster SE is refused before MI is considered
+  expect_error(sr_compile(lmr, .im_lm_spec(layers = .im_layers(clustered = TRUE))), "needs se = \"cluster\"", fixed = TRUE)
   g <- list(purpose = "explain-causal", outcome = "hyp", event_value = "2", exposure = "bmi",
             layers = .im_layers(), mi = list(m = 5), seed = 1L)
   lg <- .im_route("logistic")
