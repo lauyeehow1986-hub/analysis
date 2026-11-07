@@ -211,7 +211,7 @@ sr_ph_lift <- function(text, reg, source_prefix, analysis) {
                            value = if (sv$suppressed) NA_real_ else v, suppressed = sv$suppressed)
       if (sv$suppressed && k < length(mm$txt) && endsWith(mm$txt[k + 1L], "%")) {
         gap <- substring(text, mm$start[k] + mm$len[k], mm$start[k + 1L] - 1L)
-        pct_hide <- grepl("^[[:space:]]*([A-Za-z]+[[:space:]]*)?\\([[:space:]]*$", gap)
+        pct_hide <- grepl("^[[:space:]]*([A-Za-z]+[[:space:]]*)?[(,;:]?[[:space:]]*$", gap)
       }
     } else {
       toks[k] <- sr_ph_put(reg, t, "num", src, analysis = analysis, value = v)

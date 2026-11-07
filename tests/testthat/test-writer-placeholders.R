@@ -176,7 +176,10 @@ test_that("sr_ph_lift hides a mean event count below k and a percent printed nex
   s3 <- sr_ph_lift("There were 3 deaths (1.5%) and 12 deaths (6.0%) of 200 rows.", reg3, "fragment:a:b", "a")
   expect_identical(sr_ph_resolve(s3, reg3), "There were <5 deaths (-) and 12 deaths (6.0%) of 200 rows.")
   expect_false(grepl("1.5", sr_ph_resolve(s3, reg3), fixed = TRUE))
-  expect_identical(sr_ph_resolve(sr_ph_lift("3 events (1.5%)", sr_ph_registry(), "fragment:a:c", "a"), reg3, cite = NULL) == "", FALSE)
+  # the comma and bare forms, and a visible count keeps its percent
+  r4 <- sr_ph_registry()
+  s4 <- sr_ph_lift("3 deaths, 1.5%; 3 deaths 1.5%; 3 events (1.5%); 12 deaths, 6.0%.", r4, "fragment:a:c", "a")
+  expect_identical(sr_ph_resolve(s4, r4), "<5 deaths, -; <5 deaths -; <5 events (-); 12 deaths, 6.0%.")
 })
 
 test_that("sr_ph_verify accepts a masked mean and a hidden percent, and rejects a mask of a large mean", {

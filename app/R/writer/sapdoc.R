@@ -27,6 +27,16 @@
 
 .sr_sd_count <- function(x, k) vapply(x, function(v) if (is.finite(v)) sr_sdc_value(v, k = k)$text else "", "", USE.NAMES = FALSE)
 
+# The exposure prevalence (n_k / n_cc) is printed beside the visible n (complete cases), so it gives n_k back:
+# hidden as "<k" where n_k = prevalence * n_cc is 1 to k - 1.
+.sr_sd_prev <- function(prev, n_cc, k) {
+  mapply(function(p, n) {
+    if (!is.finite(p)) return("")
+    nk <- if (is.finite(n)) round(p * n) else NA_real_
+    if (is.finite(nk) && nk >= 1 && nk <= k - 1L) .sr_sdc_text(k) else sr_fmt_num(p)
+  }, prev, n_cc, USE.NAMES = FALSE)
+}
+
 .sr_sd_df <- function(...) {
   cols <- list(...)
   as.data.frame(lapply(cols, .sr_sd_col), stringsAsFactors = FALSE, check.names = FALSE)
@@ -266,7 +276,7 @@ sr_feasibility_docx <- function(project, path = NULL, suppress_k = SR_SDC_K) {
     blocks <- c(blocks, list(.sr_sd_head(paste0(a, " (", r$label[1L], ", ", r$route[1L], ")"), 2L), .sr_sd_para(sent$text)))
     if (nrow(r) && any(!is.na(r$contrast))) {
       df <- .sr_sd_df(Contrast = r$contrast, Measure = r$measure, `n (complete cases)` = .sr_sd_whole(r$n_cc),
-                      Events = .sr_sd_count(r$events, k), Prevalence = .sr_sd_num(r$prevalence), `Half-width` = .sr_sd_num(r$h),
+                      Events = .sr_sd_count(r$events, k), Prevalence = .sr_sd_prev(r$prevalence, r$n_cc, k), `Half-width` = .sr_sd_num(r$h),
                       `Min. detectable effect` = .sr_sd_num(r$mde), `Upper SE` = .sr_sd_num(r$se_upper),
                       Delta = .sr_sd_num(r$delta), Tier = r$tier)
       blocks <- c(blocks, list(.sr_sd_table(df, paste("Feasibility of", a, "by contrast"))))

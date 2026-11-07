@@ -109,8 +109,8 @@ significant" is not. The STROBE checklist is not guarded (ruling R27).
   until nothing changes (ruling R8). Only count cells ("3" or "12 (4.5%)") are masked; "m (sd)" and
   "n [lo to hi]" are not.
 - In the model_fit table, hiding Events also hides Non-events (or Censored) and the other way round, because one is Rows analysed minus the other. Rows analysed stays visible (R12). The mean event count of an imputed model is hidden as `<k` when it is above 0 and below k, in the table and in prose ("mean <5 events").
-- In the observed_risk table, the risk of a level whose N or Events is hidden is hidden too. A percent printed right next to a masked count in prose ("3 events (1.5%)") is replaced by a dash.
-- The SAP and feasibility docx hide Events below k (`suppress_k` argument of `sr_sap_docx()` and `sr_feasibility_docx()`, default 5); n (complete cases) stays visible, also in the feasibility sentence.
+- In the observed_risk table, the risk of a level whose N or Events is hidden is hidden too. A percent printed right next to a masked count in prose ("3 events (1.5%)", "3 deaths, 1.5%", "3 deaths 1.5%") is replaced by a dash.
+- The SAP and feasibility docx hide Events below k (`suppress_k` argument of `sr_sap_docx()` and `sr_feasibility_docx()`, default 5); n (complete cases) stays visible, also in the feasibility sentence. The Prevalence column (n_k / n_cc) is hidden as `<k` where n_k is 1 to k - 1, because it would give n_k back beside the visible n; Half-width, minimum detectable effect and upper SE are also functions of n_k and stay visible (residual risk, see R12).
 - In figures, the Kaplan-Meier number-at-risk strip and the flow diagram print `<5` for a count of 1 to 4.
 - In prose, a whole number is a count when the word after it is rows, events, cases, participants,
   patients, deaths, subjects, observations or excluded. A knot count or a bootstrap B is never masked.

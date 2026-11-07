@@ -153,31 +153,46 @@ test_that("the SAP and feasibility docs refuse a read-only project", {
   invisible(TRUE)
 }
 
-test_that("F3: the SAP and the feasibility docx hide Events below the project's k; n stays", {
+test_that("F3/N1/N5: with the default k = 5 the SAP and the feasibility docx hide Events and Prevalence of a small n_k; n stays", {
   dir <- .sd_copy()
   p <- .sd_open(dir, environment())
-  rep <- sr_feasibility_report(p)
-  ev <- rep$events[is.finite(rep$events) & rep$events > 0]
-  expect_gt(length(ev), 0L)
-  k <- as.integer(max(ev)) + 1L
-  vis <- sr_sap_docx(p, path = file.path(tempdir(), "sd-sap-visible.docx"))
-  withr::defer(unlink(file.path(tempdir(), "sd-sap-visible.docx")))
-  p2 <- sr_feasibility_docx(p, suppress_k = k)
-  path <- file.path(p$paths$out, "feasibility", "feasibility-001.docx")
-  s <- officer::docx_summary(officer::read_docx(path))
-  cells <- s$text[!is.na(s$text) & s$content_type == "table cell"]
-  expect_true(paste0("<", k) %in% cells)
-  expect_false(any(cells %in% as.character(as.integer(ev[ev < k]))))
-  nn <- unique(as.character(as.integer(rep$n_cc[is.finite(rep$n_cc)])))
-  expect_true(any(nn %in% cells))
-  # the SAP of a locked project, with the same k
+  real <- get("sr_feasibility_report", envir = globalenv())
+  small <- function(project) {
+    r <- real(project)
+    r$events[1L] <- 3
+    r$prevalence[1L] <- 3 / r$n_cc[1L]
+    r
+  }
+  rep <- small(p)
+  n1 <- as.character(as.integer(rep$n_cc[1L]))
+  pv <- sr_fmt_num(rep$prevalence[1L])
+  expect_true(nchar(pv) >= 4L)
+  .sd_rebind("sr_feasibility_report", small, environment())
+  p <- sr_feasibility_docx(p)
+  cells <- function(path) {
+    s <- officer::docx_summary(officer::read_docx(path))
+    s$text[!is.na(s$text) & s$content_type == "table cell"]
+  }
+  fc <- cells(file.path(p$paths$out, "feasibility", "feasibility-001.docx"))
+  expect_true("<5" %in% fc)
+  expect_false("3" %in% fc)
+  expect_false(pv %in% fc)
+  expect_true(n1 %in% fc)
+  # the SAP of a locked project, same default k
   dir2 <- .sd_copy()
   q <- .sd_open(dir2, environment())
-  q <- sr_sap_docx(q, suppress_k = k)
-  stxt <- .sd_text(file.path(q$paths$out, "sap", "SAP_v1.docx"))
-  expect_true(paste0("<", k) %in% stxt)
-  expect_false(any(stxt %in% as.character(as.integer(ev[ev < k]))))
+  q <- sr_sap_docx(q)
+  sc <- .sd_text(file.path(q$paths$out, "sap", "SAP_v1.docx"))
+  expect_true("<5" %in% sc)
+  expect_false("3" %in% sc)
+  expect_false(pv %in% sc)
   expect_error(sr_sap_docx(q, suppress_k = 2L), "suppress_k", fixed = TRUE)
+})
+
+test_that("N1: .sr_sd_prev hides a prevalence whose n_k is 1 to k - 1, and nothing else", {
+  expect_identical(.sr_sd_prev(c(3 / 400, 4 / 400, 5 / 400, 0, 0.5, NA), rep(400, 6L), 5L),
+                   c("<5", "<5", sr_fmt_num(5 / 400), sr_fmt_num(0), sr_fmt_num(0.5), ""))
+  expect_identical(.sr_sd_prev(0.25, NA_real_, 5L), sr_fmt_num(0.25))
 })
 
 test_that("minor 9: a locked SAP is refused a second time even with a custom path", {
