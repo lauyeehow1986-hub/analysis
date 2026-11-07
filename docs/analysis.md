@@ -581,3 +581,10 @@ The phase that owns each item is in brackets.
 
 Weighting, matching and Bayesian frameworks are part of the layer vocabulary but are refused at
 compile in P1c.
+
+## 13. Manuscript writer (P1d.1)
+
+The writer turns a locked, run project into the manuscript, the supplement, the figures, the reference
+list, the STROBE checklist and the analysis script that re-runs the results. It never computes a number.
+The guide is [writer.md](writer.md): the export files, the placeholder grammar, the claim guard (G1-G9),
+small-cell suppression, the journal presets, how to re-run `analysis.R`, and the known limitations.
