@@ -27,7 +27,7 @@ The SAP and the feasibility report are Word files of their own, written by `sr_s
 
 `sr_export()` writes `out/exports/export-NNN/` in the project folder. The folder is written as
 `.export-NNN.partial` and renamed once complete, so an export is whole or absent. An export folder is never
-overwritten. Each file is recorded in a `doc.exported` event with its SHA-256.
+overwritten, and the export id skips any `export-NNN` folder that is already on disk (an orphan left by a crash), as well as the ids already in the event log. Each file is recorded in a `doc.exported` event with its SHA-256.
 
 | File | What it is |
 |---|---|
@@ -67,7 +67,8 @@ A token's source is `<prefix>:<rest>`:
 | `feas:<analysis>:<field>` | A feasibility figure: `n`, `events`, `h`, `mde`, `delta`. |
 | `sap:locked_at`, `sap:sap_hash` | The day of the lock, and the first 16 hex characters of the SAP hash. |
 | `libsnap:r` | The R version that wrote the manuscript. |
-| `label:<text>` | The text itself. |
+| `label:<text>` | The text itself (a system-generated label or constant). |
+| `freetext:<text>` | Text typed by the user (a decision reason, a delta source) that is printed through a label token. The claim guard reads it like prose (section 4). |
 
 Route tables are the exception: their cells hold the route's own evaluated text (rulings R6 and R10). The
 guard does not scan them. `sr_ph_verify(reg, project)` re-derives every row from its source and compares
@@ -91,6 +92,8 @@ reported and does not block.
 | G8 `table2` | A covariate coefficient quoted in the prose of an explain-causal route (block; the Table 2 fallacy) | "The coefficient for age was {{E4}}." |
 | G9 `non_collapsible` | A conditional OR or HR not called "conditional" or "adjusted" (warn) | "The odds ratio was {{E2}}." from a conditional logistic model |
 
+Free text that becomes a label token (the reason of an exploratory decision, a delta source) is scanned like prose: G1 reads its digits and the causal and significance rules read its words, so "only 3 deaths; drug reduces mortality" gives block rows. Reasons the writer generates itself (a dropped family member, a not-reported reason) stay plain labels.
+
 G4 reads only statistical negations: "not (statistically) significant" is a negation, "not clinically
 significant" is not. The STROBE checklist is not guarded (ruling R27).
 
@@ -105,6 +108,9 @@ significant" is not. The STROBE checklist is not guarded (ruling R27).
   that holds exactly one hidden cell also hides its smallest other non-zero cell. The two rules repeat
   until nothing changes (ruling R8). Only count cells ("3" or "12 (4.5%)") are masked; "m (sd)" and
   "n [lo to hi]" are not.
+- In the model_fit table, hiding Events also hides Non-events (or Censored) and the other way round, because one is Rows analysed minus the other. Rows analysed stays visible (R12). The mean event count of an imputed model is hidden as `<k` when it is above 0 and below k, in the table and in prose ("mean <5 events").
+- In the observed_risk table, the risk of a level whose N or Events is hidden is hidden too. A percent printed right next to a masked count in prose ("3 events (1.5%)") is replaced by a dash.
+- The SAP and feasibility docx hide Events below k (`suppress_k` argument of `sr_sap_docx()` and `sr_feasibility_docx()`, default 5); n (complete cases) stays visible, also in the feasibility sentence.
 - In figures, the Kaplan-Meier number-at-risk strip and the flow diagram print `<5` for a count of 1 to 4.
 - In prose, a whole number is a count when the word after it is rows, events, cases, participants,
   patients, deaths, subjects, observations or excluded. A knot count or a bootstrap B is never masked.
@@ -141,7 +147,7 @@ The script stops with an error if the extract's SHA-256 has changed. The export 
 hash and hardware fingerprint recorded with the run, so an export on another machine still passes when the
 code is unchanged.
 
-**Lockfile caveat.** `renv.lock` records the R version of the exporting machine, not the one you re-run on.
+**Lockfile caveat.** `renv.lock` lists the library installed when the manuscript was exported, which is not necessarily the library the results were computed with. `manifest.json` records `lockfile_matches_runs`: TRUE when the library hash of every run equals the export-time hash. When it is FALSE the lockfile opens its StatRouter element with a WARNING note saying so; the export is not refused. `renv.lock` also records the R version of the exporting machine, not the one you re-run on.
 Its `Repositories` list is empty and every package is marked CRAN, so it is a version record, not a full
 renv lockfile.
 
@@ -163,18 +169,14 @@ only.
   `n_after`) and an Overall column minus a visible group count can recover a 1 to 4 count. The same holds
   for a header n (for example "B (n=<5)" recovered from Overall minus A). Masking totals would gut the flow
   diagram and Table 1, so this is accepted residual risk. Complementary suppression of totals is later work.
-- **A percent next to a masked count stays visible.** A text such as "3 events (1.5%)" keeps the percentage,
-  which reveals the count with a known denominator.
+- **A percent is hidden only when it sits next to the count.** "3 events (1.5%)" and "3 deaths, 1.5%" are handled; a percent far from its count in the same sentence is not recognised.
+- **`sr_docx_digest` is machine-dependent.** It digests the document's XML as written by officer on this machine, so it is not a cross-machine identity of a document.
 - **Only first-use bookmarks refresh (R30).** Later uses of the same token are plain runs and are not
   bookmarked. A P2 refresh updates only the bookmarked uses.
 - **Open one output in real Word before the freeze.** The section properties (sectPr child order) have not
   been checked in Word.
-- **A crash can leave an orphan export.** If the process dies between the folder rename and the
-  `doc.exported` append, `out/exports/export-NNN/` is left without an event. The next export then gets the
-  same id and is refused. Check that no event lists the folder, then delete it by hand.
-- **The same class applies to the SAP and feasibility files.** Each is written before its event is appended.
-  A failed append leaves a file that blocks a retry (`SAP_v1.docx` is never overwritten), so remove it by
-  hand after checking the event log.
+- **A crash can still leave an orphan export folder.** If the process dies between the folder rename and the `doc.exported` append, `out/exports/export-NNN/` has no event. The next export skips it and uses the next number; delete the orphan by hand after checking the event log.
+- **A failed append of an SAP or feasibility file** removes the file just written and re-raises the error, so a retry is possible. A crash between the write and the append can still leave a file; `SAP_v1.docx` is then never overwritten, so remove it by hand after checking the event log.
 - **Presets are unverified** (section 6).
 - **STROBE items 1 to 5 stay amber** until the router records the PICO and the study design. They are for
   the authors to write.

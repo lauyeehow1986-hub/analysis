@@ -3,13 +3,14 @@
 # analysis.R is the code that ran, not a re-derivation of it: for every reported analysis it holds the
 # RNG preamble, the extract prologue and sr_compile(route, spec), the three parts sr_run() sends to the
 # worker, in a local() of their own. Sourced with SR_PROJECT_DIR set to the project folder it
-# reproduces the stored results. Before it writes a block, the script checks that the code still is the
-# code of the run: the content hash of (extract, route, spec, seed) must equal the key of the latest ok
-# run, otherwise a recompile changed the code and the analysis must be run again. The check is about the
-# code, not the machine: the key is recomputed with the library hash and hardware fingerprint recorded
-# with that run (ok_lib_hash, ok_hw_fp; the current values only for a run recorded without them), so an
-# export on another machine or after a package update still passes. The text is ASCII
-# (.sr_lit escapes data strings) and holds no path: the project folder comes from the environment.
+# reproduces the stored results. The emitted script checks only the SHA-256 of the extract it reads (it stops
+# when the extract changed). The check that the code still is the code of the run happens when the script is
+# generated, not when it runs: the content hash of (extract, route, spec, seed) must equal the key of the
+# latest ok run, otherwise a recompile changed the code and the analysis must be run again (the export
+# refuses). That check is about the code, not the machine: the key is recomputed with the library hash and
+# hardware fingerprint recorded with that run (ok_lib_hash, ok_hw_fp; the current values only for a run
+# recorded without them), so an export on another machine or after a package update still passes. The text
+# is ASCII (.sr_lit escapes data strings) and holds no path: the project folder comes from the environment.
 
 #' The analysis.R text for the analyses `ids`, each of which has an ok run, in SAP order (pre-specified
 #' analyses first, then those added after the lock, each group in plan order).
@@ -84,18 +85,44 @@ sr_analysis_script <- function(project, ids) {
     "})"), collapse = "\n")
 }
 
-#' The renv.lock-shaped list of the library the results were computed with: the R version, the
+#' Whether the library of the export is the library the runs were computed with
+#'
+#' TRUE when the library hash of `snap` equals the ok_lib_hash recorded with the latest ok run of every id
+#' (a run recorded without a library hash cannot show it: FALSE).
+#' @param project an open project.
+#' @param ids the reported analysis ids.
+#' @param snap a library snapshot (sr_libsnap()), the one the lockfile is written from.
+sr_lockfile_matches_runs <- function(project, ids, snap = sr_libsnap()) {
+  now <- sr_libsnap_hash(snap)
+  length(ids) > 0L && all(vapply(ids, function(id) {
+    h <- project$state$runs[[id]]$ok_lib_hash
+    is.character(h) && length(h) == 1L && !is.na(h) && identical(h, now)
+  }, NA))
+}
+
+#' The renv.lock-shaped list of the packages installed when the export was made: the R version, the
 #' installed packages of the snapshot (a package that is not installed is left out) sorted by name,
 #' and a StatRouter element with the snapshot date and the snapshot hash. Written as JSON by the export.
+#' The snapshot is taken at export time, so it is the library the results were computed with only when
+#' `matches_runs` is TRUE; when it is FALSE the StatRouter element opens with a WARNING saying so.
 #' @param snap a library snapshot (sr_libsnap()).
-sr_lockfile <- function(snap = sr_libsnap()) {
+#' @param matches_runs NA (not asked), TRUE or FALSE, from sr_lockfile_matches_runs().
+sr_lockfile <- function(snap = sr_libsnap(), matches_runs = NA) {
   vers <- snap$pkgs
   vers <- vers[!is.na(vers)]
   vers <- vers[order(names(vers), method = "radix")]
   pk <- lapply(stats::setNames(names(vers), names(vers)), function(n) {
     list(Package = n, Version = unname(vers[[n]]), Source = "Repository", Repository = "CRAN")
   })
+  sr <- list(snapshot_date = snap$snapshot_date, libsnap_hash = sr_libsnap_hash(snap))
+  if (isFALSE(matches_runs)) {
+    sr <- c(list(WARNING = paste("This lockfile lists the library installed when the manuscript was exported.",
+                                 "It is NOT the library the results were computed with (the hash differs from the one",
+                                 "recorded with the runs, or a run recorded none): packages may have changed since.")),
+            sr)
+  }
+  if (!is.na(matches_runs)) sr$lockfile_matches_runs <- isTRUE(matches_runs)
   list(R = list(Version = as.character(getRversion()), Repositories = list()),
        Packages = pk,
-       StatRouter = list(snapshot_date = snap$snapshot_date, libsnap_hash = sr_libsnap_hash(snap)))
+       StatRouter = sr)
 }

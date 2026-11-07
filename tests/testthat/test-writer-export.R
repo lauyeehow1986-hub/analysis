@@ -274,22 +274,41 @@ test_that("a failure while writing removes the staging folder and records nothin
   expect_false(any(vapply(sr_events_read(p$paths$events), function(e) identical(e$type, "doc.exported"), NA)))
 })
 
-test_that("an existing export folder is never overwritten; a stale staging folder is replaced", {
+test_that("an existing export folder is never overwritten: the id skips it; a stale staging folder is replaced", {
   dir <- .ex_copy()
   p <- .ex_open(dir)
   ex <- file.path(p$paths$out, "exports")
   dir.create(file.path(ex, "export-001"), recursive = TRUE)
   writeLines("keep", file.path(ex, "export-001", "note.txt"))
-  expect_error(sr_export(p), "already exists")
+  p1 <- sr_export(p)
   expect_identical(readLines(file.path(ex, "export-001", "note.txt")), "keep")
-  expect_false(dir.exists(file.path(ex, ".export-001.partial")))
+  expect_identical(sr_exports(p1)$id, "export-002")
+  expect_true(file.exists(file.path(ex, "export-002", "manifest.json")))
   # a stale staging folder from a crash is replaced when the folder is free
-  unlink(file.path(ex, "export-001"), recursive = TRUE)
-  dir.create(file.path(ex, ".export-001.partial"))
-  writeLines("stale", file.path(ex, ".export-001.partial", "old.txt"))
+  dir.create(file.path(ex, ".export-003.partial"))
+  writeLines("stale", file.path(ex, ".export-003.partial", "old.txt"))
   .ex_rebind("sr_analysis_script", function(project, ids) stop("stop here", call. = FALSE), environment())
-  expect_error(sr_export(p), "stop here")
-  expect_false(dir.exists(file.path(ex, ".export-001.partial")))
+  expect_error(sr_export(p1), "stop here")
+  expect_false(dir.exists(file.path(ex, ".export-003.partial")))
+})
+
+test_that("F5: the manifest records lockfile_matches_runs; a mismatch puts a loud note in the lockfile", {
+  man <- .ex_json(file.path(.ex_dir("export-001"), "manifest.json"))
+  expect_true(isTRUE(man$lockfile_matches_runs))
+  lock <- .ex_json(file.path(.ex_dir("export-001"), "renv.lock"))
+  expect_null(lock$StatRouter$WARNING)
+  dir <- .ex_copy()
+  p <- .ex_open(dir)
+  expect_identical(sr_lockfile_matches_runs(p, character(), sr_libsnap()), FALSE)
+  .ex_rebind("sr_lockfile_matches_runs", function(project, ids, snap) FALSE, environment())
+  p1 <- sr_export(p)
+  d <- file.path(p$paths$out, "exports", "export-001")
+  man2 <- .ex_json(file.path(d, "manifest.json"))
+  expect_identical(man2$lockfile_matches_runs, FALSE)
+  lock2 <- .ex_json(file.path(d, "renv.lock"))
+  expect_match(lock2$StatRouter$WARNING, "NOT the library the results were computed with", fixed = TRUE)
+  # the export still succeeds: provenance is recorded, not enforced
+  expect_identical(sr_exports(p1)$id, "export-001")
 })
 
 test_that("a read-only project refuses, an unlocked SAP refuses, and sr_exports is empty before any export", {

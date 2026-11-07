@@ -6,7 +6,7 @@
 # The folder out/exports/<id>/ holds: manuscript.docx, supplement.docx, figures/*.png, analysis.R,
 # renv.lock, references.json (CSL-JSON), references.ris, placeholders.json, checklist_strobe.csv and
 # manifest.json (the relative path and SHA-256 of every other file, plus id, created, audit_tip, sap_hash,
-# preset and suppress_k). The files are written into out/exports/.<id>.partial and the folder is renamed once it is
+# preset, suppress_k and lockfile_matches_runs). The files are written into out/exports/.<id>.partial and the folder is renamed once it is
 # complete, so an export is whole or absent. An export folder is never overwritten.
 #
 # placeholders.json is the registry rows (id, kind, text, analysis, source, suppressed, and value only
@@ -101,7 +101,8 @@ sr_exports <- function(project) {
 
   ids <- names(model$meta$purposes)
   .sr_ex_write_text(file.path(st, "analysis.R"), sr_analysis_script(project, ids))
-  .sr_ex_write_text(file.path(st, "renv.lock"), paste0(.sr_json(sr_lockfile(model$meta$libsnap)), "\n"))
+  matches <- sr_lockfile_matches_runs(project, ids, model$meta$libsnap)
+  .sr_ex_write_text(file.path(st, "renv.lock"), paste0(.sr_json(sr_lockfile(model$meta$libsnap, matches)), "\n"))
 
   refs <- Filter(function(b) identical(b$type, "refs"), model$main)
   items <- sr_cite_csl(if (length(refs)) refs[[1L]]$keys else character())
@@ -114,7 +115,7 @@ sr_exports <- function(project) {
 
   rel <- .sr_ex_files(st)
   man <- list(id = id, created = created, audit_tip = tip, sap_hash = model$meta$sap_hash,
-              preset = model$meta$preset, suppress_k = model$reg$k,
+              preset = model$meta$preset, suppress_k = model$reg$k, lockfile_matches_runs = matches,
               files = lapply(rel, function(f) list(path = f, sha = .sr_ex_sha(file.path(st, f)))))
   .sr_ex_write_text(file.path(st, "manifest.json"), paste0(.sr_json(man), "\n"))
   invisible(TRUE)
@@ -126,7 +127,7 @@ sr_exports <- function(project) {
 #' placeholders, the STROBE checklist and a manifest, in out/exports/<id>/.
 #'
 #' Refused: a read-only project, a model refusal (sr_doc_model), any block row of the claim guard (one line
-#' per row), and an existing export folder. The folder appears whole or not at all, and a doc.exported event
+#' per row). The id is the next number that has neither an event nor a folder on disk. The folder appears whole or not at all, and a doc.exported event
 #' (id, files with SHA-256 relative to the project folder, audit tip, SAP hash, preset) is appended after it.
 #' @param project an open, writable project with a locked and run SAP.
 #' @param opts from sr_writer_opts().
@@ -145,8 +146,12 @@ sr_export <- function(project, opts = sr_writer_opts()) {
   paths <- project$paths
   ex <- project$state$exports %||% list()
   k <- sum(vapply(ex, function(e) identical(e$kind, "manuscript"), NA)) + 1L
-  id <- sprintf("export-%03d", k)
   root <- file.path(paths$out, "exports")
+  # an orphan folder (a crash between the rename and the event) is skipped, never reused or blocking
+  while (dir.exists(file.path(root, sprintf("export-%03d", k))) || file.exists(file.path(root, sprintf("export-%03d", k)))) {
+    k <- k + 1L
+  }
+  id <- sprintf("export-%03d", k)
   dir <- file.path(root, id)
   st <- file.path(root, paste0(".", id, ".partial"))
   if (dir.exists(dir) || file.exists(dir)) {
@@ -179,6 +184,6 @@ sr_export <- function(project, opts = sr_writer_opts()) {
     if (!(identical(last$type, "doc.exported") && identical(last$payload$id, id))) {
       unlink(dir, recursive = TRUE)
     }
-    stop(e)
+    stop(e)   # the condition object itself: its class and call survive
   })
 }

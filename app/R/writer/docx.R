@@ -17,6 +17,8 @@
 # so a suppressed count stays "<k" (ruling R29).
 
 SR_DX_MARK <- "@@SR:"
+# The leading characters of the audit-tip hash shown in the footer; the digest neutralises the same prefix.
+SR_DX_TIP_CHARS <- 16L
 SR_DX_NS_W <- "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 SR_DX_STATUS_FILL <- c(green = "#C6EFCE", amber = "#FFEB9C", red = "#FFC7CE")
 
@@ -337,7 +339,7 @@ sr_docx_render <- function(model, part = c("main", "supplement"), path, fig_dir,
   }
   foot <- if (!is.na(pr$footer)) pr$footer else {
     sprintf("StatRouter export %s | SAP %s | audit %s", pr$export_id, substr(pr$sap_hash, 1L, 12L),
-            substr(pr$audit_tip, 1L, 16L))
+            substr(pr$audit_tip, 1L, SR_DX_TIP_CHARS))
   }
   margin <- (8.27 - text_w_in) / 2
   sec <- officer::prop_section(
@@ -497,7 +499,7 @@ sr_docx_digest <- function(path) {
     if (identical(parts[i], "docProps/custom.xml") || grepl("^word/(footer|header)[0-9]*\\.xml$", parts[i])) {
       if (!is.na(tip)) {
         s <- gsub(tip, "SR-AUDIT-TIP", s, fixed = TRUE)
-        s <- gsub(substr(tip, 1L, 16L), "SR-AUDIT-TIP", s, fixed = TRUE)
+        s <- gsub(substr(tip, 1L, SR_DX_TIP_CHARS), "SR-AUDIT-TIP", s, fixed = TRUE)
       }
       if (!is.na(eid)) s <- gsub(eid, "SR-EXPORT-ID", s, fixed = TRUE)
     }

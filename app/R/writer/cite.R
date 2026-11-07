@@ -2,7 +2,7 @@
 #
 # A citation in prose is the token {{C:<key>}} (writer/placeholders.R). A key names one reference item:
 #   - a method reference of inst/templates/references.json (zou2004, cox1972, ...), bundled with the app;
-#   - pkg_<name>, an R package, written from the installed package metadata (utils::citation);
+#   - pkg_<name>, an R package, written from the installed package DESCRIPTION file (R23: not utils::citation);
 #   - r_core, R itself, from citation().
 # Nothing is looked up online: a package that is not installed is an error naming it.
 #
