@@ -156,3 +156,37 @@ test_that("later tasks can register a resolver and verify uses it", {
   sr_ph_put(reg, "a-b", "text", "unit:a:b")
   expect_true(sr_ph_verify(reg, p)$ok)
 })
+
+test_that("sr_ph_lift hides a mean event count below k and a percent printed next to a masked count", {
+  reg <- sr_ph_registry()
+  s1 <- sr_ph_lift("in each of 20 imputed datasets of 200 row(s) (mean 3.0 events); done", reg, "fragment:a:b", "a")
+  r <- reg$rows
+  ev <- r[r$text == "<5", , drop = FALSE]
+  expect_identical(nrow(ev), 1L)
+  expect_true(ev$suppressed)
+  expect_true(is.na(ev$value))
+  expect_false(grepl("3.0", sr_ph_resolve(s1, reg), fixed = TRUE))
+  expect_match(sr_ph_resolve(s1, reg), "mean <5 events", fixed = TRUE)
+  # a mean of 12.5 is not small; neither is a mean that is not followed by "events"
+  reg2 <- sr_ph_registry()
+  s2 <- sr_ph_lift("(mean 12.5 events); the mean 3.0 mm", reg2, "fragment:a:b", "a")
+  expect_identical(sr_ph_resolve(s2, reg2), "(mean 12.5 events); the mean 3.0 mm")
+  # the percent next to a masked count goes with it; next to a visible count it stays
+  reg3 <- sr_ph_registry()
+  s3 <- sr_ph_lift("There were 3 deaths (1.5%) and 12 deaths (6.0%) of 200 rows.", reg3, "fragment:a:b", "a")
+  expect_identical(sr_ph_resolve(s3, reg3), "There were <5 deaths (-) and 12 deaths (6.0%) of 200 rows.")
+  expect_false(grepl("1.5", sr_ph_resolve(s3, reg3), fixed = TRUE))
+  expect_identical(sr_ph_resolve(sr_ph_lift("3 events (1.5%)", sr_ph_registry(), "fragment:a:c", "a"), reg3, cite = NULL) == "", FALSE)
+})
+
+test_that("sr_ph_verify accepts a masked mean and a hidden percent, and rejects a mask of a large mean", {
+  withr::defer(rm(list = c("tstmean", "tstpct"), envir = .sr_ph_resolvers))
+  .sr_ph_register_resolver("tstmean", function(project, parts, kind) parts[1L])
+  .sr_ph_register_resolver("tstpct", function(project, parts, kind) "1.5%")
+  reg <- sr_ph_registry()
+  sr_ph_put(reg, "<5", "count", "tstmean:3.0", suppressed = TRUE)
+  sr_ph_put(reg, "<5", "count", "tstmean:12.5", suppressed = TRUE)
+  sr_ph_put(reg, "-", "num", "tstpct:x", suppressed = TRUE)
+  v <- sr_ph_verify(reg, NULL)
+  expect_identical(v$ok, c(TRUE, FALSE, TRUE))
+})

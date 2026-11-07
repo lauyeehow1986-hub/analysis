@@ -101,6 +101,67 @@ sr_sdc_table <- function(df, k = SR_SDC_K, block_col = 1L, skip_cols = character
   list(table = df, n_suppressed = as.integer(sum(hidden)))
 }
 
+#' Complementary suppression in the model_fit table (a Statistic / Value table)
+#'
+#' The table prints Rows analysed (public: the flow shows it), Events and Non-events (or Censored). When
+#' either of Events and Non-events/Censored is hidden the other is hidden too, otherwise one is the
+#' difference of Rows analysed and the other. The mean event count of an imputed model ("Events (mean over
+#' the imputations)") is hidden when it is above 0 and below k: with no imputed outcome it equals the count.
+#' @param df the table, already passed through sr_sdc_table().
+#' @param k suppression threshold.
+#' @return list(table, n_suppressed = the number of cells hidden here).
+sr_sdc_model_fit <- function(df, k = SR_SDC_K) {
+  stopifnot(is.data.frame(df))
+  if (!all(c("Statistic", "Value") %in% names(df))) return(list(table = df, n_suppressed = 0L))
+  st <- as.character(df$Statistic)
+  v <- as.character(df$Value)
+  txt <- .sr_sdc_text(k)
+  n_new <- 0L
+  hide <- function(i) {
+    if (!identical(v[i], txt)) {
+      v[i] <<- txt
+      n_new <<- n_new + 1L
+    }
+  }
+  ev <- which(st == "Events")
+  cp <- which(st %in% c("Non-events", "Censored"))
+  if (length(ev) == 1L && length(cp) == 1L && (identical(v[ev], txt) || identical(v[cp], txt))) {
+    hide(ev)
+    hide(cp)
+  }
+  for (i in which(startsWith(st, "Events (mean"))) {
+    x <- suppressWarnings(as.numeric(v[i]))
+    if (is.finite(x) && x > 0 && x < k) hide(i)
+  }
+  df$Value <- v
+  list(table = df, n_suppressed = n_new)
+}
+
+#' Complementary suppression in the observed_risk table
+#'
+#' A risk (and its interval) of a level whose N or Events cell is hidden is hidden too: with the total
+#' known the percent gives the count back.
+#' @param df the table, already passed through sr_sdc_table().
+#' @param k suppression threshold.
+#' @return list(table, n_suppressed = the number of cells hidden here).
+sr_sdc_observed_risk <- function(df, k = SR_SDC_K) {
+  stopifnot(is.data.frame(df))
+  txt <- .sr_sdc_text(k)
+  cnt <- intersect(c("N", "Events"), names(df))
+  rk <- names(df)[startsWith(names(df), "Risk")]
+  if (!length(cnt) || !length(rk)) return(list(table = df, n_suppressed = 0L))
+  hid <- Reduce(`|`, lapply(cnt, function(j) as.character(df[[j]]) == txt))
+  hid[is.na(hid)] <- FALSE
+  n_new <- 0L
+  for (j in rk) {
+    v <- as.character(df[[j]])
+    n_new <- n_new + sum(hid & v != txt)
+    v[hid] <- txt
+    df[[j]] <- v
+  }
+  list(table = df, n_suppressed = as.integer(n_new))
+}
+
 #' One count as text
 #'
 #' @param x a single count.

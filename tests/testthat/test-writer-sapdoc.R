@@ -144,3 +144,82 @@ test_that("the SAP and feasibility docs refuse a read-only project", {
   expect_error(sr_sap_docx(p), "read-only", fixed = TRUE)
   expect_error(sr_feasibility_docx(p), "read-only", fixed = TRUE)
 })
+
+.sd_rebind <- function(name, fn, env) {
+  g <- globalenv()
+  old <- get(name, envir = g)
+  assign(name, fn, envir = g)
+  withr::defer(assign(name, old, envir = g), envir = env)
+  invisible(TRUE)
+}
+
+test_that("F3: the SAP and the feasibility docx hide Events below the project's k; n stays", {
+  dir <- .sd_copy()
+  p <- .sd_open(dir, environment())
+  rep <- sr_feasibility_report(p)
+  ev <- rep$events[is.finite(rep$events) & rep$events > 0]
+  expect_gt(length(ev), 0L)
+  k <- as.integer(max(ev)) + 1L
+  vis <- sr_sap_docx(p, path = file.path(tempdir(), "sd-sap-visible.docx"))
+  withr::defer(unlink(file.path(tempdir(), "sd-sap-visible.docx")))
+  p2 <- sr_feasibility_docx(p, suppress_k = k)
+  path <- file.path(p$paths$out, "feasibility", "feasibility-001.docx")
+  s <- officer::docx_summary(officer::read_docx(path))
+  cells <- s$text[!is.na(s$text) & s$content_type == "table cell"]
+  expect_true(paste0("<", k) %in% cells)
+  expect_false(any(cells %in% as.character(as.integer(ev[ev < k]))))
+  nn <- unique(as.character(as.integer(rep$n_cc[is.finite(rep$n_cc)])))
+  expect_true(any(nn %in% cells))
+  # the SAP of a locked project, with the same k
+  dir2 <- .sd_copy()
+  q <- .sd_open(dir2, environment())
+  q <- sr_sap_docx(q, suppress_k = k)
+  stxt <- .sd_text(file.path(q$paths$out, "sap", "SAP_v1.docx"))
+  expect_true(paste0("<", k) %in% stxt)
+  expect_false(any(stxt %in% as.character(as.integer(ev[ev < k]))))
+  expect_error(sr_sap_docx(q, suppress_k = 2L), "suppress_k", fixed = TRUE)
+})
+
+test_that("minor 9: a locked SAP is refused a second time even with a custom path", {
+  lk <- .sd_locked()
+  other <- tempfile("sd-other-", fileext = ".docx")
+  expect_error(sr_sap_docx(lk$project, path = other), "already")
+  expect_false(file.exists(other))
+})
+
+test_that("minor 8/14: a failed doc.exported append removes the file just written and re-raises the condition", {
+  dir <- .sd_copy()
+  p <- .sd_open(dir, environment())
+  boom <- simpleError("append boom", call = quote(sr_project_append(x)))
+  .sd_rebind("sr_project_append", function(project, type, payload) stop(boom), environment())
+  path <- file.path(p$paths$out, "feasibility", "feasibility-001.docx")
+  cond <- tryCatch(sr_feasibility_docx(p), error = function(e) e)
+  expect_identical(conditionMessage(cond), "append boom")
+  expect_identical(conditionCall(cond), quote(sr_project_append(x)))
+  expect_false(file.exists(path))
+})
+
+test_that("minor 16: the draft SAP of a project with results holds none of its numbers", {
+  dir <- .sd_copy()
+  p <- .sd_open(dir, environment())
+  res <- sr_result(p, "a_lr")$effects
+  leak <- unique(c(sr_fmt_num(res$est), sr_fmt_p(res$p), sr_fmt_num(res$lo), sr_fmt_num(res$hi)))
+  leak <- leak[nchar(leak) >= 4L]
+  expect_gt(length(leak), 0L)
+  p$state$sap$locked <- FALSE
+  p <- sr_sap_docx(p)
+  path <- file.path(p$paths$out, "sap", "SAP_draft.docx")
+  expect_true(file.exists(path))
+  txt <- paste(.sd_text(path), collapse = "\n")
+  for (v in leak) expect_false(grepl(v, txt, fixed = TRUE), info = v)
+})
+
+test_that("minor 17: a clustered analysis gets the eldridge2006 citation line in the feasibility docx", {
+  dir <- .sd_copy()
+  p <- .sd_open(dir, environment())
+  .sd_rebind(".sr_wr_clustered", function(project, id) TRUE, environment())
+  p <- sr_feasibility_docx(p)
+  txt <- .sd_text(file.path(p$paths$out, "feasibility", "feasibility-001.docx"))
+  expect_true(any(startsWith(txt, "[1] ")))
+  expect_true(any(grepl("Eldridge", txt, fixed = TRUE)))
+})

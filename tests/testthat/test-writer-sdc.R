@@ -134,3 +134,53 @@ test_that("sr_sdc_km_risk labels n.risk and leaves the rest of the frame alone",
   expect_identical(r$n.risk, km_risk$n.risk)
   expect_identical(names(r), c(names(km_risk), "label"))
 })
+
+test_that("model_fit: hiding Events (or Non-events/Censored) hides the other; Rows analysed stays", {
+  fit <- function(ev, comp, lab = "Non-events", n = 200L) {
+    data.frame(Statistic = c("Rows analysed", "Rows excluded (missing)", "Events", lab),
+               Value = sprintf("%d", c(n, 0L, ev, comp)), stringsAsFactors = FALSE)
+  }
+  sd <- .sr_wr_sdc(fit(3L, 197L), 5L)
+  out <- .sr_wr_sdc_special(sd, "model_fit", 5L)
+  expect_identical(out$table$Value, c("200", "0", "<5", "<5"))
+  expect_identical(out$n_suppressed, 2L)
+  # the complement small, Events large: Events goes too (Cox wording)
+  out2 <- .sr_wr_sdc_special(.sr_wr_sdc(fit(197L, 3L, "Censored"), 5L), "model_fit", 5L)
+  expect_identical(out2$table$Value, c("200", "0", "<5", "<5"))
+  # nothing small: untouched
+  out3 <- .sr_wr_sdc_special(.sr_wr_sdc(fit(90L, 110L), 5L), "model_fit", 5L)
+  expect_identical(out3$table$Value, c("200", "0", "90", "110"))
+  expect_identical(out3$n_suppressed, 0L)
+  # zero is not suppressed, so no complement is hidden
+  out4 <- .sr_wr_sdc_special(.sr_wr_sdc(fit(0L, 200L), 5L), "model_fit", 5L)
+  expect_identical(out4$table$Value, c("200", "0", "0", "200"))
+  # another table name is left alone
+  expect_identical(.sr_wr_sdc_special(sd, "coefficients", 5L), sd)
+})
+
+test_that("model_fit: the mean event count of an imputed model is hidden below k", {
+  mi <- function(v) data.frame(Statistic = c("Rows analysed", "Events (mean over the imputations)", "Imputed datasets (m)"),
+                               Value = c("200", v, "20"), stringsAsFactors = FALSE)
+  expect_identical(sr_sdc_model_fit(mi("3.0"), 5L)$table$Value, c("200", "<5", "20"))
+  expect_identical(sr_sdc_model_fit(mi("4.6"), 5L)$n_suppressed, 1L)
+  expect_identical(sr_sdc_model_fit(mi("12.5"), 5L)$table$Value, c("200", "12.5", "20"))
+  expect_identical(sr_sdc_model_fit(mi("0.0"), 5L)$table$Value, c("200", "0.0", "20"))
+  expect_identical(sr_sdc_model_fit(mi("3.0"), 10L)$table$Value[2L], "<10")
+  expect_identical(sr_sdc_model_fit(data.frame(a = "1"), 5L)$n_suppressed, 0L)
+})
+
+test_that("observed_risk: the risk of a level with a hidden N or Events is hidden", {
+  ob <- data.frame(`Exposure level` = c("A", "B", "C"), N = c("100", "100", "100"), Events = c("3", "40", "50"),
+                   `Risk (95% Wilson CI)` = c("0.030 (0.010 to 0.085)", "0.400 (0.310 to 0.497)", "0.500 (0.404 to 0.596)"),
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  out <- .sr_wr_sdc_special(.sr_wr_sdc(ob, 5L), "observed_risk", 5L)$table
+  expect_identical(out$Events, c("<5", "40", "50"))
+  expect_identical(out$`Risk (95% Wilson CI)`[1L], "<5")
+  expect_identical(out$`Risk (95% Wilson CI)`[2:3], ob$`Risk (95% Wilson CI)`[2:3])
+  # a hidden N hides the risk as well
+  ob2 <- ob
+  ob2$N[2L] <- "4"
+  ob2$Events[2L] <- "40"
+  out2 <- sr_sdc_observed_risk(.sr_wr_sdc(ob2, 5L)$table, 5L)$table
+  expect_identical(out2$`Risk (95% Wilson CI)`[2L], "<5")
+})

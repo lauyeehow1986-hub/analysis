@@ -111,6 +111,26 @@ SR_GUARD_MARK <- "~"
   out
 }
 
+# The text of the free-text L tokens (source "freetext:") that `text` uses, in order of appearance.
+.sr_gd_free_texts <- function(text, rows) {
+  toks <- regmatches(text, gregexpr(SR_PH_RE, text, perl = TRUE))[[1L]]
+  ids <- unique(sub("\\}\\}$", "", sub("^\\{\\{", "", toks)))
+  hit <- rows[rows$id %in% ids & startsWith(as.character(rows$source), "freetext:"), , drop = FALSE]
+  stats::setNames(as.character(hit$text), hit$id)
+}
+
+# `sentence` with every token replaced by the mark, except a free-text token, which is replaced by its words:
+# a person's text is read like prose, so it can neither hide a causal or significance claim nor a number.
+.sr_gd_bare <- function(sentence, rows) {
+  free <- .sr_gd_free_texts(sentence, rows)
+  m <- gregexpr(SR_PH_RE, sentence, perl = TRUE)
+  toks <- regmatches(sentence, m)[[1L]]
+  if (!length(toks)) return(sentence)
+  ids <- sub("\\}\\}$", "", sub("^\\{\\{", "", toks))
+  regmatches(sentence, m) <- list(ifelse(ids %in% names(free), unname(free[ids]), SR_GUARD_MARK))
+  sentence
+}
+
 .sr_gd_snip <- function(s) {
   s <- gsub("\\s+", " ", trimws(s))
   if (nchar(s) > 90L) paste0(substr(s, 1L, 87L), "...") else s
@@ -125,7 +145,7 @@ SR_GUARD_MARK <- "~"
 # The findings of one sentence. `ctx` holds the facts of the block (purpose, wording, section, alpha, the
 # registry rows and the model); `sentence` still carries its tokens.
 .sr_gd_sentence <- function(sentence, ctx) {
-  bare <- gsub(SR_PH_RE, SR_GUARD_MARK, sentence, perl = TRUE)
+  bare <- .sr_gd_bare(sentence, ctx$rows)
   snip <- .sr_gd_snip(sentence)
   rule <- character()
   sev <- character()
@@ -256,7 +276,8 @@ sr_claim_check_text <- function(text, analysis, model, block = "text", section =
               alpha = as.numeric(model$meta$alpha %||% 0.05), rows = model$reg$rows, model = model)
   out <- list()
   # G1 digits, on the whole text
-  dg <- sr_ph_digits(text)
+  dg <- c(sr_ph_digits(text), unlist(lapply(.sr_gd_free_texts(text, ctx$rows), function(s) .sr_ph_num_matches(s)$txt),
+                                     use.names = FALSE))
   if (length(dg)) {
     out[[1L]] <- .sr_gd_frame(block, analysis, "digits", "block",
                               paste0("a number typed into the text: ", paste(unique(dg), collapse = ", "), " in: ",

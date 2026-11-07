@@ -139,8 +139,15 @@ sr_checklist_strobe <- function(model, project) {
       is.data.frame(e) && "events" %in% names(e) && is.finite(suppressWarnings(as.numeric(e$events[prim$row[i]])))
     }, NA)
     ob <- Filter(function(b) grepl("_observed_risk$", as.character(b$id)), tabs)
-    if (any(ev)) .sr_ck_score("green", paste0("event counts reported for ", .sr_ck_ids(unique(prim$analysis[ev]))))
-    else if (length(ob)) .sr_ck_score("green", paste0("observed-risk table ", as.character(ob[[1L]]$id), " is reported"))
+    # the effect rows carry an events field, but only a model_fit table (or an observed-risk table) prints it
+    mf <- Filter(function(b) {
+      grepl("_model_fit$", as.character(b$id)) && is.data.frame(b$df) && "Statistic" %in% names(b$df) &&
+        any(startsWith(as.character(b$df$Statistic), "Events"))
+    }, tabs)
+    shown <- c(mf, ob)
+    if (length(shown)) .sr_ck_score("green", paste0("event counts are printed in table ", as.character(shown[[1L]]$id)))
+    else if (any(ev)) .sr_ck_score("amber", paste0("event counts exist for ", .sr_ck_ids(unique(prim$analysis[ev])),
+                                                     " but no table prints them"))
     else .sr_ck_score("amber", "no event count or observed-risk table is reported")
   }
   s_primary_ci <- function() {

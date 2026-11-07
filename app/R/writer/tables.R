@@ -51,6 +51,13 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
   sr_ph_put(reg, as.character(text), "label", paste0("label:", text))
 }
 
+# An L token for text a person typed (a decision reason, the source of a clinically important difference): it
+# resolves to itself like a label, but the source prefix "freetext" tells the claim guard to read its words
+# and digits as prose (writer/guard.R), which a label is never asked to be.
+.sr_wr_free <- function(reg, text) {
+  sr_ph_put(reg, as.character(text), "label", paste0("freetext:", text))
+}
+
 # `text` with every number (SR_NUM_RE) replaced by an L token, so that a template holds no digit.
 .sr_wr_safe <- function(reg, text) {
   m <- gregexpr(SR_NUM_RE, text, perl = TRUE)
@@ -117,6 +124,20 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
   }
   names(out$table) <- vapply(names(out$table), mask, "", USE.NAMES = FALSE)
   out
+}
+
+# The complementary cells of the two route tables that print an event count next to its complement or its risk:
+# model_fit (Events and Non-events/Censored; the mean MI event count) and observed_risk (the risk of a level
+# whose N or Events is hidden). `sd` is the result of .sr_wr_sdc().
+.sr_wr_sdc_special <- function(sd, nm, k) {
+  extra <- if (identical(nm, "model_fit")) {
+    sr_sdc_model_fit(sd$table, k)
+  } else if (identical(nm, "observed_risk")) {
+    sr_sdc_observed_risk(sd$table, k)
+  } else {
+    return(sd)
+  }
+  list(table = extra$table, n_suppressed = sd$n_suppressed + extra$n_suppressed)
 }
 
 # The multiplicity family an analysis is reported in: its own `family` when that family is in the project, else,
@@ -266,6 +287,7 @@ SR_WR_NONCOLLAPSIBLE_NOTE <- paste0(
       }
     }
     sd <- .sr_wr_sdc(df, opts$suppress_k)
+    sd <- .sr_wr_sdc_special(sd, nm, opts$suppress_k)
     caption <- sprintf("%s %s: %s", rname, .sr_wr_label(reg, id), .sr_wr_safe(reg, gsub("_", " ", nm, fixed = TRUE)))
     main <- identical(route, "table1") && identical(nm, "table1")
     out[[length(out) + 1L]] <- .sr_wr_block(paste0(id, "_", nm), caption, sd$table, fn, id,

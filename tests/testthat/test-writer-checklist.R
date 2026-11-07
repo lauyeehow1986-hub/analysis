@@ -135,3 +135,20 @@ test_that("a bad model or project is refused", {
   expect_error(sr_checklist_strobe(list(), p), "document model")
   expect_error(sr_checklist_strobe(sr_doc_model(p), "x"), "project")
 })
+
+test_that("item 15 (events) is green only when a table prints the counts; otherwise amber and says so", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  ck <- sr_checklist_strobe(m, p)
+  expect_identical(.ck_status(ck, "15"), "green")
+  expect_match(.ck_row(ck, "15")$detail, "event counts are printed in table", fixed = TRUE)
+  strip <- function(m) {
+    drop <- function(bl) Filter(function(b) !(identical(b$type, "table") && grepl("_(model_fit|observed_risk)$", as.character(b$id))), bl)
+    m$main <- drop(m$main)
+    m$supplement <- drop(m$supplement)
+    m
+  }
+  ck2 <- sr_checklist_strobe(strip(m), p)
+  expect_identical(.ck_status(ck2, "15"), "amber")
+  expect_match(.ck_row(ck2, "15")$detail, "but no table prints them", fixed = TRUE)
+})

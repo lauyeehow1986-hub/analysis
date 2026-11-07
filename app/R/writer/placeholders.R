@@ -12,6 +12,7 @@
 #   effect:<analysis>:<row>:<field>        field est | lo_hi | p | n | events
 #   fragment:<analysis>:<name>:<k>         the k-th number of that fragment of sr_result()
 #   label:<text>                           the text itself
+#   freetext:<text>                        the text itself, typed by a person: the claim guard reads it as prose
 
 SR_PH_RE <- "\\{\\{(E[0-9]+|L[0-9]+|C:[a-z][a-z0-9_]*)\\}\\}"
 # A bundled file under inst/templates/: next to app/ in the repo and in the portable bundle. `...` are the
@@ -187,17 +188,31 @@ sr_ph_lift <- function(text, reg, source_prefix, analysis) {
   mm <- .sr_ph_num_matches(text)
   if (!length(mm$txt)) return(text)
   toks <- character(length(mm$txt))
+  pct_hide <- FALSE
   for (k in seq_along(mm$txt)) {
     t <- mm$txt[k]
     after <- sub("^\\(", "", sub("^[[:space:]]+", "", substring(text, mm$start[k] + mm$len[k])))
-    is_count <- grepl("^[0-9]+$", t) && grepl(SR_SDC_COUNT_WORDS, after, perl = TRUE)
+    before <- substring(text, 1L, mm$start[k] - 1L)
+    # the mean event count of an imputed model ("mean 3.0 events") is a count that is not a whole number
+    mean_ev <- grepl("^[0-9]+\\.[0-9]+$", t) && as.numeric(t) > 0 && as.numeric(t) < reg$k &&
+      grepl("mean[[:space:]]+$", before) && grepl("^events?\\b", after, perl = TRUE)
+    is_count <- (grepl("^[0-9]+$", t) || mean_ev) && grepl(SR_SDC_COUNT_WORDS, after, perl = TRUE)
     src <- paste0(source_prefix, ":", k)
     v <- as.numeric(sub("%$", "", t))
-    if (is_count) {
+    hide_pct <- pct_hide && endsWith(t, "%")
+    pct_hide <- FALSE
+    if (hide_pct) {
+      # the percent printed next to a masked count gives the count back (the total is known): hidden with it
+      toks[k] <- sr_ph_put(reg, "-", "num", src, analysis = analysis, value = NA_real_, suppressed = TRUE)
+    } else if (is_count) {
       # a small cell is masked here, so no caller can print it (ruling R13); verify re-derives the raw count
-      sv <- sr_sdc_value(v, k = reg$k)
+      sv <- if (mean_ev) list(text = .sr_sdc_text(reg$k), suppressed = TRUE) else sr_sdc_value(v, k = reg$k)
       toks[k] <- sr_ph_put(reg, sv$text, "count", src, analysis = analysis,
                            value = if (sv$suppressed) NA_real_ else v, suppressed = sv$suppressed)
+      if (sv$suppressed && k < length(mm$txt) && endsWith(mm$txt[k + 1L], "%")) {
+        gap <- substring(text, mm$start[k] + mm$len[k], mm$start[k + 1L] - 1L)
+        pct_hide <- grepl("^[[:space:]]*([A-Za-z]+[[:space:]]*)?\\([[:space:]]*$", gap)
+      }
     } else {
       toks[k] <- sr_ph_put(reg, t, "num", src, analysis = analysis, value = v)
     }
@@ -243,7 +258,7 @@ sr_ph_digits <- function(template) {
     stop("no resolver for source '", source, "'", call. = FALSE)
   }
   rest <- sub("^[^:]*:", "", source)
-  parts <- if (identical(prefix, "label")) rest else strsplit(rest, ":", fixed = TRUE)[[1L]]
+  parts <- if (prefix %in% c("label", "freetext")) rest else strsplit(rest, ":", fixed = TRUE)[[1L]]
   get(prefix, envir = .sr_ph_resolvers, inherits = FALSE)(project, parts, kind)
 }
 
@@ -287,6 +302,7 @@ sr_ph_digits <- function(template) {
 .sr_ph_register_resolver("effect", .sr_ph_resolve_effect)
 .sr_ph_register_resolver("fragment", .sr_ph_resolve_fragment)
 .sr_ph_register_resolver("label", function(project, parts, kind) parts)
+.sr_ph_register_resolver("freetext", function(project, parts, kind) parts)
 
 #' Re-derive every row of the registry from its source and compare it with the registered text.
 #'
@@ -311,8 +327,14 @@ sr_ph_verify <- function(reg, project) {
     }
     got[i] <- as.character(r)
     if (isTRUE(rows$suppressed[i])) {
-      v <- suppressWarnings(as.numeric(got[i]))
-      ok[i] <- grepl("^[0-9]+$", got[i]) && !is.na(v) && v >= 1 && v <= reg$k - 1L
+      v <- suppressWarnings(as.numeric(sub("%$", "", got[i])))
+      ok[i] <- if (endsWith(got[i], "%")) {
+        # a percent hidden next to a masked count is not a count: only its form is checked
+        identical(rows$kind[i], "num") && !is.na(v)
+      } else {
+        # a masked count, or a masked mean event count (not whole): above 0 and below k
+        grepl("^[0-9]+(\\.[0-9]+)?$", got[i]) && !is.na(v) && v > 0 && v < reg$k
+      }
     } else {
       ok[i] <- identical(got[i], rows$text[i])
     }

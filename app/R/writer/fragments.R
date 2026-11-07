@@ -82,7 +82,7 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   expl <- if (identical(dec$decision, "exploratory")) {
     why <- dec$reason
     why <- if (is.character(why) && length(why) == 1L && !is.na(why) && nzchar(why)) {
-      paste0(" (", .sr_wr_label(reg, why), ")")
+      paste0(" (", .sr_wr_free(reg, why), ")")
     } else {
       ""
     }
@@ -115,7 +115,7 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   delta <- if (is.finite(v$delta)) {
     from <- if (is.character(v$delta_source) && length(v$delta_source) == 1L && !is.na(v$delta_source) &&
                 nzchar(v$delta_source)) {
-      paste0(" (", .sr_wr_label(reg, v$delta_source), ")")
+      paste0(" (", .sr_wr_free(reg, v$delta_source), ")")
     } else {
       ""
     }

@@ -25,6 +25,8 @@
 
 .sr_sd_whole <- function(x) vapply(x, function(v) if (is.finite(v)) sprintf("%d", as.integer(round(v))) else "", "", USE.NAMES = FALSE)
 
+.sr_sd_count <- function(x, k) vapply(x, function(v) if (is.finite(v)) sr_sdc_value(v, k = k)$text else "", "", USE.NAMES = FALSE)
+
 .sr_sd_df <- function(...) {
   cols <- list(...)
   as.data.frame(lapply(cols, .sr_sd_col), stringsAsFactors = FALSE, check.names = FALSE)
@@ -55,6 +57,13 @@
   if (startsWith(full, pre)) substring(full, nchar(pre) + 1L) else basename(full)
 }
 
+.sr_sd_check_k <- function(k) {
+  if (!(is.numeric(k) && length(k) == 1L && is.finite(k) && k >= SR_SDC_K && k == round(k))) {
+    stop("`suppress_k` must be a whole number of at least ", SR_SDC_K, " (the small-cell floor SR_SDC_K)", call. = FALSE)
+  }
+  as.integer(k)
+}
+
 .sr_sd_check_path <- function(path) {
   if (!(is.character(path) && length(path) == 1L && !is.na(path) && nzchar(path))) {
     stop("`path` must be NULL or one file name", call. = FALSE)
@@ -64,14 +73,21 @@
 
 # Render the model, then append the doc.exported event; the project comes back with it applied.
 .sr_sd_write <- function(project, blocks, path, kind, id, sap_hash, title, footer = NULL) {
+  made <- !file.exists(path)
   tip <- sr_audit_tip(project$paths$audit)
   props <- list(audit_tip = tip, sap_hash = sap_hash, export_id = id, created = .sr_now(), title = title)
   if (!is.null(footer)) props$footer <- footer
   sr_docx_render(.sr_sd_model(blocks), "main", path, file.path(dirname(path), paste0(".figures-", id)), props)
   unlink(file.path(dirname(path), paste0(".figures-", id)), recursive = TRUE)
   files <- list(list(path = .sr_sd_rel(project, path), sha = .sr_sha256(.sr_read_bytes(path))))
-  sr_project_append(project, "doc.exported",
-                    list(kind = kind, id = id, files = files, audit_tip = tip, sap_hash = sap_hash))
+  # a failed append leaves no unrecorded file behind (it would block the retry): remove it, re-raise the condition
+  tryCatch(
+    sr_project_append(project, "doc.exported",
+                      list(kind = kind, id = id, files = files, audit_tip = tip, sap_hash = sap_hash)),
+    error = function(e) {
+      if (made) unlink(path)
+      stop(e)
+    })
 }
 
 # ---- the SAP ------------------------------------------------------------------------------------------
@@ -121,13 +137,13 @@
   list(.sr_sd_head(paste("Analysis", a$id), 2L), .sr_sd_table(df, paste("Specification of", a$id)))
 }
 
-.sr_sd_feas_table <- function(rep) {
+.sr_sd_feas_table <- function(rep, k = SR_SDC_K) {
   .sr_sd_df(Analysis = rep$analysis, Contrast = rep$contrast, Measure = rep$measure, `n (complete cases)` = .sr_sd_whole(rep$n_cc),
-            Events = .sr_sd_whole(rep$events), `Half-width` = .sr_sd_num(rep$h), `Min. detectable effect` = .sr_sd_num(rep$mde),
+            Events = .sr_sd_count(rep$events, k), `Half-width` = .sr_sd_num(rep$h), `Min. detectable effect` = .sr_sd_num(rep$mde),
             Delta = .sr_sd_num(rep$delta), Tier = rep$tier, Decision = rep$decision, Reason = rep$reason)
 }
 
-.sr_sd_sap_blocks <- function(project, locked) {
+.sr_sd_sap_blocks <- function(project, locked, k = SR_SDC_K) {
   lock <- project$state$sap$lock
   hash <- if (locked) as.character(lock$sap_hash) else sr_sap_hash(project)
   blocks <- list(.sr_sd_head(if (locked) "Statistical analysis plan v1 (locked)" else "Statistical analysis plan (DRAFT, not locked)", 1L))
@@ -170,7 +186,7 @@
 
   rep <- sr_feasibility_report(project)
   if (nrow(rep)) {
-    blocks <- c(blocks, list(.sr_sd_head("Feasibility", 1L), .sr_sd_table(.sr_sd_feas_table(rep), "Feasibility assessment before the lock")))
+    blocks <- c(blocks, list(.sr_sd_head("Feasibility", 1L), .sr_sd_table(.sr_sd_feas_table(rep, k), "Feasibility assessment before the lock")))
   }
   chk <- sr_sap_check(project)
   blocks <- c(blocks, list(.sr_sd_head("Lock check", 1L),
@@ -187,18 +203,23 @@
 #' (kind "sap", id "SAP_v1" or "SAP_draft") is appended.
 #' @param project an open, writable project with at least one analysis in its SAP.
 #' @param path the file to write, or NULL for the default.
+#' @param suppress_k the small-cell threshold: an Events count of 1 to suppress_k - 1 prints as "<k" (the
+#'   complete-case n is a sample size and stays visible).
 #' @return the project with the doc.exported event applied.
-sr_sap_docx <- function(project, path = NULL) {
+sr_sap_docx <- function(project, path = NULL, suppress_k = SR_SDC_K) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  k <- .sr_sd_check_k(suppress_k)
   locked <- isTRUE(project$state$sap$locked) && !is.null(project$state$sap$lock)
   id <- if (locked) "SAP_v1" else "SAP_draft"
   default <- file.path(project$paths$out, "sap", paste0(id, ".docx"))
   if (is.null(path)) path <- default else .sr_sd_check_path(path)
-  if (locked && (file.exists(default) || file.exists(path))) {
+  # the id is also refused when the event log already holds it, whatever path was given
+  done <- any(vapply(project$state$exports %||% list(), function(e) identical(e$id, "SAP_v1"), NA))
+  if (locked && (done || file.exists(default) || file.exists(path))) {
     stop("the locked SAP was already exported (", file.path("out", "sap", "SAP_v1.docx"), "); it is never overwritten", call. = FALSE)
   }
   if (!length(.sr_sap_analyses(project))) stop("the SAP has no analysis to write", call. = FALSE)
-  built <- .sr_sd_sap_blocks(project, locked)
+  built <- .sr_sd_sap_blocks(project, locked, k)
   title <- if (locked) "Statistical analysis plan v1 (locked)" else "Statistical analysis plan (DRAFT, not locked)"
   .sr_sd_write(project, built$blocks, path, "sap", id, built$hash, title, footer = if (locked) NULL else "DRAFT")
 }
@@ -207,8 +228,8 @@ sr_sap_docx <- function(project, path = NULL) {
 
 # The feasibility sentence of the manuscript (writer/fragments.R) resolved through a fresh registry, as plain
 # text; a clustered analysis gets the numbered citation and its reference line.
-.sr_sd_feas_sentence <- function(project, id) {
-  reg <- sr_ph_registry()
+.sr_sd_feas_sentence <- function(project, id, k = SR_SDC_K) {
+  reg <- sr_ph_registry(k = k)
   txt <- .sr_wr_m_feas(project, id, reg)
   if (is.null(txt)) return(list(text = "No precision statement: the assessment has no computed precision.", ref = NULL))
   clustered <- .sr_wr_clustered(project, id)
@@ -225,12 +246,14 @@ sr_sap_docx <- function(project, path = NULL) {
 #' "feasibility") is appended. An existing file is never overwritten.
 #' @param project an open, writable project with feasibility assessments.
 #' @param path the file to write, or NULL for the default.
+#' @param suppress_k the small-cell threshold, as for sr_sap_docx(): it also reaches the feasibility sentence.
 #' @return the project with the doc.exported event applied.
-sr_feasibility_docx <- function(project, path = NULL) {
+sr_feasibility_docx <- function(project, path = NULL, suppress_k = SR_SDC_K) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  k <- .sr_sd_check_k(suppress_k)
   ex <- project$state$exports %||% list()
-  k <- sum(vapply(ex, function(e) identical(e$kind, "feasibility"), NA)) + 1L
-  id <- sprintf("feasibility-%03d", k)
+  n_prev <- sum(vapply(ex, function(e) identical(e$kind, "feasibility"), NA))
+  id <- sprintf("feasibility-%03d", n_prev + 1L)
   if (is.null(path)) path <- file.path(project$paths$out, "feasibility", paste0(id, ".docx")) else .sr_sd_check_path(path)
   if (file.exists(path)) stop("the feasibility report ", basename(path), " already exists; it is never overwritten", call. = FALSE)
   rep <- sr_feasibility_report(project)
@@ -239,11 +262,11 @@ sr_feasibility_docx <- function(project, path = NULL) {
   blocks <- list(.sr_sd_head("Feasibility report", 1L))
   for (a in unique(rep$analysis)) {
     r <- rep[rep$analysis == a, , drop = FALSE]
-    sent <- .sr_sd_feas_sentence(project, a)
+    sent <- .sr_sd_feas_sentence(project, a, k)
     blocks <- c(blocks, list(.sr_sd_head(paste0(a, " (", r$label[1L], ", ", r$route[1L], ")"), 2L), .sr_sd_para(sent$text)))
     if (nrow(r) && any(!is.na(r$contrast))) {
       df <- .sr_sd_df(Contrast = r$contrast, Measure = r$measure, `n (complete cases)` = .sr_sd_whole(r$n_cc),
-                      Events = .sr_sd_whole(r$events), Prevalence = .sr_sd_num(r$prevalence), `Half-width` = .sr_sd_num(r$h),
+                      Events = .sr_sd_count(r$events, k), Prevalence = .sr_sd_num(r$prevalence), `Half-width` = .sr_sd_num(r$h),
                       `Min. detectable effect` = .sr_sd_num(r$mde), `Upper SE` = .sr_sd_num(r$se_upper),
                       Delta = .sr_sd_num(r$delta), Tier = r$tier)
       blocks <- c(blocks, list(.sr_sd_table(df, paste("Feasibility of", a, "by contrast"))))

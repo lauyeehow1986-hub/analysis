@@ -388,3 +388,27 @@ test_that("G4 negation is narrow: 'not clinically significant' and 'not only sig
   expect_identical(nrow(sr_claim_check_text(s3, "a_lr", m)), 0L)
   expect_identical(sr_claim_check_text(sub(hi, lo, s3, fixed = TRUE), "a_lr", m)$rule, "significance")
 })
+
+test_that("F4: a typed reason that becomes a label token is scanned like prose", {
+  env <- environment()
+  p <- .fx_writer_build(env, decision = "exploratory")
+  expect_identical(nrow(sr_claim_guard(sr_doc_model(p))), 0L)
+  p$state$feasibility$t1$decision$reason <- "only 3 deaths; drug reduces mortality"
+  g <- sr_claim_guard(sr_doc_model(p))
+  expect_gt(nrow(g), 0L)
+  expect_true(all(c("digits", "causal_language") %in% g$rule))
+  expect_true(all(g$severity[g$rule %in% c("digits", "causal_language")] == "block"))
+  # an ordinary reason stays clean
+  p$state$feasibility$t1$decision$reason <- "test fixture"
+  expect_identical(nrow(sr_claim_guard(sr_doc_model(p))), 0L)
+})
+
+test_that("F4: a free-text token is read by the digit and causal rules; a plain label token is not", {
+  p <- .fx_writer_project(environment())
+  m <- sr_doc_model(p)
+  tok <- .sr_wr_free(m$reg, "only 3 deaths")
+  g <- sr_claim_check_text(paste0("Reason: ", tok, "."), "t1", m)
+  expect_true("digits" %in% g$rule)
+  lab <- .sr_wr_label(m$reg, "65+ deaths")
+  expect_identical(nrow(sr_claim_check_text(paste0("Reason: ", lab, "."), "t1", m)), 0L)
+})

@@ -400,3 +400,24 @@ test_that("the flow block holds no raw small count: 1 to k - 1 is <k, zero stays
   expect_true(file.exists(r$path))
   expect_match(r$sha, "^[0-9a-f]{64}$")
 })
+
+test_that("model_fit and observed_risk of a route: a hidden Events hides its complement and the risk; Rows analysed stays", {
+  p <- .fx_writer_project(environment())
+  ev <- as.integer(sr_result(p, "a_lr")$effects$events[1L]); k <- ev + 1L
+  reg <- sr_ph_registry(k = k)
+  blocks <- .sr_wr_route_tables(p, "a_lr", reg, list(table2 = "label", suppress_k = k))
+  ids <- vapply(blocks, function(b) b$id, "")
+  fit <- blocks[[grep("model_fit$", ids)]]$df
+  txt <- function(df, stat) {
+    v <- df$Value[df$Statistic == stat]
+    # cells are tokens: resolve them
+    sr_ph_resolve(v, reg)
+  }
+  expect_identical(txt(fit, "Events"), paste0("<", k))
+  expect_identical(txt(fit, "Non-events"), paste0("<", k))
+  expect_false(identical(txt(fit, "Rows analysed"), paste0("<", k)))
+  ob <- blocks[[grep("observed_risk$", ids)]]$df
+  rk <- grep("^Risk", names(ob), value = TRUE)
+  expect_gt(length(rk), 0L)
+  for (cn in rk) expect_true(all(sr_ph_resolve(ob[[cn]], reg) == paste0("<", k)))
+})
