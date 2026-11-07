@@ -280,8 +280,10 @@ sr_journal_preset <- function(name = "default") {
     }
     .sr_dx_clean(v)
   }
+  # `footer` and `title` are optional: they replace the default footer line and the document title property
+  opt <- function(nm) if (is.null(props[[nm]])) NA_character_ else one(nm)
   list(audit_tip = one("audit_tip"), sap_hash = one("sap_hash"), export_id = one("export_id"),
-       created = .sr_dx_time(props$created))
+       created = .sr_dx_time(props$created), footer = opt("footer"), title = opt("title"))
 }
 
 #' Render one part of the document model to a .docx.
@@ -295,7 +297,8 @@ sr_journal_preset <- function(name = "default") {
 #' @param part "main" or "supplement".
 #' @param path the .docx to write.
 #' @param fig_dir the folder of the figure PNGs (created).
-#' @param props list(audit_tip, sap_hash, export_id, created): single strings and a time.
+#' @param props list(audit_tip, sap_hash, export_id, created): single strings and a time; optionally `footer`
+#'   (the footer line, instead of the default) and `title` (the title property).
 #' @return path.
 sr_docx_render <- function(model, part = c("main", "supplement"), path, fig_dir, props) {
   part <- match.arg(part)
@@ -318,7 +321,7 @@ sr_docx_render <- function(model, part = c("main", "supplement"), path, fig_dir,
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
 
   x <- officer::read_docx()
-  x <- officer::set_doc_properties(x, title = if (identical(part, "main")) "Manuscript" else "Supplement",
+  x <- officer::set_doc_properties(x, title = if (!is.na(pr$title)) pr$title else if (identical(part, "main")) "Manuscript" else "Supplement",
                                    creator = "StatRouter", created = pr$created,
                                    values = list(sr_audit_tip = pr$audit_tip, sr_sap_hash = pr$sap_hash,
                                                  sr_export_id = pr$export_id))
@@ -332,8 +335,10 @@ sr_docx_render <- function(model, part = c("main", "supplement"), path, fig_dir,
       checklist = .sr_dx_checklist(x, b, ctx),
       stop("unknown block type '", b$type, "'", call. = FALSE))
   }
-  foot <- sprintf("StatRouter export %s | SAP %s | audit %s", pr$export_id, substr(pr$sap_hash, 1L, 12L),
-                  substr(pr$audit_tip, 1L, 16L))
+  foot <- if (!is.na(pr$footer)) pr$footer else {
+    sprintf("StatRouter export %s | SAP %s | audit %s", pr$export_id, substr(pr$sap_hash, 1L, 12L),
+            substr(pr$audit_tip, 1L, 16L))
+  }
   margin <- (8.27 - text_w_in) / 2
   sec <- officer::prop_section(
     page_size = officer::page_size(orient = "portrait", width = 8.27, height = 11.69),
