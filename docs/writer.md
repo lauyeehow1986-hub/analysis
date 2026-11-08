@@ -23,6 +23,15 @@ placeholders.
 The SAP and the feasibility report are Word files of their own, written by `sr_sap_docx()` and
 `sr_feasibility_docx()`. Both are plain text with no placeholders, and neither is run through the guard.
 
+**Study design and decisions (from the router).** When the router has decided the study design, the Methods
+open with a "Study design" paragraph: the design, the objective from the PICO and the decided purpose, the
+setting and period, the reporting guideline and a pointer to the decision log. Every PICO field enters
+through a label token, so the claim guard reads it like prose. The supplement gets a table "Analysis
+decisions" (each decided router instance, its choice, who decided it, any override and the reason); it holds
+choices only, never a probability. STROBE items 3 to 5 are scored from the PICO and these decisions. For a
+CONSORT (`rct`) project the Methods cite CONSORT, the supplement carries a note to complete the checklist by
+hand, and no `checklist_strobe.csv` is exported. See [router.md](router.md).
+
 ## 2. The export files
 
 `sr_export()` writes `out/exports/export-NNN/` in the project folder. The folder is written as

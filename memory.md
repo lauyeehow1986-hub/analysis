@@ -14,6 +14,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Final review fixed: `sr_sap_add` compiles every spec and checks binary event coding before the lock. Full suite 9967 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
 | 2026-10-18 | P1c.1 study feasibility verdict done (branch `p1c1-feasibility`, Tasks 1-6): the outcome-blind engine (`app/R/sap/feas_engine.R`: SEs, design effect, h, MDE, tiers, blockers, warnings), the `feasibility.assessed` / `feasibility.decided` events, assess / decide / report / fragment API (`app/R/sap/feasibility.R`), the lock gate (`sr_sap_check` feasibility rows, the verdict frozen into `sr_sap_hash`, `sr_sap_remove` and `sr_run` honour a stop). Validation: the predicted null-effect SE is within 10% of the empirical SD in 11/11 cells at 1000 reps (with and without clustering), and on NHEFS the marginal-value prediction is conservative (predicted MD SE 0.472 vs actual 0.463); `tools/feas_sim.R`, `docs/validation.md` section 3. `docs/analysis.md` section 4. Full suite 10691 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), `LINT OK (63 files)` |
 | 2026-11-07 | P1d.1 writer done (branch `p1d-writer`, Tasks 1-12): the placeholder registry and document model (`app/R/writer/placeholders.R`, `fragments.R`, `tables.R`, `figures.R`, `model.R`), small-cell suppression (`sdc_out.R`, one `suppress_k` per document), the claim guard G1-G9 (`guard.R`), the STROBE checklist (`checklist.R`), references (`cite.R`), the Word renderer with journal presets (`docx.R`), the analysis script and lockfile (`script.R`), the SAP and feasibility Word files (`sapdoc.R`), and `sr_export` (out/exports/export-NNN, with a `doc.exported` event per file). Guide `docs/writer.md`; `docs/analysis.md` section 13. Lint `LINT OK (76 files)`. Full suite: run by the controller at the P1d.1 review; its counts are not recorded here |
+| 2026-11-08 | P1d.2 router done (branch `p1d-router`, Tasks 1-11): the PICO record (`pico.set`), the decision-node graph with input hashes and staleness, the metadata-only state builder with column-name masking and the token budget, the System One request / response contract, the abstain rule, the rules backend and the Jev cloud backend (gates: mode, key, DPA ack, session consent, payload approval; shadow mode, predictions never applied), the P1 nodes (design, purpose, guideline, outcome / exposure column, outcome type, primary route, covariate timing), the decision table, the shadow report and golden-set export, the SAP lock gate and router hash part, and the writer study-design paragraph, decision table and STROBE items 3-5. Guide `docs/router.md`. Full suite 13355 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), 1 warning (shiny built under a newer R), `LINT OK (89 files)`. The first full run failed 2 tests (test-writer-checklist): the cached writer template outlives `test-spec`, which empties the route registry, so `.fx_writer_project` now re-registers the routes |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -26,9 +27,13 @@ design; this file holds *what has happened* and *what we learned*.
    `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`); review and merge the branch. The SAP lock
    requires its verdict.
 7. **P1d is split into four plans: writer, router, freeze, UI.** The writer (P1d.1) is done (plan
-   `docs/superpowers/plans/2026-10-18-p1d-writer.md`, branch `p1d-writer`, guide `docs/writer.md`).
-   **Next: the P1d router plan** (PICO and study design, the System One router), then the freeze and UI
-   plans. Writer open items (carried into the router, freeze and P2 work):
+   `docs/superpowers/plans/2026-10-18-p1d-writer.md`, branch `p1d-writer`, guide `docs/writer.md`). The
+   router (P1d.2) is done (plan `docs/superpowers/plans/2026-11-08-p1d-router.md`, branch `p1d-router`,
+   guide `docs/router.md`).
+   **Next: the P1d freeze plan**, then the UI plan (it owns the router panel, the payload preview and the
+   consent dialog). Writer and router open items (carried into the freeze, UI, P2 and P3 work):
+     - The router has no UI yet; only Jev is registered (the `local` and `clm` ids are reserved for P3), and
+       the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
      - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
        the journal's author guide. The jama preset narrows the side margins for its 178 mm figures.
      - The bibliographic data of the method references copied from the plan (Task 5) must be re-checked
@@ -201,6 +206,15 @@ design; this file holds *what has happened* and *what we learned*.
   error. Make such edits with the Edit / Write tool, or use `[(]` / `fixed = TRUE` in the pattern.
 - **Full RED counts:** testthat stops after 10 failures. Run
   `TESTTHAT_MAX_FAILS=Inf Rscript tools/run_tests.R <filter>` to see them all.
+- **Every lock now needs a routed project:** the SAP lock gate requires a decided study design and purpose.
+  `.fx_feasible(p)` calls `.fx_routed(p)` first (a PICO, the design, the purpose, then the rules); pass
+  `routed = FALSE` only for a test of the gate itself.
+- **The router never applies a prediction (P1) and is a no-op after the lock:** `sr_router_run` returns the
+  project unchanged once the SAP is locked, `pico.set` and `router.decided` are refused, and a prediction is
+  only ever read to decide whether an override needs a reason. A backend failing a gate (mode, key, DPA ack,
+  consent) is skipped with no event; only a missing payload approval is logged, as a failed prediction.
+- **The shadow export keeps the last prediction per (key, backend) and refuses to overwrite;** it never holds
+  the key (the sentinel `sk-test-SENTINEL-0000` must not appear in events, audit, errors or an export).
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

@@ -118,6 +118,7 @@
     p <- .fx_writer_build(env = env, ...)
     return(p)
   }
+  .fx_writer_routes()  # an earlier test file (test-spec) may have emptied the registry since the template was cached
   tpl <- .fx_writer_template()
   dest <- withr::local_tempdir(.local_envir = env)
   file.copy(tpl, dest, recursive = TRUE)
