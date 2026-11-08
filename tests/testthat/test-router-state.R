@@ -241,3 +241,71 @@ test_that("the mask option is read from sr_opt", {
   expect_false(grepl("name=age", sr_router_state(.sr_router_ctx(p, nd, "t"))$text, fixed = TRUE))
   expect_identical(sr_router_columns(p, "t")$name[2L], "c002")
 })
+
+# ---- fix round 1 ------------------------------------------------------------------------------------
+
+.rs_token <- function(name, x) {
+  grepl(paste0("(?<![A-Za-z0-9_.])", gsub("([][{}()*+?.^$|\\])", "\\\1", name), "(?![A-Za-z0-9_.])"),
+        x, perl = TRUE)
+}
+
+test_that("the mask covers every payload string", {
+  p <- .rs_ingested(.rs_df(), roles = c(age = "covariate"))
+  p <- sr_pico_set(p, population = "adults with age over 60", outcome = "outcome at 30 days",
+                   exposure = "grp A")
+  nd <- sr_node("toy_leak", "Toy leak", c("x", "y"), scope = "table", facts_columns = TRUE,
+                facts = function(ctx) list(remark = "compare age and outcome", vec = c("age", "outcome_x", "sex"),
+                                           column_name = "age"),
+                question = function(ctx) {
+                  list(instructions = "Decide whether age or outcome matters (age_group excluded).",
+                       criteria = list(x = "use age", y = "use outcome; not sex"))
+                })
+  sr_node_register(nd)
+  withr::defer(.sr_node_unregister("toy_leak"))
+  nms <- sr_router_columns(p, "t", mask = FALSE)$name
+  open <- sr_router_preview(p, nd, "t", mask = FALSE)
+  expect_true(.rs_token("age", open$body))
+  expect_true(.rs_token("outcome", open$body))
+  m <- sr_router_preview(p, nd, "t", mask = TRUE)
+  for (n in nms) expect_false(.rs_token(n, m$body), info = n)
+  expect_match(m$text, "fact.remark: compare c002 and c005", fixed = TRUE)
+  expect_match(m$text, "fact.vec: c002, outcome_x, c003", fixed = TRUE)
+  expect_match(m$text, "population: adults with c002 over 60", fixed = TRUE)
+  expect_match(m$body, "Decide whether c002 or c005 matters (age_group excluded).", fixed = TRUE)
+  expect_match(m$body, "use c002", fixed = TRUE)
+})
+
+test_that("the longest column name is replaced first and only whole tokens", {
+  df <- data.frame(age = 1:4, age_group = 2:5, a.b = 3:6, stringsAsFactors = FALSE)
+  p <- .rs_ingested(df)
+  nd <- sr_node("toy_leak2", "Toy leak", c("x", "y"), scope = "table",
+                facts = function(ctx) list(t = "age_group, age, a.b, (age), xage, age2, a.b.c, Age"))
+  ctx <- .sr_router_ctx(p, nd, "t")
+  st <- sr_router_state(ctx, mask = TRUE)
+  expect_true("fact.t: c002, c001, c003, (c001), xage, age2, a.b.c, Age" %in% st$lines)
+})
+
+test_that("column-option keys are detected from the criteria", {
+  p <- .rs_project()
+  bad <- sr_node("toy_badkeys", "Bad keys", c("id", "age"), scope = "table", facts_columns = FALSE,
+                 question = function(ctx) list(instructions = "Pick a column.",
+                                               criteria = list(c001 = "first", c002 = "second")))
+  expect_error(sr_router_request(.sr_router_ctx(p, bad, "t"), FALSE), "facts_columns")
+  fx <- sr_node("toy_fixed", "Fixed", c("c001", "c002"), scope = "table",
+                question = function(ctx) list(instructions = "Pick one.",
+                                              criteria = list(c001 = "first", c002 = "second")))
+  r <- sr_router_request(.sr_router_ctx(p, fx, "t"), FALSE)
+  expect_identical(r$keymap, c(c001 = "c001", c002 = "c002"))
+})
+
+test_that("a state over the token budget stops the request", {
+  p <- .rs_project()
+  big <- sr_node("toy_big", "Big", c("x", "y"), scope = "table",
+                 facts = function(ctx) list(blob = strrep("word ", 8000L)),
+                 question = function(ctx) list(instructions = "Pick.", criteria = list(x = "a", y = "b")))
+  ctx <- .sr_router_ctx(p, big, "t")
+  st <- sr_router_state(ctx, FALSE)
+  expect_gt(st$tokens, SR_ROUTER_MAX_TOKENS)
+  expect_identical(st$omitted, 0L)
+  expect_null(sr_router_request(ctx, FALSE))
+})

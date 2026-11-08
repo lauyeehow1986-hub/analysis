@@ -59,22 +59,52 @@ sr_router_columns <- function(project, table, mask = sr_opt("router_mask", FALSE
   cols
 }
 
+# Replace whole-token occurrences of the real column names in `x` by their keys: case-sensitive, longest
+# name first, a token boundary being any character outside [A-Za-z0-9_.] (or the string's ends). One pass,
+# so a key that equals another column's name is never replaced twice.
+.sr_router_mask_text <- function(x, raw) {
+  x <- as.character(x)
+  if (!length(x) || !nrow(raw)) return(x)
+  nm <- raw$name[nzchar(raw$name)]
+  nm <- nm[order(-nchar(nm), seq_along(nm))]
+  nm <- nm[!duplicated(nm)]
+  if (!length(nm)) return(x)
+  esc <- gsub("([][{}()*+?.^$|\\\\])", "\\\\\\1", nm)
+  re <- paste0("(?<![A-Za-z0-9_.])(?:", paste(esc, collapse = "|"), ")(?![A-Za-z0-9_.])")
+  vapply(x, function(s) {
+    if (is.na(s)) return(s)
+    m <- gregexpr(re, s, perl = TRUE)
+    hit <- regmatches(s, m)
+    if (length(hit[[1L]])) {
+      regmatches(s, m) <- list(raw$key[match(hit[[1L]], raw$name)])
+    }
+    s
+  }, "", USE.NAMES = FALSE)
+}
+
+# The real columns of the context's table when masking applies, else NULL.
+.sr_router_mask_cols <- function(ctx, mask) {
+  if (!mask || is.na(ctx$table)) return(NULL)
+  .sr_router_columns_raw(ctx$project, ctx$table)
+}
+
 # One `fact.<name>: <value>` line per fact. With `mask`, the facts column_name and column_label of a
 # column-scope node show the column key and "" (the input hash still hashes the real values).
-.sr_router_fact_lines <- function(ctx, mask) {
+.sr_router_fact_lines <- function(ctx, mask, raw = NULL) {
   nd <- ctx$node
   facts <- if (is.null(nd$facts)) list() else nd$facts(ctx)
   if (!length(facts)) return(character())
   if (mask) {
     key <- NA_character_
-    if (!is.na(ctx$table) && !is.na(ctx$column)) {
-      raw <- .sr_router_columns_raw(ctx$project, ctx$table)
-      key <- raw$key[match(ctx$column, raw$name)]
-    }
+    if (!is.null(raw) && !is.na(ctx$column)) key <- raw$key[match(ctx$column, raw$name)]
     if ("column_name" %in% names(facts)) facts$column_name <- if (is.na(key)) "" else key
     if ("column_label" %in% names(facts)) facts$column_label <- ""
   }
-  vals <- vapply(facts, function(v) paste(as.character(unlist(v, use.names = FALSE)), collapse = ", "), "")
+  vals <- vapply(facts, function(v) {
+    v <- as.character(unlist(v, use.names = FALSE))
+    if (!is.null(raw)) v <- .sr_router_mask_text(v, raw)
+    paste(v, collapse = ", ")
+  }, "")
   paste0("fact.", .sr_router_oneline(names(facts)), ": ", .sr_router_oneline(vals))
 }
 
@@ -94,13 +124,16 @@ sr_router_state <- function(ctx, mask = sr_opt("router_mask", FALSE)) {
   mask <- isTRUE(as.logical(mask))
   nd <- ctx$node
   has_table <- !is.na(ctx$table)
-  head <- c(paste0("node: ", .sr_router_oneline(nd$id)), .sr_router_oneline(.sr_pico_text(ctx$project)))
+  raw <- .sr_router_mask_cols(ctx, mask)
+  pico <- .sr_pico_text(ctx$project)
+  if (!is.null(raw)) pico <- .sr_router_mask_text(pico, raw)
+  head <- c(paste0("node: ", .sr_router_oneline(nd$id)), .sr_router_oneline(pico))
   if (has_table) {
     rows <- sr_store_manifest(ctx$project, ctx$table)$rows
     head <- c(head, paste0("table: ", .sr_router_oneline(ctx$table)),
               paste0("rows: ", .sr_router_count(as.numeric(rows))))
   }
-  head <- c(head, .sr_router_fact_lines(ctx, mask))
+  head <- c(head, .sr_router_fact_lines(ctx, mask, raw))
   col_lines <- if (isTRUE(nd$facts_columns) && has_table) {
     .sr_router_column_lines(sr_router_columns(ctx$project, ctx$table, mask))
   } else {
@@ -121,22 +154,35 @@ sr_router_state <- function(ctx, mask = sr_opt("router_mask", FALSE)) {
 
 #' The request for a node instance: list(request, sha, keymap), or NULL when the node has no question,
 #' the question needs more than SR_SYSONE_MAX_CRITERIA criteria, or a column line was omitted. `keymap`
-#' maps each criteria key to its option: itself for a fixed option, the column name for a c001 key of a
-#' node that needs the columns. The single question is named "choice".
+#' maps each criteria key to its option: itself for a fixed option, the column name for a c001 key (an error
+#' unless the node has facts_columns). With `mask`, real column names are replaced by their keys in every
+#' string. The token cap also stops a request. The single question is named "choice".
 sr_router_request <- function(ctx, mask = sr_opt("router_mask", FALSE)) {
+  mask <- isTRUE(as.logical(mask))
   nd <- ctx$node
   if (is.null(nd$question)) return(NULL)
   q <- nd$question(ctx)
   if (is.null(q)) return(NULL)
   if (length(q$criteria) > SR_SYSONE_MAX_CRITERIA) return(NULL)
   st <- sr_router_state(ctx, mask)
-  if (st$omitted > 0L) return(NULL)
+  if (st$omitted > 0L || st$tokens > SR_ROUTER_MAX_TOKENS) return(NULL)
   keys <- names(q$criteria)
   keymap <- stats::setNames(keys, keys)
-  if (isTRUE(nd$facts_columns) && !is.na(ctx$table)) {
+  raw <- NULL
+  if (!is.na(ctx$table)) {
     raw <- .sr_router_columns_raw(ctx$project, ctx$table)
-    hit <- keys %in% raw$key
+    fixed <- if (is.function(nd$options)) nd$options(ctx) else nd$options
+    hit <- keys %in% raw$key & !(keys %in% fixed)
+    if (any(hit) && !isTRUE(nd$facts_columns)) {
+      stop("sr_router_request: node '", nd$id, "' has column keys in its criteria (",
+           paste(utils::head(keys[hit], 3L), collapse = ", "),
+           ") but facts_columns is FALSE, so the model would see keys without names", call. = FALSE)
+    }
     keymap[hit] <- raw$name[match(keys[hit], raw$key)]
+  }
+  if (mask && !is.null(raw)) {
+    q$instructions <- .sr_router_mask_text(q$instructions, raw)
+    q$criteria <- lapply(q$criteria, function(d) if (is.null(d)) NULL else .sr_router_mask_text(d, raw))
   }
   request <- sr_sysone_request(st$text, list(choice = sr_sysone_choice(q$instructions, q$criteria)))
   list(request = request, sha = sr_sysone_sha(request), keymap = keymap)
