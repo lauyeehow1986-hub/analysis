@@ -32,7 +32,8 @@ design; this file holds *what has happened* and *what we learned*.
      - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
        the journal's author guide. The jama preset narrows the side margins for its 178 mm figures.
      - The bibliographic data of the method references copied from the plan (Task 5) must be re-checked
-       against the publisher records before release.
+       against the publisher records before release (including schulz2010, the CONSORT statement, added by
+       the router writer task).
      - "Refresh numbers" in an edited docx is P2. The writer stores only the first-use bookmarks (`sr_E<n>`)
        and `placeholders.json`; later uses of a token are not refreshed (R30).
      - STROBE items 1-5 (the author items) stay amber until the router records PICO and the study design.

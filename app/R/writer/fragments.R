@@ -45,6 +45,84 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
          ") before any outcome was analysed.")
 }
 
+
+# ---- study design (the router's decisions) --------------------------------------------------------
+
+# The label text of each design the router can decide (SR_DESIGNS).
+SR_WR_DESIGN_TEXT <- c(cohort_prospective = "prospective cohort", cohort_retrospective = "retrospective cohort",
+                       case_control = "case-control", cross_sectional = "cross-sectional",
+                       rct = "randomised controlled trial", other = "observational")
+
+# One PICO field as a trimmed string, or NA.
+.sr_wr_pico_field <- function(project, field) {
+  v <- sr_pico(project)[[field]]
+  if (is.null(v) || length(v) != 1L || is.na(v) || !nzchar(trimws(v))) NA_character_ else trimws(as.character(v))
+}
+
+# The decided choice of a project-scope node, or NA.
+.sr_wr_choice <- function(project, node) {
+  v <- tryCatch(sr_router_choice(project, node), error = function(e) NA_character_)
+  if (length(v) != 1L || is.na(v)) NA_character_ else as.character(v)
+}
+
+# The "Study design" paragraph, or NULL while the design is undecided. Every PICO field, the design text and
+# the guideline enter through .sr_wr_label, so a digit or a markup character of a typed field is an L token.
+.sr_wr_m_design <- function(project, reg) {
+  design <- .sr_wr_choice(project, "design")
+  if (is.na(design)) return(NULL)
+  dtxt <- unname(SR_WR_DESIGN_TEXT[design])
+  if (is.na(dtxt)) dtxt <- design
+  L <- function(x) .sr_wr_label(reg, x)
+  f <- function(nm) .sr_wr_pico_field(project, nm)
+  pop <- f("population")
+  out <- paste0("This was a ", L(dtxt), " study.")
+  purpose <- .sr_wr_choice(project, "purpose")
+  obj <- NULL
+  if (identical(purpose, "explain-causal") && !anyNA(c(f("exposure"), f("outcome"), pop))) {
+    cmp <- if (is.na(f("comparator"))) "" else paste0(" compared with ", L(f("comparator")))
+    obj <- paste0("The objective was to estimate the effect of ", L(f("exposure")), cmp, " on ", L(f("outcome")),
+                  " in ", L(pop), ".")
+  } else if (purpose %in% c("describe", "predict") && !anyNA(c(f("outcome"), pop))) {
+    verb <- if (identical(purpose, "describe")) "describe" else "predict"
+    obj <- paste0("The objective was to ", verb, " ", L(f("outcome")), " in ", L(pop), ".")
+  }
+  if (!is.null(obj)) out <- c(out, obj)
+  if (!is.na(f("setting")) || !is.na(f("period"))) {
+    parts <- c(if (!is.na(f("setting"))) L(f("setting")), if (!is.na(f("period"))) L(f("period")))
+    out <- c(out, paste0("Setting: ", paste(parts, collapse = ", "), "."))
+  }
+  guide <- .sr_wr_choice(project, "guideline")
+  if (identical(guide, "strobe")) {
+    out <- c(out, "Reporting follows the STROBE statement {{C:vonelm2007}}.")
+  } else if (identical(guide, "consort")) {
+    out <- c(out, "Reporting follows the CONSORT statement {{C:schulz2010}}.")
+  }
+  out <- c(out, paste0("The study design, purpose and variable roles were recorded in a decision log before the ",
+                       "analysis plan was locked (Supplementary Table: analysis decisions)."))
+  paste(out, collapse = " ")
+}
+
+# The supplementary table of the decided router instances: what was decided, by whom, and why. It holds the
+# choice only, never a probability or a confidence. Every cell is an L token, so a typed reason with digits
+# passes the claim guard. NULL when nothing is decided.
+.sr_wr_decision_table <- function(project, reg) {
+  tb <- sr_router_table(project)
+  tb <- tb[tb$status == "decided", , drop = FALSE]
+  if (!nrow(tb)) return(NULL)
+  L <- function(x) if (is.na(x) || !nzchar(x)) "" else .sr_wr_label(reg, x)
+  what <- vapply(seq_len(nrow(tb)), function(i) {
+    scope <- c(tb$table[i], tb$column[i])
+    scope <- scope[!is.na(scope) & nzchar(scope)]
+    L(if (length(scope)) paste0(tb$label[i], " (", paste(scope, collapse = ", "), ")") else tb$label[i])
+  }, "")
+  df <- data.frame(Decision = what,
+                   Choice = vapply(tb$choice, L, "", USE.NAMES = FALSE),
+                   `Decided by` = vapply(ifelse(tb$resolver %in% c("rule", "rules"), "rule", "user"), L, "", USE.NAMES = FALSE),
+                   Override = ifelse(tb$override %in% TRUE, L("yes"), ""),
+                   Reason = vapply(tb$reason, L, "", USE.NAMES = FALSE),
+                   stringsAsFactors = FALSE, check.names = FALSE)
+  .sr_wr_block("analysis_decisions", "Analysis decisions", df, character(), NA_character_, "supplement", 0L)
+}
 # The citation tokens of a block of keys: " {{C:k}} {{C:k}}", or "" without a key.
 .sr_wr_cite_tokens <- function(keys) {
   keys <- unique(as.character(keys))
@@ -153,7 +231,7 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
 }
 
 # The software sentence; `packages` are the packages of the reported routes (writer/cite.R), each cited.
-.sr_wr_m_software <- function(reg, packages) {
+.sr_wr_m_software <- function(reg, packages, guideline = "strobe") {
   r <- sr_ph_put(reg, .sr_wr_r_version(), "text", "libsnap:r")
   packages <- sort(unique(as.character(packages)))
   with <- if (length(packages)) {
@@ -162,8 +240,12 @@ SR_WR_LABEL_RANK <- c(primary = 1L, secondary = 2L, exploratory = 3L, post_hoc =
   } else {
     ";"
   }
-  paste0("Analyses were run in R ", r, " {{C:r_core}}", with, " the exact code is supplied as analysis.R. ",
-         "Reporting follows the STROBE statement {{C:vonelm2007}}; the checklist is in the supplementary material.")
+  report <- if (identical(guideline, "consort")) {
+    "Reporting follows the CONSORT statement {{C:schulz2010}}; the checklist is not produced by StatRouter."
+  } else {
+    "Reporting follows the STROBE statement {{C:vonelm2007}}; the checklist is in the supplementary material."
+  }
+  paste0("Analyses were run in R ", r, " {{C:r_core}}", with, " the exact code is supplied as analysis.R. ", report)
 }
 
 .sr_wr_r_version <- function(r = sr_libsnap(character())$r) {

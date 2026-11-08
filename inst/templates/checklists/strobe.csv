@@ -2,9 +2,9 @@ item,section,label,rule
 1a,Title and abstract,Study design named in title or abstract,author
 1b,Title and abstract,Balanced abstract of methods and findings,author
 2,Introduction,Scientific background and rationale,author
-3,Introduction,Objectives and prespecified hypotheses,author
-4,Methods,Key design elements stated early,author
-5,Methods,Setting and relevant dates,author
+3,Introduction,Objectives and prespecified hypotheses,objective
+4,Methods,Key design elements stated early,design
+5,Methods,Setting and relevant dates,setting
 6a,Methods,Eligibility and selection of participants,flow
 6b,Methods,Matching criteria and numbers matched,author
 7,Methods,Outcomes and exposures and confounders defined,roles

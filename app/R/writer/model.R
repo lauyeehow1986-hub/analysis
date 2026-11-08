@@ -213,8 +213,14 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   }
 
   # ---- the main document ----
-  main <- list(.sr_wr_head("Methods", 1L), .sr_wr_head("Statistical analysis", 2L),
-               .sr_wr_para("methods_lock", .sr_wr_m_lock(project, reg), NA_character_, "methods"))
+  design_txt <- .sr_wr_m_design(project, reg)
+  guideline <- .sr_wr_choice(project, "guideline")
+  main <- list(.sr_wr_head("Methods", 1L))
+  if (!is.null(design_txt)) {
+    main <- c(main, list(.sr_wr_head("Study design", 2L), .sr_wr_para("methods_design", design_txt, NA_character_, "methods")))
+  }
+  main <- c(main, list(.sr_wr_head("Statistical analysis", 2L),
+                       .sr_wr_para("methods_lock", .sr_wr_m_lock(project, reg), NA_character_, "methods")))
   for (id in main_ids) main <- c(main, list(methods_para(id)))
   for (id in main_ids[label_of(main_ids) %in% "primary"]) {
     txt <- .sr_wr_m_feas(project, id, reg)
@@ -226,7 +232,7 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   }
   main <- c(main, list(
     .sr_wr_para("methods_deviations", .sr_wr_m_deviations(project), NA_character_, "methods"),
-    .sr_wr_para("methods_software", .sr_wr_m_software(reg, unlist(lapply(keys, function(k) k$packages))),
+    .sr_wr_para("methods_software", .sr_wr_m_software(reg, unlist(lapply(keys, function(k) k$packages)), guideline),
                 NA_character_, "methods")))
   main <- c(main, list(.sr_wr_head("Results", 1L)))
   for (id in main_ids) main <- c(main, results_paras(id))
@@ -252,10 +258,12 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
   main_tab <- .sr_wr_main_table(view, main_ids, reg, topts)
   fam_tab <- .sr_wr_family_table(view, reg)
   dev_tab <- .sr_wr_deviation_table(view, reg)
+  dec_tab <- .sr_wr_decision_table(view, reg)
   figs <- .sr_wr_figures(view, main_ids, reg, topts)
   in_main <- function(b) identical(b$where, "main")
   main <- c(main, Filter(in_main, tables), if (nrow(main_tab$df)) list(main_tab), figs)
-  supp_blocks <- c(Filter(Negate(in_main), tables), if (!is.null(fam_tab)) list(fam_tab), if (!is.null(dev_tab)) list(dev_tab))
+  supp_blocks <- c(Filter(Negate(in_main), tables), if (!is.null(fam_tab)) list(fam_tab), if (!is.null(dev_tab)) list(dev_tab),
+                 if (!is.null(dec_tab)) list(dec_tab))
   if (length(supp_blocks)) supplement <- c(supplement, list(.sr_wr_head("Supplementary tables", 1L)), supp_blocks)
 
   # ---- the reference list: the keys in order of first use, last block of the main document (writer/cite.R) ----
@@ -269,7 +277,13 @@ sr_doc_model <- function(project, opts = sr_writer_opts()) {
                 dropped_families = dropped)
 
   # ---- the STROBE checklist: scored from the finished model, then the last block of the supplement ----
-  strobe <- sr_checklist_strobe(model, project)
-  model$supplement <- c(model$supplement, list(list(type = "checklist", id = "strobe", df = strobe)))
+  if (identical(guideline, "consort")) {
+    note <- .sr_wr_para("checklist_note", "The CONSORT checklist is not yet produced by StatRouter; complete it by hand.",
+                        NA_character_, "methods")
+    model$supplement <- c(model$supplement, list(note))
+  } else {
+    strobe <- sr_checklist_strobe(model, project)
+    model$supplement <- c(model$supplement, list(list(type = "checklist", id = "strobe", df = strobe)))
+  }
   model
 }
