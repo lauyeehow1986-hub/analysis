@@ -223,3 +223,44 @@ local({
   h[148 + 8] <- as.raw(32L)
   h
 }
+
+# ---- .srproj fixtures (archive import tests) ----
+
+# Freeze .fx_writer_project() and export it to a fresh temp folder: list(p, path).
+.fx_srproj <- function(data = "full", env = parent.frame()) {
+  p <- sr_freeze(.fx_writer_project(env))
+  path <- file.path(withr::local_tempdir(.local_envir = env), "study.srproj")
+  p <- sr_srproj_export(p, path, data = data)
+  list(p = p, path = path)
+}
+
+# Untar `archive` under `root`, optionally append a byte to member `edit` (events.jsonl: change the
+# first line's "ts" value, staying valid JSON), re-hash every member into srproj.json, merge `index`
+# fields, and re-tar to a new .srproj under `root`.
+.fx_srproj_reindexed <- function(archive, root, edit = NULL, index = NULL) {
+  x <- tempfile("reidx", tmpdir = root)
+  dir.create(x)
+  utils::untar(archive, exdir = x, tar = "internal")
+  if (!is.null(edit)) {
+    f <- file.path(x, edit)
+    if (identical(edit, "events.jsonl")) {
+      ln <- readLines(f, warn = FALSE)
+      ln[1L] <- sub("\"ts\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\"ts\":\"2000-01-01T00:00:00Z\"", ln[1L])
+      writeBin(charToRaw(paste0(paste(ln, collapse = "\n"), "\n")), f)
+    } else {
+      cat("x", file = f, append = TRUE)
+    }
+  }
+  ip <- file.path(x, "srproj.json")
+  idx <- .sr_read_json_file(ip)
+  idx$files <- lapply(idx$files, function(m) {
+    ff <- file.path(x, m$path)
+    list(path = m$path, sha256 = sr_sha256_file(ff), bytes = as.numeric(file.size(ff)))
+  })
+  for (k in names(index)) idx[[k]] <- index[[k]]
+  .sr_write_json_file(ip, idx)
+  out <- tempfile("reidx", tmpdir = root, fileext = ".srproj")
+  withr::with_dir(x, utils::tar(out, list.files(".", recursive = TRUE, all.files = TRUE),
+                                tar = "internal", compression = "gzip"))
+  out
+}
