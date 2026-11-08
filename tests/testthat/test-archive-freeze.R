@@ -117,3 +117,11 @@ test_that("the manifest keeps the package names of the library snapshot", {
   expect_identical(names(m$libsnap$pkgs), names(sr_libsnap()$pkgs))
   expect_identical(m$libsnap_hash, sr_libsnap_hash())
 })
+
+test_that("a torn events.jsonl tail (no final LF) is refused before anything is written", {
+  p <- .fx_writer_project()
+  cat("{\"seq\":", file = p$paths$events, append = TRUE)
+  expect_error(sr_freeze(p), "events.jsonl ends in an unterminated line")
+  expect_false(dir.exists(file.path(p$paths$out, "freezes", "submission-v1")))
+  expect_length(list.files(file.path(p$paths$out, "freezes"), all.files = TRUE, no.. = TRUE), 0L)
+})

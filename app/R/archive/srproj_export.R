@@ -47,6 +47,27 @@ sr_reducer_register("srproj.exported", function(state, event) {
   list(events = eb[seq_len(elf[fseq])], audit = ab[seq_len(alf[at])])
 }
 
+#' Warn when the exported events or audit entries record the OS account name as their actor (the actor is
+#' sr_opt("user"), which falls back to the OS user name unless sr.user / SR_USER names a role or pseudonym).
+.sr_srproj_actor_check <- function(project, cut) {
+  me <- Sys.info()[["user"]]
+  if (!is.character(me) || length(me) != 1L || is.na(me) || !nzchar(me)) return(invisible(FALSE))
+  txt <- rawToChar(c(cut$events, cut$audit))
+  Encoding(txt) <- "UTF-8"
+  lines <- strsplit(txt, "\n", fixed = TRUE)[[1L]]
+  actors <- unique(vapply(lines, function(l) {
+    a <- tryCatch(jsonlite::parse_json(l)$actor, error = function(e) NULL)
+    if (is.character(a) && length(a) == 1L && !is.na(a)) a else NA_character_
+  }, "", USE.NAMES = FALSE))
+  if (me %in% actors) {
+    warning("the exported events.jsonl and audit.log record the OS user name as the actor; set the sr.user ",
+            "option (or SR_USER) to a role or pseudonym before recording a project that will be shared",
+            call. = FALSE)
+    return(invisible(TRUE))
+  }
+  invisible(FALSE)
+}
+
 # ---- data mode --------------------------------------------------------------------------------------
 
 #' "full" or "lean". Under "auto": full when the data files total at most sr_opt("freeze_full_max_bytes",
@@ -163,7 +184,13 @@ sr_reducer_register("srproj.exported", function(state, event) {
   raw_tar <- paste0(tarfile, ".raw")
   on.exit(unlink(raw_tar), add = TRUE)
   old <- setwd(staging)
-  tryCatch(utils::tar(raw_tar, files = files, compression = "gzip", tar = "internal"),
+  # member names are relative and checked; only the portability note on names over 100 bytes is muffled
+  tryCatch(withCallingHandlers(utils::tar(raw_tar, files = files, compression = "gzip", tar = "internal"),
+                               warning = function(w) {
+                                 if (grepl("paths of more than 100 bytes is not portable", conditionMessage(w), fixed = TRUE)) {
+                                   invokeRestart("muffleWarning")
+                                 }
+                               }),
            finally = setwd(old))
   .sr_srproj_scrub_owner(raw_tar, tarfile)
   invisible(tarfile)
@@ -212,6 +239,7 @@ sr_srproj_export <- function(project, path, label = NULL, data = c("auto", "full
     }
   }
   cut <- .sr_srproj_cut(project, label)
+  .sr_srproj_actor_check(project, cut)
   man <- sr_freeze_manifest(project, label)
 
   staging <- file.path(project$paths$out, paste0(".srproj-", label, ".partial"))
@@ -242,6 +270,14 @@ sr_srproj_export <- function(project, path, label = NULL, data = c("auto", "full
     f <- file.path(staging, body$path[i])
     list(path = body$path[i], sha256 = sr_sha256_file(f), bytes = as.numeric(file.size(f)))
   })
+  # the staged files are hard links to live files, so a file changed after sr_freeze_verify would be
+  # archived as changed: every staged member the manifest lists must still hash as the manifest says
+  msha <- stats::setNames(vapply(man$files, `[[`, "", "sha256"), vapply(man$files, `[[`, "", "path"))
+  for (f in files) {
+    if (f$path %in% names(msha) && !identical(f$sha256, msha[[f$path]])) {
+      stop("the file ", f$path, " differs from the freeze manifest; it changed during the export", call. = FALSE)
+    }
+  }
   index <- list(format = SR_SRPROJ_FORMAT, format_version = SR_SRPROJ_VERSION, label = label,
                 created = .sr_now(), freeze_manifest_sha = project$state$freezes[[label]]$manifest_sha,
                 data_mode = mode, project_id = project$meta$id, files = files,

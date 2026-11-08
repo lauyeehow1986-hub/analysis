@@ -42,7 +42,8 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   }
   files <- ent$name[ent$type == "0"]
   if (!("srproj.json" %in% files)) stop("not a StatRouter archive (no srproj.json)", call. = FALSE)
-  special <- files[grepl("(^|/)[.]lock(/|$)|[.]partial$|[.]tmp$", files, ignore.case = TRUE)]
+  dirs <- ent$name[ent$type == "5"]
+  special <- c(files, dirs)[grepl("(^|/)[.]lock(/|$)|[.]partial/?$|[.]tmp/?$", c(files, dirs), ignore.case = TRUE)]
   if (length(special)) {
     stop("archive member '", special[1L], "' is a lock or temporary file", call. = FALSE)
   }
@@ -63,7 +64,10 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   was_empty <- dir.exists(dir)
   done <- FALSE
   on.exit({
-    if (dir.exists(partial)) unlink(partial, recursive = TRUE)
+    if (dir.exists(partial)) {
+      unlink(partial, recursive = TRUE)
+      if (dir.exists(partial)) warning("could not remove ", basename(partial), "; remove it by hand", call. = FALSE)
+    }
     if (!done && made_dir) {
       unlink(dir, recursive = TRUE)
       if (was_empty) dir.create(dir)
@@ -71,7 +75,9 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   }, add = TRUE)
 
   dir.create(partial)
-  utils::untar(archive, exdir = partial, tar = "internal")
+  # only the regular files the scanner approved may be written (defence in depth: untar2 skips any other
+  # name); folders come from the approved file paths and the scanned folder members
+  utils::untar(archive, files = files, exdir = partial, tar = "internal")
   if (!identical(sr_sha256_file(archive), arch_sha)) {
     stop("the archive changed while it was being imported", call. = FALSE)
   }

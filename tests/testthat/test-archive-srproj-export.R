@@ -99,3 +99,40 @@ test_that("no member header carries an owner or group name, and the archive stil
   for (f in idx$files) expect_identical(sr_sha256_file(file.path(x, f$path)), f$sha256)
   expect_false(file.exists(paste0(out, ".raw")))
 })
+
+test_that("a frozen file changed between the verification and the staging blocks the export", {
+  p <- sr_freeze(.fx_writer_project())
+  fit <- Filter(function(f) f$kind == "fit", sr_freeze_manifest(p, "submission-v1")$files)[[1]]$path
+  d <- withr::local_tempdir()
+  n_ev <- length(.sr_events_load(p$paths$events)$events)
+  real <- .sr_srproj_cut
+  withr::defer(assign(".sr_srproj_cut", real, envir = globalenv()))
+  assign(".sr_srproj_cut", function(project, label) {
+    cat("x", file = file.path(project$paths$dir, fit), append = TRUE)    # after sr_freeze_verify ran
+    real(project, label)
+  }, envir = globalenv())
+  expect_error(sr_srproj_export(p, file.path(d, "a.srproj"), data = "lean"), "differs from the freeze manifest")
+  expect_length(list.files(d, all.files = TRUE, no.. = TRUE), 0L)
+  expect_false(any(grepl("srproj", list.files(p$paths$out, all.files = TRUE, recursive = TRUE, include.dirs = TRUE))))
+  expect_identical(length(.sr_events_load(p$paths$events)$events), n_ev)
+})
+
+test_that("the export warns when the history records the OS account name as the actor", {
+  withr::local_options(sr.user = Sys.info()[["user"]])
+  p <- sr_freeze(.fx_writer_build(environment()))
+  out <- file.path(withr::local_tempdir(), "w.srproj")
+  expect_warning(p <- sr_srproj_export(p, out, data = "lean"), "OS user name")
+  expect_true(file.exists(out))
+  withr::local_options(sr.user = "analyst-1")
+  p2 <- sr_freeze(.fx_writer_project())
+  expect_no_warning(sr_srproj_export(p2, file.path(withr::local_tempdir(), "q.srproj"), data = "lean"))
+})
+
+test_that("only the tar warning about paths of more than 100 bytes is muffled", {
+  st <- withr::local_tempdir()
+  long <- paste0(strrep("d", 60), "/", strrep("f", 60), ".txt")
+  dir.create(file.path(st, dirname(long))); writeLines("x", file.path(st, long))
+  tf <- file.path(withr::local_tempdir(), "t.tar.gz")
+  expect_no_warning(.sr_srproj_tar(st, long, tf))
+  expect_true(long %in% .sr_tar_entries(tf)$name)
+})

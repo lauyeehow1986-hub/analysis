@@ -11,7 +11,8 @@ test_that(".sr_tar_entries lists files, folders and long names written by R's in
   withr::with_dir(d, {
     dir.create(dirname(long), recursive = TRUE); writeLines("x", long)
     writeBin(as.raw(c(0x79, 0x0a)), "top.txt")                  # "y\n", no CRLF translation
-    utils::tar("t.tar.gz", c("top.txt", long), tar = "internal", compression = "gzip")
+    # suppressWarnings: utils::tar notes that names over 100 bytes are not portable
+    suppressWarnings(utils::tar("t.tar.gz", c("top.txt", long), tar = "internal", compression = "gzip"))
   })
   e <- .sr_tar_entries(file.path(d, "t.tar.gz"))
   expect_true(all(c("top.txt", long) %in% e$name))
@@ -20,7 +21,7 @@ test_that(".sr_tar_entries lists files, folders and long names written by R's in
   expect_silent(.sr_tar_check(e))
   # parity with the reference reader
   ex <- withr::local_tempdir()
-  expect_setequal(e$name, utils::untar(file.path(d, "t.tar.gz"), list = TRUE))
+  expect_setequal(e$name, utils::untar(file.path(d, "t.tar.gz"), list = TRUE, tar = "internal"))
 })
 
 test_that(".sr_archive_safe_path rejects traversal, absolute, drive, backslash and control names", {
@@ -55,8 +56,105 @@ test_that(".sr_tar_check duplicates are case-, slash- and trailing-dot-insensiti
   expect_error(.sr_tar_check(dup(c("a", "A"))), "duplicate")
   expect_error(.sr_tar_check(data.frame(name = c("a", "a/"), type = c("0", "5"), size = 0)), "duplicate")
   expect_error(.sr_tar_check(data.frame(name = c("d/x", "D/X"), type = "0", size = 1)), "duplicate")
-  big <- data.frame(name = sprintf("f/%06d", 1:50000), type = "0", size = 1)
-  expect_lt(system.time(.sr_tar_check(big))[["elapsed"]], 5)
+  # a scaling check, not an absolute time bound (which flakes under load): linear cost gives a ratio near
+  # 4; the floor on the denominator keeps a fast machine from dividing by timer noise
+  tm <- function(n) {
+    big <- data.frame(name = sprintf("f/%06d", seq_len(n)), type = "0", size = 1)
+    min(vapply(1:3, function(i) system.time(.sr_tar_check(big))[["elapsed"]], 0))
+  }
+  t10 <- tm(10000); t40 <- tm(40000)
+  expect_lt(t40 / max(t10, 0.05), 8)
+})
+
+test_that(".sr_tar_check reports the first offending row, whatever the check, as the row loop did", {
+  e <- data.frame(name = c("ok", "../bad", "lnk", "big"), type = c("0", "0", "2", "0"), size = c(1, 1, 0, 2^34))
+  expect_error(.sr_tar_check(e), "unsafe archive member name '../bad'", fixed = TRUE)
+  expect_error(.sr_tar_check(e[c(1, 4, 3, 2), ]), "archive member 'big' exceeds the size limit", fixed = TRUE)
+  expect_error(.sr_tar_check(e[c(3, 2), ]), "archive member 'lnk' is a link or special file (type 2)", fixed = TRUE)
+  # one row bad on every count: the type is reported first, then the name, then the size
+  expect_error(.sr_tar_check(data.frame(name = "../x", type = "2", size = 2^34)), "link or special file")
+  expect_error(.sr_tar_check(data.frame(name = "../x", type = "0", size = 2^34)), "unsafe archive member")
+  expect_error(.sr_tar_check(data.frame(name = "a", type = "0", size = NA_real_)), "exceeds the size limit")
+})
+
+# ---- divergence from utils:::untar2 (the extractor): names must be read exactly as it reads them ----
+
+.sentinel_path <- function() {
+  s <- withr::local_tempdir(.local_envir = parent.frame())
+  normalizePath(s, winslash = "/")
+}
+
+.gnu_l <- function(body, sz = length(body)) {
+  c(.fx_tar_header("././@LongLink", type = "L", size = sz), body, .tar_pad(length(body)))
+}
+
+# Crafted variants that each made the scanner and utils:::untar2 disagree on a member name.
+.divergent_tars <- function(sentinel, env = parent.frame()) {
+  .tar_file <- function(...) {
+    f <- withr::local_tempfile(fileext = ".tar", .local_envir = env)
+    writeBin(c(do.call(c, list(...)), raw(1024)), f)
+    f
+  }
+  target <- paste0(sentinel, "/pwn.txt")
+  list(
+    # L with size 1: the scanner read "C", untar2 the whole block up to its last non-zero byte
+    l_short_size = .tar_file(.gnu_l(charToRaw(target), sz = 1), .fx_tar_header("x", size = 3), charToRaw("abc"),
+                             .tar_pad(3)),
+    # L body with an embedded NUL then more bytes
+    l_embedded_nul = .tar_file(.gnu_l(c(charToRaw("ok.txt"), as.raw(0L), charToRaw(target))),
+                               .fx_tar_header("x", size = 3), charToRaw("abc"), .tar_pad(3)),
+    # L naming a folder entry: untar2 keeps the long name for the next regular file
+    l_then_dir = .tar_file(.gnu_l(c(charToRaw("evil.txt"), as.raw(0L))), .fx_tar_header("d/", type = "5"),
+                           .fx_tar_header("f", size = 3), charToRaw("abc"), .tar_pad(3)),
+    # an empty L body
+    l_empty = .tar_file(.gnu_l(raw(0), sz = 0), .fx_tar_header("f")),
+    # name field: bytes after the first NUL
+    name_garbage = .tar_file(local({
+      h <- .fx_tar_header("a")
+      h[3:12] <- charToRaw("../../evil")
+      h[149:156] <- as.raw(32L)
+      ck <- sprintf("%06o", sum(as.integer(h)))
+      h[149:156] <- c(charToRaw(ck), as.raw(0L), as.raw(32L))
+      h
+    })),
+    # prefix field: bytes after the first NUL
+    prefix_garbage = .tar_file(local({
+      h <- .fx_tar_header("leaf", prefix = "p")
+      h[348:357] <- charToRaw("../../evil")
+      h[149:156] <- as.raw(32L)
+      ck <- sprintf("%06o", sum(as.integer(h)))
+      h[149:156] <- c(charToRaw(ck), as.raw(0L), as.raw(32L))
+      h
+    }))
+  )
+}
+
+test_that("GNU L names, name and prefix fields are read as untar2 reads them, else refused", {
+  s <- .sentinel_path()
+  v <- .divergent_tars(s)
+  msg <- c(l_short_size = "GNU long name", l_embedded_nul = "GNU long name", l_then_dir = "GNU long name",
+           l_empty = "GNU long name", name_garbage = "name field", prefix_garbage = "prefix field")
+  for (k in names(v)) expect_error(.sr_tar_entries(v[[k]]), msg[[k]], info = k)
+  expect_length(list.files(s, all.files = TRUE, no.. = TRUE), 0L)
+})
+
+test_that("scanner and utils::untar(list = TRUE, tar = \"internal\") agree on every member name, or the scanner refuses", {
+  s <- .sentinel_path()
+  nm <- paste0("dir/", strrep("n", 150), ".txt")
+  ok <- list(
+    long = .tar_file(.gnu_l(c(charToRaw(nm), as.raw(0L))), .fx_tar_header("short", size = 3), charToRaw("abc"),
+                     .tar_pad(3)),
+    long_exact = .tar_file(.gnu_l(charToRaw(nm)), .fx_tar_header("short")),
+    prefix = .tar_file(.fx_tar_header("leaf.txt", prefix = "some/dir"), .fx_tar_header("d/", type = "5")))
+  for (k in names(ok)) {
+    expect_identical(.sr_tar_entries(ok[[k]])$name, suppressWarnings(utils::untar(ok[[k]], list = TRUE, tar = "internal")), info = k)
+  }
+  for (f in c(ok, .divergent_tars(s))) {
+    sc <- tryCatch(.sr_tar_entries(f)$name, error = function(e) NULL)
+    if (is.null(sc)) next
+    ref <- tryCatch(suppressWarnings(utils::untar(f, list = TRUE, tar = "internal")), error = function(e) NULL)
+    expect_identical(sc, ref)
+  }
 })
 
 test_that(".sr_tar_check refuses a file whose name ends in a slash and over-size members", {

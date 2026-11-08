@@ -255,3 +255,52 @@ test_that("a member under a .lock folder is refused before any folder is made", 
   expect_error(sr_srproj_import(f, file.path(root, "d1")), "lock or temporary")
   .no_trace(root, "d1")
 })
+
+# A gzip tar with a srproj.json member and a GNU L entry declaring size 1 whose padded block names `target`.
+.fx_l_trick <- function(path, target) {
+  body <- charToRaw(target)
+  con <- gzfile(path, "wb"); on.exit(close(con))
+  writeBin(c(.fx_tar_header("srproj.json", size = 2), charToRaw("{}"), raw(510),
+             .fx_tar_header("././@LongLink", type = "L", size = 1), body, raw((512 - length(body) %% 512) %% 512),
+             .fx_tar_header("x", size = 3), charToRaw("abc"), raw(509), raw(1024)), con)
+  path
+}
+
+test_that("a GNU L name that untar2 reads differently is refused and nothing is written anywhere", {
+  root <- withr::local_tempdir()
+  # an absolute path without a drive letter: untar2 opens it as given (only its folder is sanitised)
+  sentinel <- sub("^[A-Za-z]:", "", normalizePath(withr::local_tempdir(), winslash = "/"))
+  a <- .fx_l_trick(file.path(root, "l.srproj"), paste0(sentinel, "/pwn.txt"))
+  expect_error(sr_srproj_import(a, file.path(root, "d1")), "GNU long name")
+  expect_length(list.files(sentinel, all.files = TRUE, no.. = TRUE), 0L)
+  .no_trace(root, "d1")
+})
+
+test_that("extraction writes only the member names the scanner approved (defence in depth)", {
+  root <- withr::local_tempdir()
+  # an absolute path without a drive letter: untar2 opens it as given (only its folder is sanitised)
+  sentinel <- sub("^[A-Za-z]:", "", normalizePath(withr::local_tempdir(), winslash = "/"))
+  a <- .fx_l_trick(file.path(root, "l.srproj"), paste0(sentinel, "/pwn.txt"))
+  # stand in for a scanner that misreads the L entry as "C", as the old one did
+  real <- .sr_tar_entries
+  withr::defer(assign(".sr_tar_entries", real, envir = globalenv()))
+  assign(".sr_tar_entries", function(path) {
+    data.frame(name = c("srproj.json", "C"), type = "0", size = c(2, 3), stringsAsFactors = FALSE)
+  }, envir = globalenv())
+  expect_error(sr_srproj_import(a, file.path(root, "d1")))
+  expect_false(file.exists(file.path(sentinel, "pwn.txt")))
+  expect_length(list.files(sentinel, all.files = TRUE, no.. = TRUE), 0L)
+  .no_trace(root, "d1")
+})
+
+test_that("folder members named like a lock, partial or temp folder are refused", {
+  root <- withr::local_tempdir()
+  for (nm in c("a.partial/", "b.tmp/", "x/.lock/")) {
+    f <- file.path(root, paste0(make.names(nm), ".srproj"))
+    con <- gzfile(f, "wb")
+    writeBin(c(.fx_tar_header("srproj.json"), .fx_tar_header(nm, type = "5"), raw(1024)), con)
+    close(con)
+    expect_error(sr_srproj_import(f, file.path(root, "d1")), "lock or temporary", info = nm)
+  }
+  .no_trace(root, "d1")
+})

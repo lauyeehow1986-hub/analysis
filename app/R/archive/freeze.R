@@ -92,6 +92,13 @@ sr_freeze_manifest <- function(project, label) {
   if (label %in% names(project$state$freezes) || file.exists(.sr_freeze_dir(project, label))) {
     stop("freeze label '", label, "' is already used", call. = FALSE)
   }
+  # a torn tail would be cut (with an events.repair audit entry) by the freeze.created append, after the
+  # manifest pinned the events prefix and the audit tip, so the freeze could never verify
+  eb <- .sr_read_bytes(project$paths$events)
+  if (length(eb) && eb[length(eb)] != as.raw(0x0A)) {
+    stop("events.jsonl ends in an unterminated line (a torn write); the next recorded event repairs it, ",
+         "so record one (for example a note) and freeze again", call. = FALSE)
+  }
   if (sr_blind(project)) stop("the SAP is not locked; lock it before freezing", call. = FALSE)
   need <- sr_tables_needing_hash(project)
   if (length(need)) {
