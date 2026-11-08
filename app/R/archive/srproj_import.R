@@ -22,6 +22,8 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   if (!is.character(dir) || length(dir) != 1L || is.na(dir) || !nzchar(dir)) {
     stop("the target folder must be a path", call. = FALSE)
   }
+  dir <- sub("[/\\]+$", "", dir)
+  if (!nzchar(dir)) stop("the target folder must be a path", call. = FALSE)
   if (file.exists(dir) && (!dir.exists(dir) || length(list.files(dir, all.files = TRUE, no.. = TRUE)))) {
     stop("the target folder is not empty: ", dir, call. = FALSE)
   }
@@ -30,11 +32,24 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   partial <- paste0(dir, ".partial")
   if (file.exists(partial)) stop(basename(partial), " already exists; remove it first", call. = FALSE)
 
+  # TOCTOU guard: the archive is hashed before the scan and again after the extraction; a file that
+  # changed in between is refused, so what was scanned is what was extracted.
+  arch_sha <- sr_sha256_file(archive)
   ent <- .sr_tar_entries(archive)
   .sr_tar_check(ent)
   files <- ent$name[ent$type == "0"]
   if (!("srproj.json" %in% files)) stop("not a StatRouter archive (no srproj.json)", call. = FALSE)
-  arch_sha <- sr_sha256_file(archive)
+  special <- files[grepl("(^|/)[.]lock$|[.]partial$|[.]tmp$", files, ignore.case = TRUE)]
+  if (length(special)) {
+    stop("archive member '", special[1L], "' is a lock or temporary file", call. = FALSE)
+  }
+  cap <- suppressWarnings(as.numeric(sr_opt("srproj_max_total", 68719476736)))
+  if (length(cap) != 1L || is.na(cap) || cap < 0) {
+    stop("sr.srproj_max_total must be a number of bytes, zero or more", call. = FALSE)
+  }
+  if (sum(as.numeric(ent$size[ent$type == "0"])) > cap) {
+    stop("the archive total size exceeds the limit (sr.srproj_max_total)", call. = FALSE)
+  }
 
   made_dir <- FALSE
   done <- FALSE
@@ -47,6 +62,15 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
 
   dir.create(partial)
   utils::untar(archive, exdir = partial, tar = "internal")
+  if (!identical(sr_sha256_file(archive), arch_sha)) {
+    stop("the archive changed while it was being imported", call. = FALSE)
+  }
+  for (i in which(ent$type == "0")) {
+    got <- file.size(file.path(partial, ent$name[i]))
+    if (is.na(got) || got != ent$size[i]) {
+      stop("archive member '", ent$name[i], "' differs in size from its header", call. = FALSE)
+    }
+  }
   idx <- .sr_read_json_file(file.path(partial, "srproj.json"))
   if (!identical(idx$format, SR_SRPROJ_FORMAT)) stop("not a StatRouter archive (unknown format)", call. = FALSE)
   ver <- suppressWarnings(as.integer(idx$format_version)[1L])
@@ -58,8 +82,17 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
       grepl("/", label, fixed = TRUE)) {
     stop("the archive index has an invalid freeze label", call. = FALSE)
   }
-  ipaths <- vapply(idx$files, function(f) as.character(f$path)[1L], "")
-  isha <- vapply(idx$files, function(f) as.character(f$sha256)[1L], "")
+  ok1 <- function(x) is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+  if (!is.list(idx$files) || !all(vapply(idx$files, function(f) {
+    is.list(f) && ok1(f$path) && ok1(f$sha256)
+  }, NA))) {
+    stop("the archive index is malformed (files)", call. = FALSE)
+  }
+  ipaths <- vapply(idx$files, function(f) f$path, "")
+  isha <- vapply(idx$files, function(f) f$sha256, "")
+  if (anyDuplicated(ipaths) || !all(.sr_archive_safe_path(ipaths))) {
+    stop("the archive index is malformed (member names)", call. = FALSE)
+  }
   body <- setdiff(files, "srproj.json")
   extra <- setdiff(body, ipaths)
   if (length(extra)) stop("member '", extra[1L], "' is not listed in the index", call. = FALSE)
@@ -74,16 +107,39 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
          call. = FALSE)
   }
 
+  if (paste("out", "freezes", label, "srproj.json", sep = "/") %in% body) {
+    stop("the archive already holds out/freezes/", label, "/srproj.json", call. = FALSE)
+  }
   fdir <- file.path(partial, "out", "freezes", label)
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   if (!isTRUE(file.rename(file.path(partial, "srproj.json"), file.path(fdir, "srproj.json")))) {
     stop("could not place the archive index", call. = FALSE)
   }
-  if (dir.exists(dir)) unlink(dir, recursive = TRUE)
-  made_dir <- TRUE
+  if (dir.exists(dir)) {
+    # re-checked empty just now; recursive = TRUE is how Windows removes even an empty folder
+    if (length(list.files(dir, all.files = TRUE, no.. = TRUE))) {
+      stop("the target folder is not empty: ", dir, call. = FALSE)
+    }
+    unlink(dir, recursive = TRUE)
+    if (dir.exists(dir)) stop("could not replace the empty target folder ", dir, call. = FALSE)
+  }
   if (!isTRUE(file.rename(partial, dir))) stop("could not move the imported project into place", call. = FALSE)
+  made_dir <- TRUE
 
   q <- sr_project_open(dir)
+  fail <- function(msg) {
+    sr_project_close(q)
+    stop(msg, call. = FALSE)
+  }
+  if (isTRUE(q$readonly)) fail("the imported project could not be opened for writing")
+  if (!isTRUE(q$verify$ok)) {
+    fail(paste0("project history does not verify: ", paste(q$verify$problems, collapse = "; ")))
+  }
+  fseq <- suppressWarnings(as.integer(q$state$freezes[[label]]$events_seq)[1L])
+  nev <- length(.sr_events_load(q$paths$events)$events)
+  if (is.na(fseq) || nev != fseq + 1L) {
+    fail("the project history continues after the freeze point or lacks the freeze event")
+  }
   v <- tryCatch(sr_freeze_verify(q, label, data = verify_data), error = function(e) {
     sr_project_close(q)
     stop(e)

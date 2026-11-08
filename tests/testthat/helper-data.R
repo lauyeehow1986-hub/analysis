@@ -237,7 +237,7 @@ local({
 # Untar `archive` under `root`, optionally append a byte to member `edit` (events.jsonl: change the
 # first line's "ts" value, staying valid JSON), re-hash every member into srproj.json, merge `index`
 # fields, and re-tar to a new .srproj under `root`.
-.fx_srproj_reindexed <- function(archive, root, edit = NULL, index = NULL) {
+.fx_srproj_reindexed <- function(archive, root, edit = NULL, index = NULL, fn = NULL) {
   x <- tempfile("reidx", tmpdir = root)
   dir.create(x)
   utils::untar(archive, exdir = x, tar = "internal")
@@ -251,13 +251,16 @@ local({
       cat("x", file = f, append = TRUE)
     }
   }
+  if (is.function(fn)) fn(x)
   ip <- file.path(x, "srproj.json")
   idx <- .sr_read_json_file(ip)
-  idx$files <- lapply(idx$files, function(m) {
-    ff <- file.path(x, m$path)
-    list(path = m$path, sha256 = sr_sha256_file(ff), bytes = as.numeric(file.size(ff)))
+  # every member on disk is (re)listed, so members added by `fn` are in the index too
+  mem <- setdiff(list.files(x, recursive = TRUE, all.files = TRUE), "srproj.json")
+  idx$files <- lapply(mem, function(p) {
+    ff <- file.path(x, p)
+    list(path = p, sha256 = sr_sha256_file(ff), bytes = as.numeric(file.size(ff)))
   })
-  for (k in names(index)) idx[[k]] <- index[[k]]
+  if (is.function(index)) idx <- index(idx) else for (k in names(index)) idx[[k]] <- index[[k]]
   .sr_write_json_file(ip, idx)
   out <- tempfile("reidx", tmpdir = root, fileext = ".srproj")
   withr::with_dir(x, utils::tar(out, list.files(".", recursive = TRUE, all.files = TRUE),
