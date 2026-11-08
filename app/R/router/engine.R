@@ -120,6 +120,7 @@ sr_reducer_register("router.jev_ack", function(state, event) {
       out$probabilities <- as.list(stats::setNames(as.numeric(parsed$probabilities),
                                                    unname(keymap[names(parsed$probabilities)])))
       out$confidence <- parsed$confidence
+      # would_act needs abstain's argmin to equal the model's own choice, not only a low expected cost.
       out$would_act <- isTRUE(ab$act) && identical(ab$choice, parsed$choice)
     }
   }
@@ -130,6 +131,13 @@ sr_reducer_register("router.jev_ack", function(state, event) {
                     confidence = out$confidence, would_act = out$would_act,
                     latency_ms = .sr_rt_num(resp$latency_ms), error = out$error))
   sr_project_append(project, "router.predicted", payload)
+}
+
+# An error that carries the project as it stands, so the caller keeps the events appended before the
+# failure. `class` is the condition class added in front of error/condition; `...` are extra fields.
+.sr_router_signal <- function(class, message, project, ...) {
+  stop(structure(class = c(class, "error", "condition"),
+                 c(list(message = message, call = NULL, project = project), list(...))))
 }
 
 # ---- the run loop ----------------------------------------------------------------------------------
@@ -153,7 +161,9 @@ sr_router_run <- function(project, backends = character(), approve = character()
     if (!.sr_router_applies(ctx) || .sr_router_waiting(ctx)) next
     if (!is.na(.sr_router_current(project, key))) next
     hash <- sr_router_input_hash(ctx)
-    rule <- .sr_router_rule(ctx)
+    rule <- tryCatch(.sr_router_rule(ctx), error = function(e) {
+      .sr_router_signal("sr_router_error", conditionMessage(e), project)
+    })
     if (!is.null(rule)) {
       project <- sr_project_append(project, "router.decided", c(
         .sr_rt_head(key, node$id, tb, cl),
@@ -183,8 +193,8 @@ sr_router_run <- function(project, backends = character(), approve = character()
 #' Record the user's decision for a node instance. Refused after the SAP lock. A choice that differs from
 #' the rule's (or, without a rule, the latest model prediction) is an override and needs a reason. A veto
 #' blocks the choice and is logged (router.vetoed) unless `override = TRUE` with a reason.
-#' Note: a vetoed attempt appends its event and then errors, so the caller must reload the project to
-#' see the veto counted.
+#' A vetoed attempt appends router.vetoed and signals class sr_router_vetoed; the condition's `$project`
+#' is the project with the veto counted (and `$reason` the veto reason).
 sr_router_decide <- function(project, node, choice, reason = NA_character_, table = NA_character_,
                              column = NA_character_, override = FALSE) {
   .sr_sap_open(project, "the SAP is locked: router decisions are frozen")
@@ -209,9 +219,10 @@ sr_router_decide <- function(project, node, choice, reason = NA_character_, tabl
   override <- isTRUE(override)
   veto <- if (is.null(nd$veto)) NULL else nd$veto(ctx, choice)
   if (!is.null(veto) && !is.na(veto) && nzchar(veto) && !override) {
-    sr_project_append(project, "router.vetoed", c(.sr_rt_head(key, nid, table, column),
-                                                  list(choice = choice, reason = veto)))
-    stop("router: '", choice, "' is vetoed for '", key, "': ", veto, call. = FALSE)
+    p2 <- sr_project_append(project, "router.vetoed", c(.sr_rt_head(key, nid, table, column),
+                                                       list(choice = choice, reason = veto)))
+    .sr_router_signal("sr_router_vetoed", paste0("router: '", choice, "' is vetoed for '", key, "': ", veto),
+                      p2, reason = veto)
   }
   if (override && !has_reason) stop("router: an override needs a reason", call. = FALSE)
   hash <- sr_router_input_hash(ctx)

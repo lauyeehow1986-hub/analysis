@@ -61,6 +61,7 @@ test_that("the context resolves dependencies at the widest scope that fits", {
   expect_identical(names(ctx), c("project", "node", "table", "column", "pico", "dep"))
   expect_identical(ctx$dep, list(toy_b = NA_character_))
   expect_null(ctx$pico)
+  expect_identical(.sr_router_current(p, "toy_a"), NA_character_)
   p <- sr_router_run(sr_router_decide(p, "toy_a", "a2"))
   expect_identical(.sr_router_ctx(p, sr_node_get("toy_c"), "t", NA)$dep$toy_b, "b2")
   expect_identical(.sr_router_current(p, "toy_b"), "b2")
