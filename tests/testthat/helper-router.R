@@ -17,3 +17,32 @@
   withr::defer(for (id in c("toy_c", "toy_b", "toy_a")) .sr_node_unregister(id), envir = env)
   invisible(c("toy_a", "toy_b", "toy_c"))
 }
+
+#' Register a fake backend `id` (default "jev", the one sr_router_run can reach in a test). `ask` counts
+#' its calls in `env$.fake_calls` and answers `answer` (list(choice, probabilities), in criteria keys) for
+#' the request's single question; with `fail = TRUE` it counts the call and returns ok = FALSE. Whatever
+#' was registered under `id` is restored when `env` exits (or the id is removed).
+.fx_fake_backend <- function(env, answer, fail = FALSE, id = "jev") {
+  old <- tryCatch(.sr_backend_get(id), error = function(e) NULL)
+  env$.fake_calls <- 0L
+  ask <- function(request, ctx) {
+    env$.fake_calls <- env$.fake_calls + 1L
+    if (isTRUE(fail)) {
+      return(list(ok = FALSE, response = NULL, raw = NA_character_, model = NA_character_,
+                  latency_ms = 1, error = "fake failure"))
+    }
+    qn <- names(request$questions)[1L]
+    ans <- list(type = "choice", choice = answer$choice, probabilities = as.list(answer$probabilities))
+    list(ok = TRUE, response = list(answers = stats::setNames(list(ans), qn)), raw = "{}",
+         model = "fake-model", latency_ms = 1, error = NA_character_)
+  }
+  sr_backend_register(id, ask = ask, available = function(project) list(ok = TRUE, reason = NA_character_))
+  withr::defer({
+    if (is.null(old)) {
+      rm(list = id, envir = .sr_backend_env)
+    } else {
+      sr_backend_register(old$id, old$ask, old$available)
+    }
+  }, envir = env)
+  invisible(id)
+}

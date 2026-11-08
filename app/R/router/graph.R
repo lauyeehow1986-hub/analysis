@@ -97,11 +97,34 @@ sr_router_key <- function(node, table = NA, column = NA) {
   key
 }
 
-#' The current choice stored for a key, or NA. A decision is "current" while it exists; a later task
-#' compares `ctx_hash` with the decision's input hash.
-.sr_router_current <- function(project, key, ctx_hash = NULL) {
-  ch <- project$state$router$decisions[[key]]$choice
-  if (is.null(ch) || length(ch) != 1L || is.na(ch)) NA_character_ else as.character(ch)
+# Memo for one top-level .sr_router_current call: key -> current choice (NA when undecided or stale).
+.sr_router_memo <- new.env(parent = emptyenv())
+
+#' The current choice stored for a key, or NA when undecided or stale. A decision is current while the
+#' input hash it was made under equals the hash of its instance now. The hash of an instance depends on
+#' its dependencies' current choices, so the check recurses in topological order; one top-level call
+#' memoises each key. A decision whose node is no longer registered counts as stale.
+.sr_router_current <- function(project, key) {
+  dec <- project$state$router$decisions[[key]]
+  if (is.null(dec)) return(NA_character_)
+  top <- is.null(.sr_router_memo$env)
+  if (top) {
+    .sr_router_memo$env <- new.env(parent = emptyenv())
+    on.exit(.sr_router_memo$env <- NULL, add = TRUE)
+  }
+  memo <- .sr_router_memo$env
+  if (!is.null(memo[[key]])) return(memo[[key]])
+  ch <- dec$choice
+  out <- NA_character_
+  if (!is.null(ch) && length(ch) == 1L && !is.na(ch) && !is.null(dec$input_hash) &&
+      !is.null(dec$node) && dec$node %in% sr_nodes()) {
+    tb <- if (is.null(dec$table)) NA_character_ else dec$table
+    cl <- if (is.null(dec$column)) NA_character_ else dec$column
+    now <- .sr_router_ctx(project, dec$node, tb, cl)
+    if (identical(sr_router_input_hash(now), as.character(dec$input_hash))) out <- as.character(ch)
+  }
+  memo[[key]] <- out
+  out
 }
 
 # Instance key of dependency `dn` as seen from a node at (table, column): the widest scope that fits,

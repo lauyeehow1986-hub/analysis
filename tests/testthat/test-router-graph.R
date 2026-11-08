@@ -61,10 +61,11 @@ test_that("the context resolves dependencies at the widest scope that fits", {
   expect_identical(names(ctx), c("project", "node", "table", "column", "pico", "dep"))
   expect_identical(ctx$dep, list(toy_b = NA_character_))
   expect_null(ctx$pico)
-  p$state$router$decisions <- list(toy_b = list(choice = "b2"))
+  p <- sr_router_run(sr_router_decide(p, "toy_a", "a2"))
   expect_identical(.sr_router_ctx(p, sr_node_get("toy_c"), "t", NA)$dep$toy_b, "b2")
   expect_identical(.sr_router_current(p, "toy_b"), "b2")
-  expect_identical(.sr_router_current(p, "toy_a"), NA_character_)
+  expect_identical(.sr_router_current(p, "toy_a"), "a2")
+  expect_identical(.sr_router_current(p, "toy_c@t"), NA_character_)
 })
 
 test_that("the input hash changes with facts and dependency choices only", {
