@@ -118,6 +118,18 @@ mod_design_ui <- function(id) {
 
 # ---- server ----------------------------------------------------------------------------------------
 
+# A reactive TRUE/FALSE of .sr_ui_editable(project()) that invalidates its readers only when the value
+# changes (a plain reactive() invalidates on every project change, which would re-render a card and wipe
+# what the user typed or ticked).
+.sr_design_editable <- function(project) {
+  val <- shiny::reactiveVal(.sr_ui_editable(shiny::isolate(project())))
+  shiny::observe({
+    v <- .sr_ui_editable(project())
+    if (!identical(shiny::isolate(val()), v)) val(v)
+  })
+  shiny::reactive(val())
+}
+
 # ---- Ask Jev (connected mode only) -----------------------------------------------------------------
 
 # The four gates of .sr_jev_available, all checked (not only the first failing one), as
@@ -151,7 +163,7 @@ mod_design_ui <- function(id) {
 
 .sr_design_jev_server <- function(input, output, session, project, act) {
   ns <- session$ns
-  editable <- shiny::reactive(.sr_ui_editable(project()))
+  editable <- .sr_design_editable(project)
   jerr <- shiny::reactiveVal("")
   asked <- shiny::reactiveVal(FALSE)
   off <- function(x) if (!editable()) shiny::tagAppendAttributes(x, disabled = NA) else x
@@ -159,7 +171,8 @@ mod_design_ui <- function(id) {
     off(shiny::actionButton(ns(id), label, class = cls))
   }
 
-  # The card. It re-renders only when editability changes, so the mask box and the ticks survive.
+  # The card. It depends on editable() alone, which changes value only when the project is locked or
+  # unlocked, so the mask box and the ticks survive every other project change.
   output$jev <- shiny::renderUI({
     shiny::tagList(
       shiny::p(class = "small text-muted",
@@ -171,12 +184,12 @@ mod_design_ui <- function(id) {
                  btn("jev_withdraw", "Withdraw consent")),
       shiny::div(class = "d-flex gap-2 align-items-center mb-2",
                  btn("jev_ask", "Preview the payloads", "btn-primary"),
-                 off(.sr_design_on_control(shiny::checkboxInput(ns("jev_mask"), "Mask names and values", FALSE),
-                                           "input"))),
+                 .sr_design_on_control(shiny::checkboxInput(ns("jev_mask"), "Mask names and values", FALSE),
+                                       "input", disabled = if (!editable()) NA)),
       shiny::uiOutput(ns("jev_payloads")),
-      off(.sr_design_on_control(
+      .sr_design_on_control(
         shiny::checkboxGroupInput(ns("jev_pick"), "Send these payloads to Jev", choices = character()),
-        "input")),
+        "input", disabled = if (!editable()) NA),
       btn("jev_send", "Send the ticked payloads", "btn-primary"),
       shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("jev_err"))))
   })
@@ -225,8 +238,15 @@ mod_design_ui <- function(id) {
   })
 
   # A core refusal is shown verbatim in jev_err.
+  refuse_locked <- function() {
+    if (editable()) return(FALSE)
+    jerr(.sr_ui_refusal(shiny::isolate(project())) %||%
+           "the SAP is locked; the plan can no longer be edited")
+    TRUE
+  }
   guarded <- function(label, fn) {
     jerr("")
+    if (refuse_locked()) return(invisible(NULL))
     act(label, function(p) {
       tryCatch(fn(p), error = function(e) {
         jerr(conditionMessage(e))
@@ -259,7 +279,7 @@ mod_design_ui <- function(id) {
   })
   shiny::observeEvent(input$jev_consent_ok, {
     guarded("Consent to Jev", function(p) sr_router_consent(p, TRUE))
-    shiny::removeModal()
+    if (!nzchar(shiny::isolate(jerr()))) shiny::removeModal()
   })
   shiny::observeEvent(input$jev_withdraw, {
     guarded("Withdraw consent", function(p) sr_router_consent(p, FALSE))
@@ -316,7 +336,7 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
         err("")
       }
     }, ignoreNULL = FALSE, priority = 10)
-    editable <- shiny::reactive(.sr_ui_editable(project()))
+    editable <- .sr_design_editable(project)
 
     output$banner <- shiny::renderUI(.sr_ui_readonly_banner(project()))
 

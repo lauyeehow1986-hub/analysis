@@ -239,7 +239,7 @@ test_that("air-gap: no Jev card, transport never called", {
   withr::local_options(sr.mode = "airgap", sr.jev_key = "sk-test-SENTINEL-0000",
                        sr.jev_transport = function(...) stop("transport called in air-gap"))
   .ui_spy_notify()
-  spy <- local_fetch_spy("https://api.typesafe.ai")
+  spy <- local_fetch_spy("https://api.typesafe.ai/v1/systemone")
   rv <- shiny::reactiveVal(.fx_ui_project())
   shiny::testServer(mod_design_server, args = list(project = rv), {
     session$setInputs(pico_population = "adults", pico_outcome = "y", pico_aim = "explain-causal", pico_save = 1)
@@ -342,5 +342,69 @@ test_that("Jev controls are refused on a locked or read-only project", {
     expect_equal(.md_n_events(rv()), n0)
     expect_length(env$.calls, 0L)
     expect_match(.md_html(output$jev), "disabled", fixed = TRUE)
+  })
+})
+
+test_that("the mask choice survives project changes (the card does not re-render)", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    session$setInputs(pico_population = "adults", pico_outcome = "y", pico_aim = "explain-causal", pico_save = 1)
+    session$setInputs(run_rules = 1)
+    session$setInputs(jev_mask = TRUE)
+    before <- .md_html(output$jev)
+    .md_jev_ready(session)
+    session$setInputs(jev_withdraw = 1)
+    session$setInputs(jev_consent = 2, jev_consent_ok = 2)
+    expect_true(isTRUE(input$jev_mask))
+    expect_identical(.md_html(output$jev), before)
+    masked <- .sr_design_payloads(rv(), TRUE)
+    session$setInputs(jev_pick = masked[[1]]$sha, jev_send = 1)
+    expect_length(env$.calls, 1L)
+    expect_identical(env$.calls[[1]]$body, masked[[1]]$body)
+  })
+})
+
+test_that("a locked SAP appends no Jev events and disables the mask and pick inputs", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  p <- sr_sap_add(.fx_ui_project(), "a1", "lm",
+                 list(purpose = "explain-causal", outcome = "age", exposure = "grp", exposure_ref = "A",
+                      layers = .fx_writer_layers(), seed = 42L), "t", label = "primary")
+  p <- sr_sap_lock(.fx_feasible(p))
+  expect_true(isTRUE(p$state$sap$locked))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    n0 <- .md_n_events(rv())
+    session$setInputs(jev_ack = 1, jev_ack_reason = "DPA and IT sign-off documented", jev_ack_ok = 1)
+    expect_match(output$jev_err, "locked")
+    session$setInputs(jev_consent = 1, jev_consent_ok = 1)
+    session$setInputs(jev_withdraw = 1)
+    expect_equal(.md_n_events(rv()), n0)
+    html <- .md_html(output$jev)
+    tag <- regmatches(html, regexpr("<input[^>]*jev_mask[^>]*>", html))
+    expect_length(tag, 1L)
+    expect_match(tag, "disabled")
+    # the pick group has no choices before a preview (and a locked plan cannot preview), so no input to disable
+    expect_false(grepl("<input[^>]*jev_pick", html))
+  })
+})
+
+test_that("a read-only project shows the refusal in the card and disables the inputs", {
+  env <- environment()
+  .fx_connected(env)
+  .ui_spy_notify()
+  p <- .fx_ui_project()
+  p$readonly <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    session$setInputs(jev_consent = 1, jev_consent_ok = 1)
+    expect_match(output$jev_err, "read-only")
+    expect_match(regmatches(.md_html(output$jev), regexpr("<input[^>]*jev_mask[^>]*>", .md_html(output$jev))), "disabled")
   })
 })
