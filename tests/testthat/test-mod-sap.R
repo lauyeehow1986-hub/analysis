@@ -556,10 +556,12 @@ test_that("assess refusal shows in dialog and keeps the inputs", {
     core <- tryCatch(sr_feasibility_assess(rv(), "cl1"), error = function(e) conditionMessage(e))
     expect_match(core, "a clustered analysis needs assumptions$icc", fixed = TRUE)
     session$setInputs(fa_value = 0.05, fa_measure = "RD", fa_source = "pilot")
+    r0 <- .sr_sap_renders$fa_form
     session$setInputs(fa_ok = 1)
     expect_equal(output$fa_err, core)
     expect_equal(.ms_n_events(rv()), n0)
-    expect_equal(input$fa_source, "pilot")
+    # the dialog is not rebuilt by the refusal: what the user typed is still in the browser
+    expect_equal(.sr_sap_renders$fa_form, r0)
     session$setInputs(fa_icc = 0.05, fa_icc_why = "pilot data")
     session$setInputs(fa_ok = 2)
     expect_equal(output$fa_err, "")
@@ -677,13 +679,17 @@ test_that("typed family text survives project changes, and the form re-renders o
   rv <- shiny::reactiveVal(.ms_feas_project(more = TRUE))
   shiny::testServer(mod_sap_server, args = list(project = rv), {
     session$setInputs(fam_id = "typed")
-    h0 <- .ms_html(output$fam_form)
+    output$fam_form
+    c0 <- .sr_sap_renders$fam_form
+    expect_gt(c0, 0L)
     rv(sr_sap_family(rv(), "other", "prim", "holm"))   # an event that changes no analysis
     session$setInputs(x = 1)
-    expect_identical(h0, .ms_html(output$fam_form))
+    output$fam_form
+    expect_equal(.sr_sap_renders$fam_form, c0)
     rv(sr_sap_add(rv(), "extra", "logistic", .ui_bin_spec(), "t", label = "secondary"))
     session$setInputs(x = 2)
     h2 <- .ms_html(output$fam_form)
+    expect_gt(.sr_sap_renders$fam_form, c0)
     expect_match(h2, "extra")
     expect_match(h2, "value=\"typed\"")
   })
@@ -788,4 +794,26 @@ test_that("the feasibility table lists unassessed analyses and keeps the selecti
     v2 <- .sr_sap_feas_view(rv())
     expect_false(any(v2$tier[v2$analysis == "prim"] == "not assessed"))
   })
+})
+
+test_that("the feasibility table has one row per analysis even when it reports several measures", {
+  withr::local_options(sr.mode = "airgap")
+  p <- sr_feasibility_assess(.ms_feas_project(more = TRUE), "prim")
+  rep_ <- sr_feasibility_report(p)
+  expect_gt(sum(rep_$analysis == "prim"), 1L)     # OR / RD / RR: several report rows
+  v <- .sr_sap_feas_view(p)
+  expect_equal(v$analysis, c("prim", "sec", "sens"))
+  expect_false(anyDuplicated(v$analysis) > 0L)
+  expect_equal(v$tier[v$analysis == "prim"], p$state$feasibility$prim$assessment$tier)
+  expect_equal(v$tier[v$analysis == "sec"], "not assessed")
+})
+
+test_that("a failing feasibility report is shown in the table, not read as not assessed", {
+  withr::local_options(sr.mode = "airgap")
+  p <- .ms_feas_project(more = TRUE)
+  orig <- get("sr_feasibility_report", envir = globalenv())
+  assign("sr_feasibility_report", function(project) stop("boom report", call. = FALSE), envir = globalenv())
+  withr::defer(assign("sr_feasibility_report", orig, envir = globalenv()))
+  v <- .sr_sap_feas_view(p)
+  expect_equal(v$tier, rep("report error: boom report", 3L))
 })

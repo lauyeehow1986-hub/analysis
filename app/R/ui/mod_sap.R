@@ -201,25 +201,34 @@ mod_sap_ui <- function(id) {
 
 # ---- feasibility, families and rules: pure helpers ---------------------------------------------------
 
-# The feasibility card rows: every pre-specified analysis (one row per contrast of an assessed one, one row
-# with an empty tier of an unassessed one): analysis, label, route, tier, stale, decision.
+# The feasibility card rows: one row per pre-specified analysis (so `analysis` is a unique key): analysis,
+# label, route, tier (the overall tier, "not assessed", or "report error: <message>" when the report cannot be
+# built), stale, decision.
 .sr_sap_feas_view <- function(p) {
   empty <- data.frame(analysis = character(), label = character(), route = character(), tier = character(),
                       stale = character(), decision = character(), stringsAsFactors = FALSE)
   if (is.null(p)) return(empty)
   an <- .sr_sap_analyses(p)
   if (!length(an)) return(empty)
-  rep_ <- tryCatch(sr_feasibility_report(p), error = function(e) NULL)
+  failed <- NULL
+  rep_ <- tryCatch(sr_feasibility_report(p), error = function(e) {
+    failed <<- conditionMessage(e)
+    NULL
+  })
   rows <- lapply(sort(as.character(names(an)), method = "radix"), function(id) {
     r <- if (is.null(rep_)) NULL else rep_[rep_$analysis == id, , drop = FALSE]
-    s <- function(x) ifelse(is.na(x), "", as.character(x))
+    s <- function(x) if (is.null(x) || !length(x) || is.na(x[1L])) "" else as.character(x[1L])
     if (is.null(r) || !nrow(r)) {
+      tier <- if (is.null(failed)) "not assessed" else paste0("report error: ", failed)
       return(data.frame(analysis = id, label = .sr_ui_chr(an[[id]]$label), route = .sr_ui_chr(an[[id]]$route),
-                        tier = "not assessed", stale = "", decision = "", stringsAsFactors = FALSE))
+                        tier = tier, stale = "", decision = "", stringsAsFactors = FALSE))
     }
-    data.frame(analysis = id, label = s(r$label), route = s(r$route), tier = s(r$tier),
-               stale = ifelse(is.na(r$stale), "", paste0("yes (", r$stale, ")")), decision = s(r$decision),
-               stringsAsFactors = FALSE)
+    # the report has one row per contrast and measure; the card has one row per analysis, with the
+    # overall tier of the assessment (the per-contrast tiers are in the report and the feasibility document)
+    overall <- p$state$feasibility[[id]]$assessment$tier
+    data.frame(analysis = id, label = s(r$label), route = s(r$route), tier = s(overall),
+               stale = if (is.na(r$stale[1L])) "" else paste0("yes (", r$stale[1L], ")"),
+               decision = s(r$decision), stringsAsFactors = FALSE)
   })
   out <- do.call(rbind, rows)
   rownames(out) <- NULL
@@ -642,6 +651,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
                                                     disabled = !editable()))))
     })
     output$fa_form <- shiny::renderUI({
+      .sr_sap_tick("fa_form")
       m <- fa_mode()
       ed <- editable()
       if (is.null(m)) return(NULL)
@@ -771,6 +781,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     fam_choices <- .sr_sap_flag(project, .sr_sap_fam_choices)
     off_on <- function(x, sel, ed) if (ed) x else .sr_ui_on_control(x, sel, disabled = NA)
     output$fam_form <- shiny::renderUI({
+      .sr_sap_tick("fam_form")
       ch <- fam_choices()
       ed <- editable()
       keep <- shiny::isolate(input$fam_members)
