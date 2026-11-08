@@ -41,7 +41,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "sap/feasibility", "resample/coverage", "resample/feas_sim", "writer/placeholders",
   "writer/sdc_out", "writer/fragments", "writer/tables", "writer/figures", "writer/cite",
   "writer/checklist", "writer/model", "writer/guard", "writer/docx", "writer/script",
-  "writer/sapdoc", "writer/export"
+  "writer/sapdoc", "writer/export", "archive/freeze"
 )
 
 for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
