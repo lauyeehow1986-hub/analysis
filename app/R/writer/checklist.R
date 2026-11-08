@@ -180,7 +180,7 @@ sr_checklist_strobe <- function(model, project) {
     out <- .sr_wr_pico_field(project, "outcome")
     pur <- .sr_wr_choice(project, "purpose")
     if (is.na(pop) || is.na(out)) {
-      .sr_ck_score("red", "the PICO has no population or outcome")
+      .sr_ck_score("amber", "set the PICO population and outcome")
     } else if (is.na(pur)) {
       .sr_ck_score("amber", "the PICO is set but the analysis purpose is not decided")
     } else {
@@ -194,7 +194,8 @@ sr_checklist_strobe <- function(model, project) {
       .sr_ck_score("amber", "add the setting and dates to the PICO")
     }
   }
-  scorer <- list(objective = s_objective, design = s_design, setting = s_setting, author = s_author, flow = s_flow, roles = s_methods, methods = s_methods,
+  scorer <- list(objective = s_objective, design = s_design, setting = s_setting,
+                 author = s_author, flow = s_flow, roles = s_methods, methods = s_methods,
                  feasibility = s_feasibility, terms = s_terms, interactions = s_interactions, missing = s_missing,
                  sensitivity = s_sensitivity, table1 = s_table1, table1_missing = s_table1, followup = s_followup,
                  events = s_events, primary_ci = s_primary_ci, abs_risk = s_abs_risk)

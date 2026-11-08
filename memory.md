@@ -36,7 +36,7 @@ design; this file holds *what has happened* and *what we learned*.
        the router writer task).
      - "Refresh numbers" in an edited docx is P2. The writer stores only the first-use bookmarks (`sr_E<n>`)
        and `placeholders.json`; later uses of a token are not refreshed (R30).
-     - STROBE items 1-5 (the author items) stay amber until the router records PICO and the study design.
+     - STROBE items 1a, 1b and 2 stay amber (author items); items 3-5 are scored from the router decisions and the PICO.
    Then the **P1e scale** plan
    (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
    them in that order.

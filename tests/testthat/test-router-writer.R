@@ -49,22 +49,23 @@ test_that("PICO text with digits and markup passes the guard and the docx", {
 })
 
 test_that("the decision table lists overrides without probabilities", {
-  p <- .fx_writer_project(environment())
-  tab <- sr_router_table(p)
-  key <- tab$key[tab$node == "purpose"]
-  p$state$router$decisions[[key]]$override <- TRUE
-  p$state$router$decisions[[key]]$reason <- "clinician review 2 of 3"
+  # a user decision with override = TRUE, made through the router before the lock
+  p <- .fx_writer_project(environment(), decide = list(list(
+    node = "exposure_col", choice = "grp", table = "t", override = TRUE,
+    reason = "clinician review 2 of 3")))
   m <- sr_doc_model(p)
   df <- .rw_decisions(m)
   expect_identical(names(df), c("Decision", "Choice", "Decided by", "Override", "Reason"))
   hit <- df[df$Override == "yes", , drop = FALSE]
   expect_identical(nrow(hit), 1L)
   expect_identical(hit$Reason, "clinician review 2 of 3")
-  expect_match(hit$Decision, "Analysis purpose", fixed = TRUE)
+  expect_identical(hit[["Decided by"]], "user")
+  expect_match(hit$Decision, "(t)", fixed = TRUE)
   expect_true(all(df$`Decided by` %in% c("rule", "user")))
   expect_false(any(grepl("^0[.][0-9]+$", unlist(df))))
   expect_identical(sum(sr_claim_guard(m)$severity == "block"), 0L)
 })
+
 
 test_that("STROBE items 3-5 turn green", {
   p <- do.call(.fx_writer_project, c(list(env = environment()), .rw_setting))
@@ -114,3 +115,12 @@ test_that("the design text covers every design and the objective follows the pur
                "The objective was to estimate the effect of drug A compared with drug B on test outcome in test population.",
                fixed = TRUE)
 })
+test_that("the objective item has no red state", {
+  p <- .fx_writer_project(environment())
+  p$state$pico$population <- NA_character_
+  m <- sr_doc_model(p)
+  ck <- Filter(function(b) identical(b$type, "checklist"), m$supplement)[[1L]]$df
+  expect_identical(ck$status[ck$item == "3"], "amber")
+  expect_match(ck$detail[ck$item == "3"], "set the PICO population and outcome", fixed = TRUE)
+})
+

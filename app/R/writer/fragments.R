@@ -123,6 +123,7 @@ SR_WR_DESIGN_TEXT <- c(cohort_prospective = "prospective cohort", cohort_retrosp
                    stringsAsFactors = FALSE, check.names = FALSE)
   .sr_wr_block("analysis_decisions", "Analysis decisions", df, character(), NA_character_, "supplement", 0L)
 }
+
 # The citation tokens of a block of keys: " {{C:k}} {{C:k}}", or "" without a key.
 .sr_wr_cite_tokens <- function(keys) {
   keys <- unique(as.character(keys))

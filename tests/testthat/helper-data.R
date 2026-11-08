@@ -107,7 +107,7 @@ local({
 # so rule-decided nodes such as the guideline are decided too. A covariate of a primary analysis that the
 # covariate_timing rule marks mediator / post_outcome is decided baseline (override, "test fixture"), so
 # an existing fixture is not blocked by the gate. Returns the project.
-.fx_routed <- function(p, design = "cohort_retrospective", pico = NULL) {
+.fx_routed <- function(p, design = "cohort_retrospective", pico = NULL, decide = NULL) {
   q <- utils::modifyList(list(population = "test population", outcome = "test outcome"), as.list(pico))
   p <- sr_pico_set(p, .list = q)
   an <- .sr_sap_analyses(p)
@@ -120,6 +120,11 @@ local({
   if (is.na(purpose)) purpose <- "explain-causal"
   p <- sr_router_decide(p, "design", design, reason = "test fixture")
   p <- sr_router_decide(p, "purpose", purpose, reason = "test fixture")
+  # extra user decisions (list(node, choice, table, column, override, reason)), before the rules run
+  for (d in decide) {
+    p <- sr_router_decide(p, d$node, d$choice, reason = d$reason %||% "test fixture", table = d$table %||% NA_character_,
+                          column = d$column %||% NA_character_, override = isTRUE(d$override))
+  }
   p <- sr_router_run(p)
   adj <- unique(unlist(lapply(prim, function(a) lapply(a$spec$terms, function(t) paste(a$table, t$var, sep = "\r")))))
   tab <- sr_router_table(p)

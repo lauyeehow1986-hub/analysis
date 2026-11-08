@@ -39,7 +39,7 @@ overwritten, and the export id skips any `export-NNN` folder that is already on 
 | `references.json` | The cited references in CSL-JSON, in order of first use. |
 | `references.ris` | The same references as RIS. |
 | `placeholders.json` | The registry rows: id, kind, text, analysis, source, suppressed, and a value only when the row is not suppressed. |
-| `checklist_strobe.csv` | The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
+| `checklist_strobe.csv` | Only when the guideline is STROBE (a CONSORT project has no checklist file; the supplement says to complete it by hand). The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
 | `manifest.json` | The export id, the creation time, the audit tip, the SAP hash, the preset, `suppress_k`, and the relative path and SHA-256 of every other file. |
 
 Outside the export folder: `out/sap/SAP_v1.docx` (locked; `SAP_draft.docx` before the lock, with a DRAFT
@@ -178,7 +178,7 @@ only.
 - **A crash can still leave an orphan export folder.** If the process dies between the folder rename and the `doc.exported` append, `out/exports/export-NNN/` has no event. The next export skips it and uses the next number; delete the orphan by hand after checking the event log.
 - **A failed append of an SAP or feasibility file** removes the file just written and re-raises the error, so a retry is possible. A crash between the write and the append can still leave a file; `SAP_v1.docx` is then never overwritten, so remove it by hand after checking the event log.
 - **Presets are unverified** (section 6).
-- **STROBE items 1 to 5 stay amber** until the router records the PICO and the study design. They are for
+- **STROBE items 1a, 1b and 2 stay amber**; items 3 to 5 are scored from the router decisions and the PICO (objective, design, setting and dates). The author items are for
   the authors to write.
 - **Method references need re-checking.** The method references were copied from the plan and must be
   checked against the publisher's records before release.
