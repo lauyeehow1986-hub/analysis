@@ -18,6 +18,7 @@
 
 .sr_tar_size <- function(b) {
   if (as.integer(b[1]) >= 128L) {                       # base-256 (GNU large size)
+    if (as.integer(b[1]) >= 192L) stop("bad size in tar header", call. = FALSE)
     v <- as.integer(b)
     v[1] <- bitwAnd(v[1], 127L)
     return(sum(v * 256^(rev(seq_along(v)) - 1)))
@@ -38,10 +39,16 @@
   invisible(NULL)
 }
 
+SR_TAR_MAX_ENTRIES <- 1e6
+SR_TAR_MAX_MEMBER <- 2^33
+SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "ustar" NUL "00"
+
 .sr_tar_entries <- function(path) {
   con <- gzfile(path, "rb")
   on.exit(close(con), add = TRUE)
-  name <- character(); type <- character(); size <- numeric()
+  cap <- 1024L
+  name <- character(cap); type <- character(cap); size <- numeric(cap)
+  n <- 0L
   longname <- NULL
   i <- 0L
   repeat {
@@ -57,16 +64,15 @@
       stop(sprintf("not a tar archive (bad header checksum at member %d)", i), call. = FALSE)
     }
     nm <- .sr_tar_str(h[1:100])
-    ty <- rawToChar(h[157])
-    if (identical(ty, "\001") || h[157] == as.raw(0L)) ty <- "0"
+    ty <- if (h[157] == as.raw(0L)) "0" else rawToChar(h[157])
     sz <- .sr_tar_size(h[125:136])
-    if (identical(.sr_tar_str(h[258:262]), "ustar")) {
+    if (identical(h[258:265], SR_TAR_USTAR)) {
       pre <- .sr_tar_str(h[346:500])
       if (nzchar(pre)) nm <- paste0(pre, "/", nm)
     }
     padded <- ceiling(sz / 512) * 512
     if (identical(ty, "L")) {                            # GNU long name for the next member
-      if (sz > 65536) stop("truncated tar archive", call. = FALSE)
+      if (sz > 65536) stop("oversized GNU long name", call. = FALSE)
       body <- readBin(con, "raw", padded)
       if (length(body) < padded) stop("truncated tar archive", call. = FALSE)
       longname <- .sr_tar_str(body[seq_len(sz)])
@@ -74,14 +80,24 @@
     }
     if (!is.null(longname)) { nm <- longname; longname <- NULL }
     .sr_tar_skip(con, padded)
-    name <- c(name, nm); type <- c(type, ty); size <- c(size, sz)
+    n <- n + 1L
+    if (n > SR_TAR_MAX_ENTRIES) stop("too many members in tar archive", call. = FALSE)
+    if (n > cap) {
+      cap <- cap * 2L
+      length(name) <- cap; length(type) <- cap; length(size) <- cap
+    }
+    name[n] <- nm; type[n] <- ty; size[n] <- sz
   }
-  data.frame(name = name, type = type, size = as.numeric(size), stringsAsFactors = FALSE)
+  if (!is.null(longname)) stop("truncated tar archive", call. = FALSE)
+  data.frame(name = name[seq_len(n)], type = type[seq_len(n)], size = as.numeric(size[seq_len(n)]),
+             stringsAsFactors = FALSE)
 }
+
+.sr_win_device_re <- "^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$"
 
 .sr_archive_safe_path <- function(x) {
   vapply(as.character(x), function(n) {
-    if (is.na(n)) return(FALSE)
+    if (is.na(n) || !validUTF8(n)) return(FALSE)
     s <- sub("/$", "", n)
     if (!nzchar(s)) return(FALSE)
     if (nchar(n, type = "bytes") > 255L) return(FALSE)
@@ -89,20 +105,36 @@
     if (startsWith(n, "/")) return(FALSE)
     seg <- strsplit(s, "/", fixed = TRUE)[[1]]
     if (length(seg) == 0L || any(seg %in% c("", ".", ".."))) return(FALSE)
+    if (any(grepl("[. ]$", seg))) return(FALSE)
+    if (any(grepl(.sr_win_device_re, toupper(sub("[.].*$", "", seg))))) return(FALSE)
     TRUE
   }, logical(1), USE.NAMES = FALSE)
 }
 
 .sr_tar_check <- function(entries) {
+  if (nrow(entries) > SR_TAR_MAX_ENTRIES) stop("too many members in tar archive", call. = FALSE)
   for (i in seq_len(nrow(entries))) {
     n <- entries$name[i]; t <- entries$type[i]
     if (!t %in% c("0", "5")) {
-      stop(sprintf("archive member '%s' is a link or special file (type %s)", n, t), call. = FALSE)
+      stop(sprintf("archive member 
+'%s'
+ is a link or special file (type %s)", n, t), call. = FALSE)
     }
-    if (!.sr_archive_safe_path(n)) stop(sprintf("unsafe archive member name '%s'", n), call. = FALSE)
-    if (n %in% entries$name[seq_len(i - 1L)]) {
-      stop(sprintf("duplicate archive member '%s'", n), call. = FALSE)
+    if (!.sr_archive_safe_path(n) || (t == "0" && endsWith(n, "/"))) {
+      stop(sprintf("unsafe archive member name 
+'%s'
+", n), call. = FALSE)
+    }
+    if (entries$size[i] > SR_TAR_MAX_MEMBER) {
+      stop(sprintf("archive member 
+'%s'
+ exceeds the size limit", n), call. = FALSE)
     }
   }
+  key <- tolower(sub("/+$", "", sub("[. ]+$", "", sub("/+$", "", entries$name))))
+  d <- which(duplicated(key))
+  if (length(d)) stop(sprintf("duplicate archive member 
+'%s'
+", entries$name[d[1]]), call. = FALSE)
   invisible(TRUE)
 }

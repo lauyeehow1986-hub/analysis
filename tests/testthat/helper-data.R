@@ -189,8 +189,10 @@ local({
   p
 }
 
-# One 512-byte ustar header (raw) for hand-built tar fixtures; Task 5 reuses it.
-.fx_tar_header <- function(name, type = "0", size = 0, linkname = "") {
+# One 512-byte ustar header (raw) for hand-built tar fixtures; Task 5 reuses it. `magic` is the 6-byte
+# magic ("ustar\0" by default; pass "ustar " for old GNU), `size_raw` overrides the 12-byte size field.
+.fx_tar_header <- function(name, type = "0", size = 0, linkname = "", prefix = "",
+                           magic = "ustar", version = "00", size_raw = NULL) {
   h <- raw(512)
   oct <- function(x, w) {
     s <- as.character(as.octmode(as.integer(x)))
@@ -210,10 +212,11 @@ local({
   h <- put(h, 136, "00000000000", 11)
   h <- put(h, 156, type, 1)
   h <- put(h, 157, linkname, 100)
-  h <- put(h, 257, "ustar", 5)
-  h <- put(h, 263, "00", 2)
+  h <- put(h, 257, magic, 6)
+  h <- put(h, 263, version, 2)
+  h <- put(h, 345, prefix, 155)
+  if (!is.null(size_raw)) h[125:136] <- size_raw
   h[149:156] <- as.raw(32L)
-  h[157] <- charToRaw(type)
   ck <- sum(as.integer(h))
   h <- put(h, 148, oct(ck, 6), 6)
   h[148 + 7] <- as.raw(0L)
