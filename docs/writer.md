@@ -48,7 +48,7 @@ overwritten, and the export id skips any `export-NNN` folder that is already on 
 | `references.json` | The cited references in CSL-JSON, in order of first use. |
 | `references.ris` | The same references as RIS. |
 | `placeholders.json` | The registry rows: id, kind, text, analysis, source, suppressed, and a value only when the row is not suppressed. |
-| `checklist_strobe.csv` | Only when the guideline is STROBE (a CONSORT project has no checklist file; the supplement says to complete it by hand). The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
+| `checklist_strobe.csv` | For every guideline except CONSORT, including `none` and an undecided guideline, since STROBE is the default observational checklist. A CONSORT project has no checklist file, and the supplement says to complete it by hand. The Methods name a guideline only when it is STROBE or CONSORT. The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
 | `manifest.json` | The export id, the creation time, the audit tip, the SAP hash, the preset, `suppress_k`, and the relative path and SHA-256 of every other file. |
 
 Outside the export folder: `out/sap/SAP_v1.docx` (locked; `SAP_draft.docx` before the lock, with a DRAFT
