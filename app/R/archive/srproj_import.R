@@ -75,8 +75,10 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   }, add = TRUE)
 
   dir.create(partial)
-  # only the regular files the scanner approved may be written (defence in depth: untar2 skips any other
-  # name); folders come from the approved file paths and the scanned folder members
+  # files = limits only the REGULAR files untar2 writes to the scanner-approved names (defence in depth);
+  # it does not filter folder or link members. Safety rests on the scan: it refuses every link and special
+  # type, any non-file member with data, and anything untar2 would read differently, so untar2 meets only
+  # the regular files and folders that were checked.
   utils::untar(archive, files = files, exdir = partial, tar = "internal")
   if (!identical(sr_sha256_file(archive), arch_sha)) {
     stop("the archive changed while it was being imported", call. = FALSE)

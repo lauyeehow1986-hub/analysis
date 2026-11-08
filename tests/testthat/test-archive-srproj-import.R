@@ -304,3 +304,25 @@ test_that("folder members named like a lock, partial or temp folder are refused"
   }
   .no_trace(root, "d1")
 })
+
+# srproj.json, then a folder member "d/" declaring size 512 whose "data" block is a whole link header
+# (type `ltype`) naming `target_dir`/evil.txt: untar2 reads no data for a folder, so it reads that block as
+# the next header.
+.fx_hidden_link <- function(path, target_dir, ltype = "1") {
+  hidden <- .fx_tar_header("evil.txt", type = ltype, linkname = "srproj.json", prefix = target_dir)
+  con <- gzfile(path, "wb"); on.exit(close(con))
+  writeBin(c(.fx_tar_header("srproj.json", size = 2), charToRaw("{}"), raw(510),
+             .fx_tar_header("d/", type = "5", size = 512), hidden, raw(1024)), con)
+  path
+}
+
+test_that("a folder member with data (a link header hidden in it) is refused and nothing is written", {
+  root <- withr::local_tempdir()
+  for (lt in c("1", "2")) {
+    sentinel <- sub("^[A-Za-z]:", "", normalizePath(withr::local_tempdir(), winslash = "/"))
+    a <- .fx_hidden_link(file.path(root, paste0("h", lt, ".srproj")), sentinel, lt)
+    expect_error(suppressWarnings(sr_srproj_import(a, file.path(root, "d1"))), "with data", info = lt)
+    expect_length(list.files(sentinel, all.files = TRUE, no.. = TRUE), 0L)
+    .no_trace(root, "d1")
+  }
+})

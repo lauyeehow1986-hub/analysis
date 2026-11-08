@@ -270,3 +270,68 @@ test_that("device stems are matched after stripping trailing spaces, and CLOCK$ 
   expect_false(any(.sr_archive_safe_path(bad)))
   expect_true(all(.sr_archive_safe_path(c("console.txt", "connect", "clock", "clocks.txt"))))
 })
+
+test_that("a non-file member with a non-zero size is refused before its data is skipped", {
+  hid <- .fx_tar_header("evil.txt", type = "1", linkname = "x")
+  for (t in c("5", "1", "2", "3", "4", "6", "x", "g", "K")) {
+    f <- .tar_file(.fx_tar_header("d/", type = t, size = 512), hid)
+    expect_error(.sr_tar_entries(f), "with data", info = t)
+  }
+  expect_identical(.sr_tar_entries(.tar_file(.fx_tar_header("d/", type = "5")))$name, "d/")
+})
+
+test_that("mode, mtime and magic fields untar2 cannot parse are refused", {
+  fix <- function(h) {
+    h[149:156] <- as.raw(32L)
+    h[149:156] <- c(charToRaw(sprintf("%06o", sum(as.integer(h)))), as.raw(0L), as.raw(32L))
+    h
+  }
+  h <- .fx_tar_header("a"); h[101] <- charToRaw("9")
+  expect_error(.sr_tar_entries(.tar_file(fix(h))), "mode field")
+  h <- .fx_tar_header("a"); h[137] <- charToRaw("z")
+  expect_error(.sr_tar_entries(.tar_file(fix(h))), "mtime field")
+  h <- .fx_tar_header("a"); h[260] <- as.raw(0L)                  # "us" NUL "ar": untar2 cannot read it
+  expect_error(.sr_tar_entries(.tar_file(fix(h))), "magic field")
+})
+
+test_that("randomized parity: whenever the scan and check pass, untar2 lists exactly the scanner names", {
+  set.seed(20261108)
+  pool <- c("a.txt", "d/", "d/b.txt", "x/y/z.csv", paste0(strrep("p", 60), "/", strrep("q", 60), ".txt"))
+  uid <- 0L
+  hdr <- function() {
+    t <- sample(c("0", "0", "0", "0", "5", "5", "1", "2", "3", "6", "x", "g", "K"), 1)
+    sz <- if (t %in% c("0", "L") || runif(1) < 0.3) sample(c(0, 1, 3, 511, 512, 700), 1) else 0
+    uid <<- uid + 1L
+    nm <- paste0("m", uid, "/", sample(pool, 1))   # unique, so duplicates do not mask the comparison
+    pre <- ""
+    if (nchar(nm) > 100) { pre <- dirname(nm); nm <- basename(nm) }
+    h <- .fx_tar_header(nm, type = t, size = sz, prefix = pre, linkname = if (t %in% c("1", "2")) "a.txt" else "")
+    data <- if (sz > 0) {
+      if (runif(1) < 0.3) c(.fx_tar_header("hidden.txt", type = sample(c("0", "1"), 1)), raw(0))[seq_len(min(sz, 512))]
+      else as.raw(sample(65:90, sz, replace = TRUE))
+    } else raw(0)
+    if (length(data) < sz) data <- c(data, raw(sz - length(data)))
+    c(h, data, .tar_pad(sz))
+  }
+  lhdr <- function() {
+    nm <- paste0("long/", strrep("n", sample(90:160, 1)), ".txt")
+    body <- charToRaw(nm)
+    if (runif(1) < 0.3) body <- c(body, as.raw(0L), charToRaw("tail"))
+    sz <- if (runif(1) < 0.3) sample(seq_along(body), 1) else length(body)
+    c(.fx_tar_header("././@LongLink", type = "L", size = sz), body, .tar_pad(length(body)))
+  }
+  checked <- 0L
+  for (k in 1:400) {
+    parts <- lapply(seq_len(sample(1:4, 1)), function(i) if (runif(1) < 0.2) c(lhdr(), hdr()) else hdr())
+    f <- tempfile(fileext = ".tar")
+    writeBin(c(do.call(c, parts), raw(1024)), f)
+    sc <- tryCatch({ e <- .sr_tar_entries(f); .sr_tar_check(e); e$name }, error = function(e) NULL)
+    if (!is.null(sc)) {
+      checked <- checked + 1L
+      ref <- tryCatch(suppressWarnings(utils::untar(f, list = TRUE, tar = "internal")), error = function(e) NULL)
+      expect_identical(sc, ref, info = paste("variant", k))
+    }
+    unlink(f)
+  }
+  expect_gt(checked, 40L)                                 # 49 with this seed
+})

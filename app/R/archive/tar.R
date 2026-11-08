@@ -40,6 +40,13 @@
   nm
 }
 
+# TRUE when an octal header field (up to its first NUL) holds only 0-7 and spaces, as untar2 needs.
+.sr_tar_octal_ok <- function(b) {
+  z <- which(b == as.raw(0L))
+  if (length(z)) b <- b[seq_len(z[1] - 1L)]
+  all(b %in% charToRaw("01234567 "))
+}
+
 .sr_tar_size <- function(b) {
   if (as.integer(b[1]) >= 128L) {                       # base-256 (GNU large size)
     if (as.integer(b[1]) >= 192L) stop("bad size in tar header", call. = FALSE)
@@ -48,7 +55,7 @@
     return(sum(v * 256^(rev(seq_along(v)) - 1)))
   }
   s <- .sr_tar_str(b)
-  if (grepl("[^0-7 ]", s)) stop("bad size in tar header", call. = FALSE)   # untar2 refuses these too
+  if (!.sr_tar_octal_ok(b)) stop("bad size in tar header", call. = FALSE)   # untar2 refuses these too
   s <- gsub(" ", "", s, fixed = TRUE)                                         # untar2 skips spaces anywhere
   if (!nzchar(s)) return(0)
   sum(as.integer(strsplit(s, "")[[1]]) * 8^((nchar(s) - 1):0))
@@ -92,6 +99,22 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
     nm <- .sr_tar_field(h[1:100], "name")
     ty <- if (h[157] == as.raw(0L)) "0" else rawToChar(h[157])
     sz <- .sr_tar_size(h[125:136])
+    # untar2 parses these (getOct / rawToChar) and stops part-way through an archive on a bad one
+    if (!.sr_tar_octal_ok(h[101:108])) stop("bad mode field in tar header at member ", i, call. = FALSE)
+    if (!.sr_tar_octal_ok(h[137:148])) stop("bad mtime field in tar header at member ", i, call. = FALSE)
+    .sr_tar_field(h[258:262], "magic")
+    # Data consumed per type by utils:::untar2 (the extractor) vs this scanner (which skips `padded`):
+    #   "0", NUL, raw 0x07   untar2 reads ceiling(size/512) blocks       same
+    #   "L", "K", "x", "g"   untar2 reads ceiling(size/512) blocks       same
+    #   "1" "2" "3" "4" "5" "6"   untar2 reads NO data                   differs when size > 0
+    #   anything else        untar2 stops ("unsupported entry type")
+    # so a member that is not a regular file or a GNU long name must declare size 0; otherwise the two
+    # would fall out of step and untar2 would read the "data" as headers (a hidden link, say).
+    if (!identical(ty, "0") && !identical(ty, "L") && sz != 0) {
+      stop(sprintf("tar member %d (type %s) is not a regular file but has data (size %s); a %s with data",
+                   i, ty, format(sz), if (identical(ty, "5")) "directory member" else "non-file member"),
+           call. = FALSE)
+    }
     if (identical(h[258:265], SR_TAR_USTAR)) {
       pre <- .sr_tar_field(h[346:500], "prefix")
       if (nzchar(pre)) nm <- paste0(pre, "/", nm)
