@@ -459,7 +459,7 @@ SR_FORM_MAX_ROWS <- 30L
       },
       terms = .sr_ui_terms_inputs(e, ns, disabled),
       interactions = .sr_ui_interaction_inputs(e, ns, disabled, .sr_ui_int_choices(exposure, terms_val)),
-      NULL)
+      stop("the form cannot render kind '", e$kind, "' (field '", e$id, "')", call. = FALSE))
   }
   shiny::tagList(lapply(unname(form), one))
 }

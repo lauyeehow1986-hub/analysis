@@ -72,6 +72,12 @@
   if (is.na(n)) 0L else min(max(n, 0L), SR_FORM_MAX_ROWS)
 }
 
+# The layer values of a form description, keyed by layer name.
+.sr_sap_form_layers <- function(form) {
+  lay <- Filter(function(e) identical(e$kind, "layers"), form)
+  stats::setNames(lapply(lay, function(e) e$value), sub("^layers_", "", vapply(lay, `[[`, "", "id")))
+}
+
 # The input value of the form entry `e` as the form takes it, or NULL when its input is not there (absent
 # from names(input)): a field the user never saw keeps its prefill.
 .sr_sap_entry_value <- function(e, input, present) {
@@ -80,15 +86,22 @@
   switch(e$kind,
     terms = {
       if (!has("f_terms_n")) return(NULL)
+      vals <- e$value %||% list()
+      pick <- function(k, fb) if (has(k)) rd(k) %||% "" else fb
       lapply(seq_len(.sr_sap_n(rd("f_terms_n"))), function(i) {
-        list(var = rd(paste0("f_terms_var_", i)) %||% "", type = rd(paste0("f_terms_type_", i)) %||% "linear",
-             knots = rd(paste0("f_terms_knots_", i)) %||% "")
+        t <- if (i <= length(vals)) vals[[i]] else list()
+        list(var = pick(paste0("f_terms_var_", i), .sr_ui_chr(t[["var"]])),
+             type = pick(paste0("f_terms_type_", i), if (is.null(t[["type"]])) "linear" else t[["type"]]),
+             knots = pick(paste0("f_terms_knots_", i), paste(as.character(t[["knots"]]), collapse = ",")))
       })
     },
     interactions = {
       if (!has("f_int_n")) return(NULL)
+      vals <- e$value %||% list()
+      pick <- function(k, fb) if (has(k)) rd(k) %||% "" else fb
       lapply(seq_len(.sr_sap_n(rd("f_int_n"))), function(i) {
-        c(rd(paste0("f_int_a_", i)) %||% "", rd(paste0("f_int_b_", i)) %||% "")
+        ia <- if (i <= length(vals)) as.character(unlist(vals[[i]])) else c("", "")
+        c(pick(paste0("f_int_a_", i), .sr_ui_chr(ia[1L])), pick(paste0("f_int_b_", i), .sr_ui_chr(ia[2L])))
       })
     },
     {
@@ -103,9 +116,10 @@
 }
 
 #' The input values keyed by entry id, as sr_spec_collect takes them. A field whose input does not exist yet
-#' keeps its form value; matching and clustered are turned from "FALSE" / "TRUE" into logicals.
-.sr_sap_form_values <- function(input, form) {
-  present <- shiny::isolate(names(input))
+#' keeps its form value; matching and clustered are turned from "FALSE" / "TRUE" into logicals. `live` is the
+#' ids of the inputs that count (the ones that reported in the current dialog); NULL counts every input.
+.sr_sap_form_values <- function(input, form, live = NULL) {
+  present <- live %||% shiny::isolate(names(input))
   out <- list()
   for (e in form) {
     v <- .sr_sap_entry_value(e, input, present)
@@ -116,8 +130,8 @@
 }
 
 # The form with its values replaced by the current inputs (a field is marked unsourced when it changed).
-.sr_sap_overlay <- function(form, input) {
-  present <- shiny::isolate(names(input))
+.sr_sap_overlay <- function(form, input, live = NULL) {
+  present <- live %||% shiny::isolate(names(input))
   for (nm in names(form)) {
     e <- form[[nm]]
     v <- .sr_sap_entry_value(e, input, present)
@@ -191,6 +205,28 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     last_key <- NULL
     to_remove <- shiny::reactiveVal(NULL)
     sel <- shiny::reactiveVal(NULL)       # the selected analysis, by id
+    # Shiny keeps an input's value after its dialog closes, so an f_* input only counts once it has reported
+    # in the CURRENT dialog: a value that differs from what the input held when the dialog opened (or an
+    # input that did not exist then). A value still equal to the old one was never re-sent by the browser,
+    # and the form's own value stands in for it.
+    snap <- list()
+    snap_names <- character()
+    live <- new.env(parent = emptyenv())
+    refresh_live <- function() {
+      for (k in grep("^f_", shiny::isolate(names(input)), value = TRUE)) {
+        if (exists(k, envir = live, inherits = FALSE)) next
+        if (!(k %in% snap_names) || !identical(shiny::isolate(input[[k]]), snap[[k]])) assign(k, TRUE, envir = live)
+      }
+      invisible(NULL)
+    }
+    live_ids <- function() {
+      refresh_live()
+      ls(live, all.names = TRUE)
+    }
+    shiny::observe({
+      for (k in grep("^f_", names(input), value = TRUE)) input[[k]]
+      refresh_live()
+    }, priority = 100)
 
     output$banner <- shiny::renderUI(.sr_ui_readonly_banner(project()))
 
@@ -264,6 +300,9 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       }
       stamp <<- stamp + 1L
       last_key <<- NULL
+      rm(list = ls(live, all.names = TRUE), envir = live)
+      snap_names <<- grep("^f_", shiny::isolate(names(input)), value = TRUE)
+      snap <<- stats::setNames(lapply(snap_names, function(k) shiny::isolate(input[[k]])), snap_names)
       err("")
       mode(list(kind = kind, id = if (is.null(rec)) "" else rec$id, rec = rec, stamp = stamp))
       shiny::showModal(.sr_sap_modal(
@@ -300,8 +339,11 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     # editability only (never on project()), so typed values survive every other project change; on a
     # rebuild within the same dialog / table / route the current inputs are laid over the new form.
     layers_now <- shiny::reactive({
+      mode()   # a new dialog starts again from its own layers
       lay <- lapply(stats::setNames(nm = .SR_FORM_LAYER_ORDER), function(nm) input[[paste0("f_layers_", nm)]])
       lay <- Filter(Negate(is.null), lay)
+      ids <- live_ids()
+      lay <- lay[paste0("f_layers_", names(lay)) %in% ids]
       if (length(lay)) lay else NULL
     })
     form_r <- shiny::reactive({
@@ -316,10 +358,17 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       key <- paste(m$stamp, table, route, sep = "\r")
       fresh <- !identical(last_key, key)
       last_key <<- key
+      ids <- live_ids()
       tryCatch({
-        form <- sr_spec_form(route, table, p, layers = lay %||% if (same_saved) m$rec$spec$layers)
+        # the layers: the saved (Edit) or prefilled ones, with the ones the user has chosen in this dialog on top
+        form <- sr_spec_form(route, table, p)
         if (same_saved) form <- .sr_sap_apply_saved(form, m$rec$spec)
-        if (!fresh) form <- .sr_sap_overlay(form, input)
+        base <- .sr_sap_form_layers(form)
+        if (same_saved) base <- utils::modifyList(base, as.list(m$rec$spec$layers))
+        merged <- utils::modifyList(base, as.list(lay))
+        form <- sr_spec_form(route, table, p, layers = merged)
+        if (same_saved) form <- .sr_sap_apply_saved(form, m$rec$spec)
+        if (!fresh) form <- .sr_sap_overlay(form, input, ids)
         list(form = form, route = route, table = table)
       }, error = function(e) list(error = conditionMessage(e)))
     })
@@ -372,7 +421,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       parent <- if (identical(label, "sensitivity") && nzchar(parent)) parent else NA_character_
       rec <- m$rec
       ok <- run("Save analysis", function(p) {
-        spec <- sr_spec_collect(f$route, .sr_sap_form_values(input, f$form))
+        spec <- sr_spec_collect(f$route, .sr_sap_form_values(input, f$form, live_ids()))
         extra <- if (!is.null(rec)) {
           list(family = .sr_sap_na1(rec$family), addresses = rec$addresses %||% character(),
                version = if (identical(rec$route, f$route)) rec$route_version)

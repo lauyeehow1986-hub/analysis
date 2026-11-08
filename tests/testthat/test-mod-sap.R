@@ -377,3 +377,59 @@ test_that("the analyses table shows the feasibility decision, the tier or not as
   expect_equal(.sr_sap_table_view(p)$feasibility, "proceed")
   expect_equal(nrow(.sr_sap_table_view(NULL)), 0L)
 })
+
+test_that("a value left over from an earlier dialog never reaches an Edit or an Add", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  .fx_writer_routes()
+  sp <- .ui_bin_spec()
+  sp$layers$missing <- "mi"
+  sp$mi <- list(m = 20L)
+  p <- sr_sap_add(.fx_ui_project(), "c1", "logistic", sp, "t", label = "primary")
+  expect_equal(.sr_sap_analyses(p)$c1$spec$mi$m, 20L)
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    # dialog A: multiple imputation with m = 5, cancelled
+    session$setInputs(add = 1)
+    session$setInputs(an_id = "a", an_label = "primary", an_table = "t", an_route = "logistic")
+    session$setInputs(f_layers_missing = "mi")
+    expect_true("mi_m" %in% names(form_r()$form))
+    session$setInputs(f_mi_m = "5")
+    # dialog B: back to complete cases, cancelled
+    session$setInputs(add = 2)
+    expect_false("mi_m" %in% names(form_r()$form))   # the first form of a new Add ignores dialog A's layers
+    session$setInputs(f_layers_missing = "cc")
+    # edit c1 (saved: mi, m = 20)
+    session$setInputs(analyses_rows_selected = 1L)
+    session$setInputs(edit = 1)
+    f <- form_r()
+    expect_equal(f$form$layers_missing$value, "mi")
+    expect_equal(f$form$mi_m$value, 20L)
+    # the browser binds the rendered layer select and reports it; it does not re-send f_mi_m (equal to
+    # what the input held before)
+    session$setInputs(f_layers_missing = "mi")
+    f <- form_r()
+    expect_equal(f$form$mi_m$value, 20L)
+    expect_equal(f$form$mi_m$source, "saved")
+    expect_match(.ms_html(output$an_form), "saved")
+    session$setInputs(an_save = 1)
+    expect_equal(output$an_err, "")
+    expect_equal(.sr_sap_analyses(rv())$c1$spec$mi$m, 20L)
+    # a value typed in THIS dialog does count, even when it equals an old one
+    session$setInputs(analyses_rows_selected = 1L)
+    session$setInputs(edit = 2)
+    session$setInputs(f_layers_missing = "mi")
+    session$setInputs(f_mi_m = "7")
+    session$setInputs(f_mi_m = "5")
+    session$setInputs(an_save = 2)
+    expect_equal(.sr_sap_analyses(rv())$c1$spec$mi$m, 5)
+  })
+})
+
+test_that("the renderer refuses a field kind it cannot render", {
+  p <- .fx_ui_project()
+  f <- sr_spec_form("logistic", "t", p)
+  f$outcome$kind <- "weird"
+  expect_error(.sr_ui_spec_inputs(f, shiny::NS("x")), "cannot render kind 'weird' (field 'outcome')", fixed = TRUE)
+})
