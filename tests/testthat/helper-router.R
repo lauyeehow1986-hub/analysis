@@ -21,8 +21,8 @@
 #' Register a fake backend `id` (default "jev", the one sr_router_run can reach in a test). `ask` counts
 #' its calls in `env$.fake_calls` and answers `answer` (list(choice, probabilities), in criteria keys) for
 #' the request's single question; with `fail = TRUE` it counts the call and returns ok = FALSE. Whatever
-#' was registered under `id` is restored when `env` exits (or the id is removed).
-.fx_fake_backend <- function(env, answer, fail = FALSE, id = "jev") {
+#' was registered under `id` is restored when the caller's `frame` exits (or the id is removed).
+.fx_fake_backend <- function(env, answer, fail = FALSE, id = "jev", frame = parent.frame()) {
   old <- tryCatch(.sr_backend_get(id), error = function(e) NULL)
   env$.fake_calls <- 0L
   ask <- function(request, ctx) {
@@ -43,7 +43,7 @@
     } else {
       sr_backend_register(old$id, old$ask, old$available)
     }
-  }, envir = env)
+  }, envir = frame)
   invisible(id)
 }
 

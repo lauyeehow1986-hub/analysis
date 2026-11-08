@@ -154,8 +154,16 @@ test_that("failures are logged and the run carries on", {
          want = "choice is not one of the criteria keys"))
   for (i in seq_along(cases)) {
     cs <- cases[[i]]
-    withr::local_options(sr.jev_transport = cs$tr)
+    n_calls <- 0L
+    inner <- cs$tr
+    counted <- function(url, body, key, timeout) {
+      n_calls <<- n_calls + 1L
+      inner(url, body, key, timeout)
+    }
+    withr::local_options(sr.jev_transport = counted)
     p <- sr_router_run(p0, backends = "jev", approve = approve)
+    # one transport call per approved instance (design, purpose): never a retry
+    expect_identical(n_calls, 2L, info = cs$want)
     ev <- .rj_events(p, "router.predicted")
     expect_true(length(ev) >= 2L * i, info = cs$want)
     dd <- Filter(function(e) identical(e$payload$node, "design"), ev)
@@ -182,9 +190,14 @@ test_that("the key is never written anywhere", {
     .fx_fake_transport(env, 200L, .rj_ok_body))
   for (tr in trs) {
     withr::local_options(sr.jev_transport = tr)
-    p <- sr_router_run(p, backends = "jev", approve = approve)
-    r <- .sr_backend_get("jev")$ask(rq, list(project = p, approve = approve))
-    msgs <- c(msgs, r$error, r$raw)
+    caught <- character()
+    r <- withCallingHandlers({
+      p <- sr_router_run(p, backends = "jev", approve = approve)
+      .sr_backend_get("jev")$ask(rq, list(project = p, approve = approve))
+    }, condition = function(cnd) caught <<- c(caught, conditionMessage(cnd)))
+    msgs <- c(msgs, r$error, r$raw, caught)
+    # a throwing transport is caught inside ask: no condition surfaces the key
+    expect_false(any(grepl("SENTINEL", caught, fixed = TRUE)))
   }
   expect_true(length(.rj_events(p, "router.predicted")) >= 1L)
   files <- list.files(dirname(p$paths$json), recursive = TRUE, full.names = TRUE, all.files = TRUE)

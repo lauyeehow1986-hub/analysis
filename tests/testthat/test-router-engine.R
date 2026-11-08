@@ -121,11 +121,8 @@ test_that("escalation stops at the first backend that would act", {
   .fx_toy_nodes()
   env <- environment()
   .fx_fake_backend(env, list(choice = "a2", probabilities = c(a1 = 0.03, a2 = 0.97)), id = "local")
-  # env2 is not a frame, so the helper's deferred restore never runs: restore the real jev here.
-  jev0 <- .sr_backend_get("jev")
-  withr::defer(sr_backend_register("jev", jev0$ask, jev0$available))
   env2 <- new.env()
-  .fx_fake_backend(env2,list(choice = "a1", probabilities = c(a1 = 0.97, a2 = 0.03)), id = "jev")
+  .fx_fake_backend(env2, list(choice = "a1", probabilities = c(a1 = 0.97, a2 = 0.03)), id = "jev")
   p <- sr_router_run(.re_project(), backends = c("jev", "local"))
   expect_identical(env$.fake_calls, 1L)
   expect_identical(env2$.fake_calls, 0L)
