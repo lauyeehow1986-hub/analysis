@@ -157,7 +157,17 @@ mod_sap_ui <- function(id) {
   ns <- shiny::NS(id)
   shiny::tagList(
     shiny::uiOutput(ns("banner")),
-    .sr_ui_card("Pre-specified analyses", shiny::uiOutput(ns("btns")), DT::DTOutput(ns("analyses"))))
+    .sr_ui_card("Pre-specified analyses", shiny::uiOutput(ns("btns")), DT::DTOutput(ns("analyses"))),
+    .sr_ui_card("Feasibility", shiny::uiOutput(ns("feas_btns")), DT::DTOutput(ns("feas"))),
+    .sr_ui_card("Families and rules",
+                shiny::uiOutput(ns("fam_form")),
+                shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("fam_err"))),
+                DT::DTOutput(ns("families")),
+                shiny::hr(),
+                shiny::uiOutput(ns("rule_form")),
+                shiny::uiOutput(ns("rule_alt_ui")),
+                shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("rule_err"))),
+                DT::DTOutput(ns("rules"))))
 }
 
 # The builder dialog: the fixed fields, then the schema-driven an_form.
@@ -189,6 +199,98 @@ mod_sap_ui <- function(id) {
                           disabled = disabled)))
 }
 
+# ---- feasibility, families and rules: pure helpers ---------------------------------------------------
+
+# The feasibility card rows: every pre-specified analysis (one row per contrast of an assessed one, one row
+# with an empty tier of an unassessed one): analysis, label, route, tier, stale, decision.
+.sr_sap_feas_view <- function(p) {
+  empty <- data.frame(analysis = character(), label = character(), route = character(), tier = character(),
+                      stale = character(), decision = character(), stringsAsFactors = FALSE)
+  if (is.null(p)) return(empty)
+  an <- .sr_sap_analyses(p)
+  if (!length(an)) return(empty)
+  rep_ <- tryCatch(sr_feasibility_report(p), error = function(e) NULL)
+  rows <- lapply(sort(as.character(names(an)), method = "radix"), function(id) {
+    r <- if (is.null(rep_)) NULL else rep_[rep_$analysis == id, , drop = FALSE]
+    s <- function(x) ifelse(is.na(x), "", as.character(x))
+    if (is.null(r) || !nrow(r)) {
+      return(data.frame(analysis = id, label = .sr_ui_chr(an[[id]]$label), route = .sr_ui_chr(an[[id]]$route),
+                        tier = "not assessed", stale = "", decision = "", stringsAsFactors = FALSE))
+    }
+    data.frame(analysis = id, label = s(r$label), route = s(r$route), tier = s(r$tier),
+               stale = ifelse(is.na(r$stale), "", paste0("yes (", r$stale, ")")), decision = s(r$decision),
+               stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  rownames(out) <- NULL
+  out
+}
+
+# The choices of the families and rules forms: the ids a family may take (primary / secondary), every id, and
+# the sensitivity analyses by parent. A plain list so that it can be compared.
+.sr_sap_fam_choices <- function(p) {
+  an <- if (is.null(p)) list() else .sr_sap_analyses(p)
+  ids <- sort(as.character(names(an)), method = "radix")
+  lab <- vapply(an[ids], function(a) .sr_ui_chr(a$label), "")
+  par <- vapply(an[ids], function(a) if (length(a$parent) != 1L || is.na(a$parent)) "" else as.character(a$parent), "")
+  list(all = ids, members = ids[lab != "sensitivity"],
+       sens = lapply(stats::setNames(nm = ids), function(id) ids[lab == "sensitivity" & par == id]))
+}
+
+.sr_sap_families_view <- function(p) {
+  fam <- if (is.null(p)) list() else p$state$sap$families %||% list()
+  data.frame(id = vapply(fam, function(f) as.character(f$id), ""),
+             members = vapply(fam, function(f) paste(as.character(unlist(f$members)), collapse = ", "), ""),
+             method = vapply(fam, function(f) as.character(f$method), ""), stringsAsFactors = FALSE,
+             row.names = NULL)
+}
+
+.sr_sap_rules_view <- function(p) {
+  r <- if (is.null(p)) list() else p$state$sap$rules %||% list()
+  g <- function(k) vapply(r, function(x) as.character(x[[k]]), "")
+  data.frame(id = g("id"), analysis = g("analysis"), check = g("check"), action = g("action"),
+             alternative = g("alternative"), stringsAsFactors = FALSE, row.names = NULL)
+}
+
+# A numeric text field: NULL when empty, the number, or NA for text that is not one.
+.sr_sap_num <- function(x) {
+  x <- if (is.null(x) || !length(x)) "" else trimws(as.character(x[1L]))
+  if (is.na(x) || !nzchar(x)) return(NULL)
+  suppressWarnings(as.numeric(x))
+}
+
+# A reactive that only invalidates when f(project()) changes value.
+.sr_sap_flag <- function(project, f) {
+  val <- shiny::reactiveVal(f(shiny::isolate(project())))
+  shiny::observe({
+    v <- f(project())
+    if (!identical(shiny::isolate(val()), v)) val(v)
+  })
+  shiny::reactive(val())
+}
+
+# The assessment dialog's fields: the delta, then the assumptions the route / spec call for.
+.sr_sap_assess_fields <- function(ns, measures, show_r2, show_icc, disabled) {
+  off <- function(x, sel) if (disabled) .sr_ui_on_control(x, sel, disabled = NA) else x
+  txt <- function(id, label) {
+    .sr_ui_on_control(off(shiny::textInput(ns(id), label, width = "100%"), "input"), "input", maxlength = 200L)
+  }
+  why <- function(id, label) {
+    .sr_ui_on_control(off(shiny::textAreaInput(ns(id), label, rows = 2, width = "100%"), "textarea"),
+                      "textarea", maxlength = SR_PICO_MAX_CHARS)
+  }
+  shiny::tagList(
+    shiny::p(class = "text-muted small",
+             "The smallest clinically important difference is optional; the assessment never looks at outcomes."),
+    txt("fa_value", "Smallest important difference (number)"),
+    off(shiny::selectInput(ns("fa_measure"), "Measure", choices = measures, selectize = FALSE, width = "100%"),
+        "select"),
+    txt("fa_source", "Source of the difference"),
+    if (show_r2) shiny::tagList(txt("fa_r2", "R-squared of the covariates on the outcome (0 to 1)"),
+                                why("fa_r2_why", "Justification for the R-squared")),
+    if (show_icc) shiny::tagList(txt("fa_icc", "Intra-cluster correlation (required)"),
+                                 why("fa_icc_why", "Justification for the ICC")))
+}
 # ---- server ------------------------------------------------------------------------------------------
 
 # Render counters (tests only).
@@ -240,18 +342,18 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       .sr_ui_refusal(p, function() busy()) %||%
         if (!.sr_ui_editable(p)) "the SAP is locked; the plan can no longer be edited"
     }
-    refuse <- function(label) {
+    refuse <- function(label, ev = err) {
       why <- refusal()
       if (is.null(why)) return(FALSE)
-      err(why)
+      ev(why)
       .sr_ui_notify(paste0(label, ": ", why), "error")
       TRUE
     }
 
     # Run a core step; a core error goes to an_err (verbatim). TRUE when it succeeded.
-    run <- function(label, fn) {
-      err("")
-      if (refuse(label)) return(FALSE)
+    run <- function(label, fn, ev = err) {
+      ev("")
+      if (refuse(label, ev)) return(FALSE)
       ok <- FALSE
       act(label, function(p) {
         tryCatch({
@@ -259,7 +361,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
           ok <<- TRUE
           out
         }, error = function(e) {
-          err(conditionMessage(e))
+          ev(conditionMessage(e))
           NULL
         })
       })
@@ -473,6 +575,265 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
         to_remove(NULL)
         sel(NULL)
       }
+    })
+
+    # ---- feasibility card
+    fsel <- shiny::reactiveVal(NULL)      # the selected analysis of the feasibility table, by id
+    doc_on <- .sr_sap_flag(project, function(p) !is.null(p) && !isTRUE(p$readonly))
+    fa_err <- shiny::reactiveVal("")
+    fd_err <- shiny::reactiveVal("")
+    fa_mode <- shiny::reactiveVal(NULL)   # list(id, measures, show_r2, show_icc) while the assess dialog is open
+    fd_pending <- shiny::reactiveVal(NULL)
+
+    output$feas_btns <- shiny::renderUI({
+      off <- !editable()
+      b <- function(i, l, cls, dis) shiny::actionButton(ns(i), l, class = cls, disabled = dis)
+      shiny::div(class = "d-flex gap-2 mb-2", b("feas_assess", "Assess", "btn-primary", off),
+                 b("feas_decide", "Decide", "btn-outline-primary", off),
+                 b("feas_doc", "Feasibility report", "btn-outline-secondary", !doc_on()))
+    })
+    feas_df <- shiny::reactive(.sr_sap_feas_view(project()))
+    output$feas <- DT::renderDT({
+      df <- feas_df()
+      k <- shiny::isolate(fsel())
+      DT::datatable(df, rownames = FALSE, escape = TRUE,
+                    selection = list(mode = "single", selected = if (!is.null(k) && k %in% df$analysis) match(k, df$analysis)),
+                    options = list(dom = "tip", pageLength = 15L, scrollX = TRUE, ordering = FALSE),
+                    class = "compact stripe")
+    })
+    shiny::observeEvent(input$feas_rows_selected, {
+      df <- shiny::isolate(feas_df())
+      i <- input$feas_rows_selected
+      if (length(i) != 1L || is.na(i) || i < 1L || i > nrow(df)) return(invisible(NULL))
+      fsel(df$analysis[i])
+    }, ignoreNULL = FALSE, priority = 10)
+
+    # The selected analysis, or NULL after saying why not (read-only first, then no row).
+    feas_target <- function(label, ev) {
+      if (refuse(label, ev)) return(NULL)
+      k <- fsel()
+      if (is.null(k) || !k %in% names(.sr_sap_analyses(shiny::isolate(project())))) {
+        .sr_ui_notify(paste0(label, ": select an analysis first"), "error")
+        return(NULL)
+      }
+      k
+    }
+
+    # -- assess
+    shiny::observeEvent(input$feas_assess, {
+      k <- feas_target("Assess feasibility", fa_err)
+      if (is.null(k)) return(invisible(NULL))
+      p <- shiny::isolate(project())
+      a <- .sr_sap_analyses(p)[[k]]
+      ms <- tryCatch(sr_feasibility_measures(p, k), error = function(e) {
+        .sr_ui_notify(paste0("Assess feasibility: ", conditionMessage(e)), "error")
+        NULL
+      })
+      if (is.null(ms)) return(invisible(NULL))
+      fa_err("")
+      fa_mode(list(id = k, measures = ms, show_r2 = a$route %in% c("lm", "lm_describe"),
+                   show_icc = isTRUE(a$spec$layers$clustered)))
+      shiny::showModal(shiny::modalDialog(
+        title = paste0("Feasibility of ", k), size = "l", easyClose = FALSE,
+        shiny::uiOutput(ns("fa_form")),
+        shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("fa_err"))),
+        footer = shiny::tagList(shiny::modalButton("Cancel"),
+                                shiny::actionButton(ns("fa_ok"), "Assess", class = "btn-primary",
+                                                    disabled = !editable()))))
+    })
+    output$fa_form <- shiny::renderUI({
+      m <- fa_mode()
+      ed <- editable()
+      if (is.null(m)) return(NULL)
+      .sr_sap_assess_fields(ns, m$measures, m$show_r2, m$show_icc, disabled = !ed)
+    })
+    output$fa_err <- shiny::renderText(fa_err())
+    shiny::observeEvent(input$fa_ok, {
+      m <- shiny::isolate(fa_mode())
+      fa_err("")
+      if (is.null(m)) return(invisible(NULL))
+      if (refuse("Assess feasibility", fa_err)) return(invisible(NULL))
+      num <- function(x, what) {
+        v <- .sr_sap_num(x)
+        if (!is.null(v) && is.na(v)) stop(what, " must be a number", call. = FALSE)
+        v
+      }
+      args <- tryCatch({
+        value <- num(input$fa_value, "the difference")
+        measure <- .sr_ui_text(input$fa_measure)
+        if (!measure %in% m$measures) measure <- m$measures[1L]
+        delta <- if (is.null(value)) NULL else list(value = value, measure = measure, source = .sr_ui_text(input$fa_source))
+        assm <- list()
+        if (m$show_r2) {
+          v <- num(input$fa_r2, "the R-squared")
+          if (!is.null(v)) assm$r2_y <- list(value = v, justification = .sr_ui_text(input$fa_r2_why))
+        }
+        if (m$show_icc) {
+          v <- num(input$fa_icc, "the ICC")
+          if (!is.null(v)) assm$icc <- list(value = v, justification = .sr_ui_text(input$fa_icc_why))
+        }
+        list(delta = delta, assumptions = assm)
+      }, error = function(e) {
+        fa_err(conditionMessage(e))
+        NULL
+      })
+      if (is.null(args)) return(invisible(NULL))
+      ok <- run("Assess feasibility", function(p) sr_feasibility_assess(p, m$id, args$delta, args$assumptions),
+                ev = fa_err)
+      if (ok) {
+        shiny::removeModal()
+        fa_mode(NULL)
+      }
+    })
+
+    # -- decide (a stop is confirmed a second time)
+    decide_modal <- function(id, decision = SR_FEAS_DECISIONS[1L], reason = "") {
+      dec <- shiny::selectInput(ns("fd_decision"), "Decision", choices = SR_FEAS_DECISIONS, selected = decision,
+                                selectize = FALSE, width = "100%")
+      rsn <- .sr_ui_on_control(shiny::textAreaInput(ns("fd_reason"), "Reason", value = reason, rows = 3, width = "100%"),
+                               "textarea", maxlength = SR_PICO_MAX_CHARS)
+      off <- !editable()
+      if (off) {
+        dec <- .sr_ui_on_control(dec, "select", disabled = NA)
+        rsn <- .sr_ui_on_control(rsn, "textarea", disabled = NA)
+      }
+      shiny::showModal(shiny::modalDialog(
+        title = paste0("Decision on ", id), size = "l", easyClose = FALSE, dec, rsn,
+        shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("fd_err"))),
+        footer = shiny::tagList(shiny::modalButton("Cancel"),
+                                shiny::actionButton(ns("fd_ok"), "Save decision", class = "btn-primary", disabled = off))))
+    }
+    fd_id <- shiny::reactiveVal(NULL)
+    shiny::observeEvent(input$feas_decide, {
+      k <- feas_target("Decide feasibility", fd_err)
+      if (is.null(k)) return(invisible(NULL))
+      fd_err("")
+      fd_id(k)
+      fd_pending(NULL)
+      decide_modal(k)
+    })
+    output$fd_err <- shiny::renderText(fd_err())
+    decide_run <- function(id, decision, reason) {
+      run("Decide feasibility", function(p) sr_feasibility_decide(p, id, decision, reason), ev = fd_err)
+    }
+    shiny::observeEvent(input$fd_ok, {
+      id <- shiny::isolate(fd_id())
+      fd_err("")
+      if (is.null(id)) return(invisible(NULL))
+      if (refuse("Decide feasibility", fd_err)) return(invisible(NULL))
+      dec <- .sr_ui_text(input$fd_decision)
+      rsn <- .sr_ui_text(input$fd_reason)
+      if (!dec %in% SR_FEAS_DECISIONS) {
+        fd_err(paste0("decision must be one of: ", paste(SR_FEAS_DECISIONS, collapse = ", ")))
+        return(invisible(NULL))
+      }
+      if (identical(dec, "stop")) {
+        fd_pending(list(id = id, decision = dec, reason = rsn))
+        shiny::showModal(shiny::modalDialog(
+          title = paste0("Stop ", id, "?"), easyClose = FALSE,
+          shiny::p("stop blocks every run of this analysis"),
+          shiny::p(class = "text-muted small", "A stop can be reversed later by a new decision."),
+          shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("fd_err"))),
+          footer = shiny::tagList(shiny::modalButton("Cancel"),
+                                  shiny::actionButton(ns("fd_stop_ok"), "Stop this analysis", class = "btn-danger"))))
+        return(invisible(NULL))
+      }
+      if (decide_run(id, dec, rsn)) {
+        shiny::removeModal()
+        fd_id(NULL)
+      }
+    })
+    shiny::observeEvent(input$fd_stop_ok, {
+      pend <- shiny::isolate(fd_pending())
+      fd_err("")
+      if (is.null(pend)) return(invisible(NULL))
+      fd_pending(NULL)
+      if (decide_run(pend$id, pend$decision, pend$reason)) {
+        shiny::removeModal()
+        fd_id(NULL)
+      } else {
+        # a refusal: back to the decision dialog with what was typed and the core message
+        decide_modal(pend$id, pend$decision, pend$reason)
+      }
+    })
+
+    shiny::observeEvent(input$feas_doc, {
+      res <- act("Feasibility report", function(p) sr_feasibility_docx(p))
+      if (is.list(res) && !is.null(res$paths)) {
+        ex <- .sr_ui_exports(res, "feasibility")
+        if (nrow(ex)) .sr_ui_notify(paste0("Feasibility report written: ", ex$path[nrow(ex)]))
+      }
+    })
+
+    # ---- families and rules
+    fam_err <- shiny::reactiveVal("")
+    rule_err <- shiny::reactiveVal("")
+    fam_choices <- .sr_sap_flag(project, .sr_sap_fam_choices)
+    off_on <- function(x, sel, ed) if (ed) x else .sr_ui_on_control(x, sel, disabled = NA)
+    output$fam_form <- shiny::renderUI({
+      ch <- fam_choices()
+      ed <- editable()
+      keep <- shiny::isolate(input$fam_members)
+      shiny::div(
+        off_on(.sr_ui_on_control(shiny::textInput(ns("fam_id"), "Family id", value = shiny::isolate(input$fam_id) %||% "",
+                                                  width = "100%"), "input", maxlength = 40L), "input", ed),
+        off_on(shiny::selectInput(ns("fam_members"), "Members (primary or secondary analyses)", choices = ch$members,
+                                  selected = intersect(keep, ch$members), multiple = TRUE, selectize = FALSE,
+                                  width = "100%"), "select", ed),
+        off_on(shiny::selectInput(ns("fam_method"), "Adjustment method",
+                                  choices = c("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "none"),
+                                  selected = shiny::isolate(input$fam_method) %||% "holm", selectize = FALSE,
+                                  width = "100%"), "select", ed),
+        shiny::actionButton(ns("fam_save"), "Save family", class = "btn-primary", disabled = !ed))
+    })
+    output$rule_form <- shiny::renderUI({
+      ch <- fam_choices()
+      ed <- editable()
+      a0 <- shiny::isolate(input$rule_analysis)
+      shiny::div(
+        off_on(.sr_ui_on_control(shiny::textInput(ns("rule_id"), "Rule id", value = shiny::isolate(input$rule_id) %||% "",
+                                                  width = "100%"), "input", maxlength = 40L), "input", ed),
+        off_on(shiny::selectInput(ns("rule_analysis"), "Analysis", choices = ch$all,
+                                  selected = if (!is.null(a0) && a0 %in% ch$all) a0, selectize = FALSE,
+                                  width = "100%"), "select", ed),
+        off_on(shiny::selectInput(ns("rule_check"), "When this diagnostic fails", choices = SR_DIAG_IDS,
+                                  selected = shiny::isolate(input$rule_check), selectize = FALSE, width = "100%"),
+               "select", ed),
+        off_on(shiny::selectInput(ns("rule_action"), "Action", choices = c("add_sensitivity", "replace_primary"),
+                                  selected = shiny::isolate(input$rule_action), selectize = FALSE, width = "100%"),
+               "select", ed))
+    })
+    output$rule_alt_ui <- shiny::renderUI({
+      ch <- fam_choices()
+      ed <- editable()
+      an <- input$rule_analysis
+      if (is.null(an) || !an %in% ch$all) an <- if (length(ch$all)) ch$all[1L] else ""
+      alts <- ch$sens[[an]] %||% character()
+      prev <- shiny::isolate(input$rule_alt)
+      shiny::div(
+        off_on(shiny::selectInput(ns("rule_alt"), "Alternative (a sensitivity analysis of this analysis)",
+                                  choices = alts, selected = if (!is.null(prev) && prev %in% alts) prev,
+                                  selectize = FALSE, width = "100%"), "select", ed),
+        if (!length(alts)) shiny::p(class = "text-muted small", "add a sensitivity analysis with this parent first"),
+        shiny::actionButton(ns("rule_save"), "Save rule", class = "btn-primary", disabled = !ed))
+    })
+    output$fam_err <- shiny::renderText(fam_err())
+    output$rule_err <- shiny::renderText(rule_err())
+    output$families <- DT::renderDT(.sr_ui_dt(.sr_sap_families_view(project())))
+    output$rules <- DT::renderDT(.sr_ui_dt(.sr_sap_rules_view(project())))
+
+    shiny::observeEvent(input$fam_save, {
+      run("Save family", function(p) {
+        sr_sap_family(p, .sr_ui_text(input$fam_id), as.character(input$fam_members %||% character()),
+                      .sr_ui_text(input$fam_method))
+      }, ev = fam_err)
+    })
+    shiny::observeEvent(input$rule_save, {
+      run("Save rule", function(p) {
+        alt <- .sr_ui_text(input$rule_alt)
+        sr_sap_rule(p, .sr_ui_text(input$rule_id), .sr_ui_text(input$rule_analysis),
+                    .sr_ui_text(input$rule_check), .sr_ui_text(input$rule_action), if (nzchar(alt)) alt)
+      }, ev = rule_err)
     })
     invisible(NULL)
   })

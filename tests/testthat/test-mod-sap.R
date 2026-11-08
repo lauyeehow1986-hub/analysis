@@ -492,3 +492,300 @@ test_that("the renderer refuses a field kind it cannot render", {
   f$outcome$kind <- "weird"
   expect_error(.sr_ui_spec_inputs(f, shiny::NS("x")), "cannot render kind 'weird' (field 'outcome')", fixed = TRUE)
 })
+
+# ---- Task 7: feasibility, families and rules ---------------------------------------------------------
+
+.ms_opts <- function(html) {
+  m <- regmatches(html, gregexpr("<option value=\"[^\"]*\"", html))[[1]]
+  sub("<option value=\"([^\"]*)\"", "\\1", m)
+}
+
+# A project with the logistic primary prim (and the secondary sec and sensitivity sens when `more`).
+.ms_feas_project <- function(more = FALSE, env = parent.frame()) {
+  .fx_writer_routes()
+  p <- sr_sap_add(.fx_ui_project(env), "prim", "logistic", .ui_bin_spec(), "t", label = "primary")
+  if (more) {
+    p <- sr_sap_add(p, "sec", "logistic", .ui_bin_spec(), "t", label = "secondary")
+    p <- sr_sap_add(p, "sens", "logistic", .ui_bin_spec(), "t", label = "sensitivity", parent = "prim")
+  }
+  p
+}
+
+test_that("assess offers only the analysis measures and saves", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  rv <- shiny::reactiveVal(.ms_feas_project())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_rows_selected = 1L)
+    session$setInputs(feas_assess = 1)
+    html <- .ms_html(output$fa_form)
+    expect_setequal(.ms_opts(html), c("OR", "RD", "RR"))
+    expect_false(grepl("fa_r2|fa_icc", html))
+    session$setInputs(fa_value = 0.05, fa_measure = "RD", fa_source = "pilot")
+    session$setInputs(fa_ok = 1)
+    expect_equal(output$fa_err, "")
+    r <- sr_feasibility_report(rv())
+    expect_true(nrow(r) > 0L)
+    expect_true(all(is.na(r$stale)))
+    expect_false(any(is.na(r$tier)))
+    expect_equal(unique(r$delta), 0.05)
+    expect_equal(unique(r$delta_measure), "RD")
+    expect_equal(unique(r$delta_source), "pilot")
+  })
+})
+
+test_that("assess refusal shows in dialog and keeps the inputs", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  .fx_writer_routes()
+  sp <- .ui_bin_spec()
+  sp$layers$clustered <- TRUE
+  sp$se <- "cluster"
+  sp$cluster <- "stage"
+  p <- tryCatch(sr_sap_add(.fx_ui_project(), "cl1", "logistic", sp, "t", label = "primary"),
+                error = function(e) e)
+  if (inherits(p, "error")) fail(paste("clustered fixture refused:", conditionMessage(p)))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_rows_selected = 1L)
+    session$setInputs(feas_assess = 1)
+    expect_match(.ms_html(output$fa_form), "fa_icc")
+    n0 <- .ms_n_events(rv())
+    core <- tryCatch(sr_feasibility_assess(rv(), "cl1"), error = function(e) conditionMessage(e))
+    expect_match(core, "a clustered analysis needs assumptions$icc", fixed = TRUE)
+    session$setInputs(fa_value = 0.05, fa_measure = "RD", fa_source = "pilot")
+    session$setInputs(fa_ok = 1)
+    expect_equal(output$fa_err, core)
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_equal(input$fa_source, "pilot")
+    session$setInputs(fa_icc = 0.05, fa_icc_why = "pilot data")
+    session$setInputs(fa_ok = 2)
+    expect_equal(output$fa_err, "")
+    expect_equal(.ms_n_events(rv()), n0 + 1L)
+    expect_equal(sr_feasibility_report(rv())$analysis[1L], "cl1")
+  })
+})
+
+test_that("assessment fields: r2 and icc blocks, disabled and maxlength", {
+  f <- .sr_sap_assess_fields(shiny::NS("x"), c("OR"), show_r2 = TRUE, show_icc = FALSE, disabled = FALSE)
+  expect_match(as.character(f), "x-fa_r2_why")
+  expect_false(grepl("fa_icc", as.character(f)))
+  f2 <- .sr_sap_assess_fields(shiny::NS("x"), c("OR"), show_r2 = FALSE, show_icc = TRUE, disabled = TRUE)
+  expect_match(as.character(f2), "x-fa_icc_why")
+  expect_match(as.character(f2), "<textarea[^>]*disabled")
+  expect_match(as.character(f2), "<textarea[^>]*maxlength")
+  expect_false(grepl("fa_r2", as.character(f2)))
+})
+
+test_that("stop needs a second confirmation", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  p <- sr_feasibility_assess(.ms_feas_project(), "prim")
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_rows_selected = 1L)
+    session$setInputs(feas_decide = 1)
+    n0 <- .ms_n_events(rv())
+    session$setInputs(fd_decision = "stop", fd_reason = "not powered")
+    session$setInputs(fd_ok = 1)
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_null(rv()$state$feasibility$prim$decision)
+    expect_match(modal$html[length(modal$html)], "stop blocks every run of this analysis")
+    session$setInputs(fd_stop_ok = 1)
+    expect_equal(rv()$state$feasibility$prim$decision$decision, "stop")
+    expect_equal(rv()$state$feasibility$prim$decision$reason, "not powered")
+    expect_equal(.ms_n_events(rv()), n0 + 1L)
+  })
+})
+
+test_that("a refused decision shows the core message; a refused stop returns to the decision dialog", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  rv <- shiny::reactiveVal(.ms_feas_project())   # not assessed: the core refuses any decision
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_rows_selected = 1L)
+    session$setInputs(feas_decide = 1)
+    session$setInputs(fd_decision = "stop", fd_reason = "why")
+    session$setInputs(fd_ok = 1)
+    n_modal <- length(modal$html)
+    session$setInputs(fd_stop_ok = 1)
+    expect_match(output$fd_err, "has no feasibility assessment")
+    expect_length(modal$html, n_modal + 1L)
+    expect_match(modal$html[n_modal + 1L], "why")
+    session$setInputs(fd_decision = "revise", fd_reason = "r")
+    session$setInputs(fd_ok = 2)
+    expect_match(output$fd_err, "has no feasibility assessment")
+  })
+})
+
+test_that("family and rule save; the rule alternative is limited to the analysis sensitivities", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.ms_feas_project(more = TRUE))
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    expect_equal(.ms_opts(.ms_html(output$fam_form))[1:2], c("prim", "sec"))
+    expect_false("sens" %in% .ms_opts(.ms_html(output$fam_form)))
+    session$setInputs(fam_id = "f1", fam_members = c("prim", "sec"), fam_method = "holm")
+    session$setInputs(fam_save = 1)
+    expect_equal(output$fam_err, "")
+    expect_equal(unlist(rv()$state$sap$families$f1$members), c("prim", "sec"))
+    expect_equal(rv()$state$sap$families$f1$method, "holm")
+    session$setInputs(rule_analysis = "prim")
+    expect_equal(.ms_opts(.ms_html(output$rule_alt_ui)), "sens")
+    session$setInputs(rule_analysis = "sec")
+    html <- .ms_html(output$rule_alt_ui)
+    expect_length(.ms_opts(html), 0L)
+    expect_match(html, "add a sensitivity analysis with this parent first")
+    session$setInputs(rule_analysis = "prim", rule_alt = "sens", rule_id = "r1", rule_check = "separation",
+                      rule_action = "add_sensitivity")
+    session$setInputs(rule_save = 1)
+    expect_equal(output$rule_err, "")
+    r <- rv()$state$sap$rules$r1
+    expect_equal(c(r$analysis, r$check, r$action, r$alternative), c("prim", "separation", "add_sensitivity", "sens"))
+    expect_equal(nrow(.sr_sap_rules_view(rv())), 1L)
+    n0 <- .ms_n_events(rv())
+    session$setInputs(rule_id = "r2", rule_check = "ph")
+    session$setInputs(rule_analysis = "sec")
+    session$setInputs(rule_save = 2)
+    expect_match(output$rule_err, "alternative")
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_equal(input$rule_id, "r2")
+  })
+})
+
+test_that("a refused family keeps its inputs and shows the core message", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.ms_feas_project(more = TRUE))
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(fam_id = "f1", fam_members = character(), fam_method = "holm")
+    session$setInputs(fam_save = 1)
+    expect_equal(output$fam_err, "members must be a non-empty character vector of analysis ids")
+    expect_equal(input$fam_id, "f1")
+    expect_equal(.ms_n_events(rv()), n0)
+  })
+})
+
+test_that("typed family text survives project changes, and the form re-renders only on new choices", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.ms_feas_project(more = TRUE))
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(fam_id = "typed")
+    h0 <- .ms_html(output$fam_form)
+    rv(sr_sap_family(rv(), "other", "prim", "holm"))   # an event that changes no analysis
+    session$setInputs(x = 1)
+    expect_identical(h0, .ms_html(output$fam_form))
+    rv(sr_sap_add(rv(), "extra", "logistic", .ui_bin_spec(), "t", label = "secondary"))
+    session$setInputs(x = 2)
+    h2 <- .ms_html(output$fam_form)
+    expect_match(h2, "extra")
+    expect_match(h2, "value=\"typed\"")
+  })
+})
+
+test_that("read-only: feasibility, family and rule edits refused", {
+  withr::local_options(sr.mode = "airgap")
+  seen <- .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  p <- .ms_feas_project(more = TRUE)
+  p$readonly <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(feas_assess = 1)
+    session$setInputs(feas_decide = 1)
+    session$setInputs(feas_doc = 1)
+    expect_equal(sum(grepl("read-only", seen$msg)), 3L)
+    expect_false(any(grepl("select an analysis", seen$msg)))
+    expect_length(modal$html, 0L)
+    session$setInputs(fam_id = "f1", fam_members = "prim", fam_method = "holm", fam_save = 1)
+    expect_match(output$fam_err, "read-only")
+    session$setInputs(rule_id = "r1", rule_analysis = "prim", rule_check = "separation",
+                      rule_action = "add_sensitivity", rule_alt = "sens", rule_save = 1)
+    expect_match(output$rule_err, "read-only")
+    fa_mode(list(id = "prim", measures = "OR", show_r2 = FALSE, show_icc = FALSE))
+    session$setInputs(fa_ok = 1)
+    expect_match(output$fa_err, "read-only")
+    fd_id("prim")
+    session$setInputs(fd_decision = "revise", fd_reason = "x", fd_ok = 1)
+    expect_match(output$fd_err, "read-only")
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_match(.ms_html(output$fam_form), "<input id=\"[^\"]*fam_id\"[^>]*disabled")
+    expect_match(.ms_html(output$fam_form), "<select[^>]*disabled[^>]*id=\"[^\"]*fam_members\"")
+    expect_match(.ms_html(output$fam_form), "<button[^>]*disabled[^>]*id=\"[^\"]*fam_save\"")
+    expect_match(.ms_html(output$rule_form), "<input id=\"[^\"]*rule_id\"[^>]*disabled")
+    expect_match(.ms_html(output$rule_alt_ui), "<button[^>]*disabled[^>]*id=\"[^\"]*rule_save\"")
+    expect_match(.ms_html(output$feas_btns), "<button[^>]*disabled[^>]*id=\"[^\"]*feas_assess\"")
+    expect_match(.ms_html(output$feas_btns), "<button[^>]*disabled[^>]*id=\"[^\"]*feas_doc\"")
+  })
+})
+
+test_that("a locked SAP refuses feasibility, family and rule edits from every control", {
+  withr::local_options(sr.mode = "airgap")
+  seen <- .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  .fx_writer_routes()
+  lm <- function(sp = list()) utils::modifyList(list(purpose = "explain-causal", outcome = "age", exposure = "grp",
+                                                       exposure_ref = "A", layers = .fx_writer_layers(), seed = 42L), sp)
+  p0 <- sr_sap_add(.fx_ui_project(), "prim", "lm", lm(), "t", label = "primary")
+  p0 <- sr_sap_add(p0, "sec", "lm", lm(), "t", label = "secondary")
+  p0 <- sr_sap_add(p0, "sens", "lm", lm(), "t", label = "sensitivity", parent = "prim")
+  p0 <- sr_sap_family(p0, "f1", c("prim", "sec"), "holm")
+  locked <- sr_sap_lock(.fx_feasible(p0))
+  rv <- shiny::reactiveVal(locked)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(feas_assess = 1, feas_decide = 1)
+    expect_equal(sum(grepl("SAP is locked", seen$msg)), 2L)
+    expect_length(modal$html, 0L)
+    session$setInputs(fam_id = "f2", fam_members = "prim", fam_method = "holm", fam_save = 1)
+    expect_match(output$fam_err, "SAP is locked")
+    session$setInputs(rule_id = "r1", rule_analysis = "prim", rule_check = "separation",
+                      rule_action = "add_sensitivity", rule_alt = "sens", rule_save = 1)
+    expect_match(output$rule_err, "SAP is locked")
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_match(.ms_html(output$rule_alt_ui), "<button[^>]*disabled[^>]*id=\"[^\"]*rule_save\"")
+    expect_match(.ms_html(output$feas_btns), "<button[^>]*disabled[^>]*id=\"[^\"]*feas_decide\"")
+    expect_false(grepl("<button[^>]*disabled[^>]*id=\"[^\"]*feas_doc\"", .ms_html(output$feas_btns)))
+  })
+})
+
+test_that("the feasibility report is written through act and listed as an export", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  p <- sr_feasibility_assess(.ms_feas_project(), "prim")
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_doc = 1)
+    ex <- .sr_ui_exports(rv(), "feasibility")
+    expect_equal(nrow(ex), 1L)
+    expect_true(file.exists(ex$path))
+  })
+})
+
+test_that("the feasibility table lists unassessed analyses and keeps the selection across re-renders", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  p <- .ms_feas_project(more = TRUE)
+  v <- .sr_sap_feas_view(p)
+  expect_equal(v$analysis, c("prim", "sec", "sens"))
+  expect_true(all(v$tier == "not assessed"))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(feas_rows_selected = 2L)
+    expect_equal(fsel(), "sec")
+    session$setInputs(feas_rows_selected = integer())   # a re-render empties it: ignored
+    expect_equal(fsel(), "sec")
+    rv(sr_feasibility_assess(rv(), "prim"))
+    session$setInputs(x = 1)
+    expect_equal(fsel(), "sec")
+    v2 <- .sr_sap_feas_view(rv())
+    expect_false(any(v2$tier[v2$analysis == "prim"] == "not assessed"))
+  })
+})
