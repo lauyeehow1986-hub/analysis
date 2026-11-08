@@ -424,3 +424,13 @@ sr_feasibility_fragment <- function(project, analysis_id) {
   }
   out
 }
+
+#' The effect measures a pre-specified analysis reports (`.sr_feas_measures`), as a character vector.
+#' The exposure type is the latest assessment's `inputs$exposure$type`, "factor" when it has none.
+#' Stops "unknown analysis '<id>'" for an unknown id.
+sr_feasibility_measures <- function(project, analysis_id) {
+  a <- .sr_sap_get(project, analysis_id)
+  type <- project$state$feasibility[[analysis_id]]$assessment$inputs$exposure$type
+  if (is.null(type) || length(type) != 1L || is.na(type)) type <- "factor"
+  .sr_feas_measures(a$route, .sr_spec_from_state(a$spec), type)
+}

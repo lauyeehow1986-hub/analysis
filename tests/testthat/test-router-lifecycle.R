@@ -202,3 +202,12 @@ test_that("two columns with the same label do not settle a column choice", {
   expect_false(grepl("Body weight", pm$body, fixed = TRUE))
   expect_false(grepl("bmi_6m", pm$body, fixed = TRUE))
 })
+
+test_that("sr_router_editor gives a node's options and what it waits on", {
+  p <- .fx_ui_project()
+  ed <- sr_router_editor(p, "outcome_col", table = "t")
+  expect_true("purpose" %in% ed$waiting_on)
+  ed2 <- sr_router_editor(p, "purpose")
+  expect_setequal(ed2$options, SR_PURPOSES)
+  expect_identical(ed2$waiting_on, character())
+})
