@@ -24,17 +24,21 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
 # Core source list, in load order. Files that do not exist yet are skipped; later tasks only add
 # files (and Task 12 appends R/ui/*.R).
 .sr_core_files <- c(
-  "core/util", "core/audit", "core/events", "core/project", "core/hardware",
-  "core/libsnap", "core/hash", "core/lint", "core/exec", "design/spec", "design/compose",
-  "writer/numfmt", "io/sniff", "io/preflight", "io/duck", "io/fingerprint", "io/store",
-  "io/read_text", "io/read_columnar", "io/read_sheet", "io/ingest", "io/dictionary", "io/redcap_dict", "io/join",
-  "intake/roles", "intake/pico", "router/sysone", "router/abstain", "profile/profile", "profile/dq", "profile/dq_conformance", "profile/dq_completeness",
-  "profile/dq_plausibility", "profile/dq_structure", "profile/dq_leakage", "profile/recipe", "io/cohort", "profile/suggest", "profile/query", "profile/flow",
-  "routes/emit", "routes/result", "routes/terms", "sap/sap", "routes/run", "routes/table1", "routes/se", "routes/lm", "routes/marginal", "routes/glm", "routes/cox", "routes/rmst",
-  "impute/pool", "impute/impute", "resample/boot", "diagnostics/checks", "diagnostics/plots",
-  "sap/deviations", "sap/feas_engine", "sap/feasibility", "resample/coverage", "resample/feas_sim",
-  "writer/placeholders", "writer/sdc_out", "writer/fragments", "writer/tables", "writer/figures", "writer/cite",
-  "writer/checklist", "writer/model", "writer/guard", "writer/docx", "writer/script", "writer/sapdoc", "writer/export"
+  "core/util", "core/audit", "core/events", "core/project", "core/hardware", "core/libsnap",
+  "core/hash", "core/lint", "core/exec", "design/spec", "design/compose", "writer/numfmt",
+  "io/sniff", "io/preflight", "io/duck", "io/fingerprint", "io/store", "io/read_text",
+  "io/read_columnar", "io/read_sheet", "io/ingest", "io/dictionary", "io/redcap_dict", "io/join",
+  "intake/roles", "intake/pico", "router/sysone", "router/abstain", "router/graph",
+  "profile/profile", "profile/dq", "profile/dq_conformance", "profile/dq_completeness",
+  "profile/dq_plausibility", "profile/dq_structure", "profile/dq_leakage", "profile/recipe",
+  "io/cohort", "profile/suggest", "profile/query", "profile/flow", "routes/emit", "routes/result",
+  "routes/terms", "sap/sap", "routes/run", "routes/table1", "routes/se", "routes/lm",
+  "routes/marginal", "routes/glm", "routes/cox", "routes/rmst", "impute/pool", "impute/impute",
+  "resample/boot", "diagnostics/checks", "diagnostics/plots", "sap/deviations", "sap/feas_engine",
+  "sap/feasibility", "resample/coverage", "resample/feas_sim", "writer/placeholders",
+  "writer/sdc_out", "writer/fragments", "writer/tables", "writer/figures", "writer/cite",
+  "writer/checklist", "writer/model", "writer/guard", "writer/docx", "writer/script",
+  "writer/sapdoc", "writer/export"
 )
 
 for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
