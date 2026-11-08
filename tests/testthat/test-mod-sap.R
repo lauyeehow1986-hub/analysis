@@ -817,3 +817,285 @@ test_that("a failing feasibility report is shown in the table, not read as not a
   v <- .sr_sap_feas_view(p)
   expect_equal(v$tier, rep("report error: boom report", 3L))
 })
+
+# ---- lock checklist, typed-word lock, SAP_v1 write, documents -----------------------------------------
+
+.ms_lm <- function(sp = list()) {
+  utils::modifyList(list(purpose = "explain-causal", outcome = "age", exposure = "grp", exposure_ref = "A",
+                         layers = .fx_writer_layers(), seed = 42L), sp)
+}
+
+# A lockable lm project: primary prim, routed and feasibility-decided. `locked` locks it (no document written).
+.ms_lockable <- function(locked = FALSE, env = parent.frame()) {
+  .fx_writer_routes()
+  p <- sr_sap_add(.fx_ui_project(env), "prim", "lm", .ms_lm(), "t", label = "primary")
+  p <- .fx_feasible(p)
+  if (locked) sr_sap_lock(p) else p
+}
+
+.ms_blocks <- function(html) grepl("data-status=\\\\?\"block", html)
+.ms_json <- function(x) paste(as.character(x), collapse = " ")
+
+# Replace function(s) of the app (sourced into the global environment, so testthat's package-based mocking does
+# not apply) for the calling test; the originals come back when the test ends.
+.ms_mock <- function(..., env = parent.frame()) {
+  force(env)
+  fns <- list(...)
+  for (nm in names(fns)) {
+    old <- get(nm, envir = globalenv())
+    assign(nm, fns[[nm]], envir = globalenv())
+    local({
+      nm <- nm
+      old <- old
+      withr::defer(assign(nm, old, envir = globalenv()), envir = env)
+    })
+  }
+  invisible(NULL)
+}
+
+test_that("a wrong typed word does not lock", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(lock = 1, lock_word = "lock", lock_ok = 1)
+    expect_match(modal$html[length(modal$html)], "lock_word")
+    expect_false(isTRUE(rv()$state$sap$locked))
+    expect_equal(output$lock_err, "type LOCK to confirm")
+    expect_equal(output$lock_err_modal, "type LOCK to confirm")
+    expect_equal(.ms_n_events(rv()), n0)
+    session$setInputs(lock_word = "LOCK ", lock_ok = 2)       # no trim
+    expect_false(isTRUE(rv()$state$sap$locked))
+    expect_equal(output$lock_err, "type LOCK to confirm")
+    expect_equal(.ms_n_events(rv()), n0)
+  })
+})
+
+test_that("a word left over from an earlier dialog does not confirm a new one", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(lock = 1, lock_word = "LOCK")     # typed, then Cancel
+    session$setInputs(lock = 2)                         # a new dialog: the word is not resent
+    session$setInputs(lock_ok = 1)
+    expect_false(isTRUE(rv()$state$sap$locked))
+    expect_equal(output$lock_err, "type LOCK to confirm")
+  })
+})
+
+test_that("a refused lock keeps the dialog and shows the core message verbatim", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  .fx_writer_routes()
+  p <- sr_sap_add(.fx_ui_project(), "prim", "lm", .ms_lm(), "t", label = "primary")   # not assessed
+  expect_gt(sum(.sr_sap_check_view(p)$status == "block"), 0L)
+  core <- tryCatch(sr_sap_lock(p), error = function(e) conditionMessage(e))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    expect_match(.ms_html(output$lock_btn), "disabled")
+    session$setInputs(lock = 1, lock_word = "LOCK", lock_ok = 1)
+    expect_false(isTRUE(rv()$state$sap$locked))
+    expect_equal(output$lock_err, core)
+    expect_equal(output$lock_err_modal, core)
+    expect_false(output$lock_err == "type LOCK to confirm")
+  })
+})
+
+test_that("the lock button counts the blocks and the checklist shows them", {
+  withr::local_options(sr.mode = "airgap")
+  .fx_writer_routes()
+  p <- sr_sap_add(.fx_ui_project(), "prim", "lm", .ms_lm(), "t", label = "primary")
+  nb <- sum(.sr_sap_check_view(p)$status == "block")
+  expect_gt(nb, 0L)
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    expect_match(.ms_html(output$lock_btn), sprintf("Lock SAP \\(%d blocks\\)", nb))
+    expect_true(.ms_blocks(.ms_json(output$check)))
+    rv(.fx_feasible(rv()))
+    session$setInputs(x = 1)
+    expect_match(.ms_html(output$lock_btn), "Lock SAP \\(0 blocks\\)")
+    expect_false(grepl("disabled", .ms_html(output$lock_btn)))
+    expect_false(.ms_blocks(.ms_json(output$check)))
+  })
+})
+
+test_that("the full flow ends locked with SAP_v1.docx", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  .fx_writer_routes()
+  rv <- shiny::reactiveVal(.fx_routed(.fx_ui_project()))
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    .ms_open_add(session, route = "lm")
+    session$setInputs(f_outcome = "age", f_exposure = "grp", f_exposure_ref = "A")
+    session$setInputs(f_terms_n = 1, f_terms_var_1 = "z1", f_terms_type_1 = "linear", f_terms_knots_1 = "")
+    session$setInputs(an_save = 1)
+    expect_equal(output$an_err, "")
+    expect_true("prim" %in% names(.sr_sap_analyses(rv())))
+    session$setInputs(feas_rows_selected = 1L)
+    session$setInputs(feas_assess = 1)
+    session$setInputs(fa_ok = 1)
+    expect_equal(output$fa_err, "")
+    session$setInputs(feas_decide = 1)
+    session$setInputs(fd_decision = "proceed", fd_reason = "test fixture", fd_ok = 1)
+    expect_equal(output$fd_err, "")
+    ck <- .sr_sap_check_view(rv())
+    expect_false(any(ck$status == "block"), info = paste(ck$detail, collapse = "; "))
+    expect_false(.ms_blocks(.ms_json(output$check)))
+    session$setInputs(lock = 1, lock_word = "LOCK", lock_ok = 1)
+    expect_equal(output$lock_err, "")
+    expect_true(isTRUE(rv()$state$sap$locked))
+    expect_true(file.exists(file.path(rv()$paths$out, "sap", "SAP_v1.docx")))
+    expect_match(output$lock_state, "^Locked ")
+    expect_match(output$lock_state, "SAP hash [0-9a-f]{12}$")
+    expect_match(.ms_html(output$docs), "out/sap/SAP_v1.docx", fixed = TRUE)
+    expect_false(grepl("doc_draft", .ms_html(output$docs)))
+    expect_false(grepl("sap_v1_retry", .ms_html(output$lock_retry)))
+  })
+})
+
+test_that("after the lock every edit is refused", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  modal <- .ms_spy_modal()
+  rv <- shiny::reactiveVal(.ms_lockable(locked = TRUE))
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(an_save = 1, remove_ok = 1, fa_ok = 1, fd_ok = 1, fam_save = 1, rule_save = 1,
+                      doc_draft = 1, lock_ok = 1)
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_false(file.exists(file.path(rv()$paths$out, "sap", "SAP_v1.docx")))
+    expect_false(file.exists(file.path(rv()$paths$out, "sap", "SAP_draft.docx")))
+    expect_match(.ms_html(output$lock_btn), "disabled")
+    expect_match(output$lock_err, "SAP is locked")
+    session$setInputs(lock = 1)
+    expect_false(any(grepl("lock_word", modal$html)))
+    expect_match(.ms_html(output$banner), "The SAP is locked")
+    for (id in c("add", "edit", "remove")) {
+      expect_match(.ms_html(output$btns), sprintf("<button[^>]*disabled[^>]*id=\"[^\"]*%s\"", id))
+    }
+    expect_match(.ms_html(output$feas_btns), "<button[^>]*disabled[^>]*id=\"[^\"]*feas_assess\"")
+  })
+})
+
+test_that("read-only: lock and draft are refused", {
+  withr::local_options(sr.mode = "airgap")
+  seen <- .ui_spy_notify()
+  .ms_spy_modal()
+  p <- .ms_lockable()
+  p$readonly <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    n0 <- .ms_n_events(rv())
+    session$setInputs(lock = 1, lock_word = "LOCK", lock_ok = 1, doc_draft = 1)
+    expect_match(output$lock_err, "read-only")
+    expect_true(any(grepl("SAP draft: the project is read-only", seen$msg)))
+    expect_equal(.ms_n_events(rv()), n0)
+    expect_false(isTRUE(rv()$state$sap$locked))
+    expect_match(.ms_html(output$lock_btn), "disabled")
+    expect_match(.ms_html(output$docs), "<button[^>]*disabled[^>]*id=\"[^\"]*doc_draft\"")
+  })
+})
+
+test_that("a failed SAP_v1 write is reported and retried", {
+  withr::local_options(sr.mode = "airgap")
+  seen <- .ui_spy_notify()
+  .ms_spy_modal()
+  real <- sr_sap_docx
+  real_lock <- sr_sap_lock
+  calls <- 0L
+  locks <- 0L
+  .ms_mock(
+    sr_sap_docx = function(project, ...) {
+      calls <<- calls + 1L
+      if (calls == 1L) stop("disk full")
+      real(project, ...)
+    },
+    sr_sap_lock = function(project) {
+      locks <<- locks + 1L
+      real_lock(project)
+    })
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(lock = 1, lock_word = "LOCK", lock_ok = 1)
+    expect_true(isTRUE(rv()$state$sap$locked))
+    expect_equal(locks, 1L)
+    expect_match(output$lock_err, "disk full")
+    expect_false(file.exists(file.path(rv()$paths$out, "sap", "SAP_v1.docx")))
+    expect_true(any(seen$type == "error" & grepl("SAP_v1.docx was not written: disk full", seen$msg)))
+    expect_match(.ms_html(output$lock_retry), "sap_v1_retry")
+    n_locked <- .ms_n_events(rv())
+    session$setInputs(sap_v1_retry = 1)
+    expect_true(file.exists(file.path(rv()$paths$out, "sap", "SAP_v1.docx")))
+    expect_equal(output$lock_err, "")
+    expect_equal(locks, 1L)                                  # the lock was not run again
+    expect_equal(.ms_n_events(rv()), n_locked + 1L)          # only the doc.exported event
+    expect_false(grepl("sap_v1_retry", .ms_html(output$lock_retry)))
+    session$setInputs(sap_v1_retry = 2)                      # a stale click: nothing to retry
+    expect_equal(calls, 2L)
+  })
+})
+
+test_that("a retry that fails again stays retryable", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  .ms_spy_modal()
+  .ms_mock(sr_sap_docx = function(project, ...) stop("still full"))
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    session$setInputs(lock = 1, lock_word = "LOCK", lock_ok = 1)
+    session$setInputs(sap_v1_retry = 1)
+    expect_match(output$lock_err, "still full")
+    expect_match(.ms_html(output$lock_retry), "sap_v1_retry")
+    expect_true(isTRUE(rv()$state$sap$locked))
+  })
+})
+
+test_that("documents show the draft path, and Open folder and Download use the newest file", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  opened <- character()
+  .ms_mock(.sr_ui_open_folder = function(dir) opened <<- c(opened, dir))
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    expect_match(.ms_html(output$docs), "No document has been written yet")
+    expect_match(.ms_html(output$docs), "doc_draft")
+    session$setInputs(doc_draft = 1)
+    expect_match(.ms_html(output$docs), "out/sap/SAP_draft.docx", fixed = TRUE)
+    f <- file.path(rv()$paths$out, "sap", "SAP_draft.docx")
+    expect_true(file.exists(f))
+    session$setInputs(open_sap = 1)
+    expect_equal(normalizePath(opened, winslash = "/"), normalizePath(dirname(f), winslash = "/"))
+    session$setInputs(open_feas = 1)                          # none written: nothing opens
+    expect_length(opened, 1L)
+    got <- output$dl_sap
+    expect_true(file.exists(got))
+    expect_equal(unname(tools::md5sum(got)), unname(tools::md5sum(f)))
+    rv(sr_feasibility_assess(rv(), "prim"))
+    session$setInputs(feas_doc = 1)
+    expect_match(.ms_html(output$docs), "out/feasibility/feasibility-001.docx", fixed = TRUE)
+    session$setInputs(open_feas = 2)
+    expect_length(opened, 2L)
+    expect_match(opened[2], "feasibility$")
+    expect_true(file.exists(output$dl_feas))
+  })
+})
+
+test_that("the lock card shows the open warnings, the analyses and the library hash", {
+  withr::local_options(sr.mode = "airgap")
+  rv <- shiny::reactiveVal(.ms_lockable())
+  shiny::testServer(mod_sap_server, args = list(project = rv), {
+    html <- .ms_html(output$lock_summary)
+    expect_match(html, "prim")
+    expect_match(html, "Open warnings \\(\\d+\\)")
+    expect_match(html, sr_libsnap_hash(), fixed = TRUE)
+    rv(sr_sap_lock(rv()))
+    session$setInputs(x = 1)
+    expect_match(.ms_html(output$lock_summary), rv()$state$sap$lock$libsnap_hash, fixed = TRUE)
+  })
+})

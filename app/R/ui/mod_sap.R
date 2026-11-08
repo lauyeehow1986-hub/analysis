@@ -167,7 +167,50 @@ mod_sap_ui <- function(id) {
                 shiny::uiOutput(ns("rule_form")),
                 shiny::uiOutput(ns("rule_alt_ui")),
                 shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("rule_err"))),
-                DT::DTOutput(ns("rules"))))
+                DT::DTOutput(ns("rules"))),
+    .sr_ui_card("Lock checklist", DT::DTOutput(ns("check"))),
+    .sr_ui_card("Lock",
+                shiny::uiOutput(ns("lock_summary")),
+                shiny::uiOutput(ns("lock_btn")),
+                shiny::uiOutput(ns("lock_retry")),
+                shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("lock_err"))),
+                shiny::div(class = "text-muted small mt-2", shiny::textOutput(ns("lock_state")))),
+    .sr_ui_card("Documents", shiny::uiOutput(ns("docs"))))
+}
+
+# The lock confirmation dialog: the typed word, and the refusal in place (the same text as the card's lock_err).
+.sr_sap_lock_modal <- function(ns) {
+  word <- .sr_ui_on_control(shiny::textInput(ns("lock_word"), "Type LOCK to confirm", value = "", width = "100%"),
+                            "input", maxlength = 20L)
+  shiny::modalDialog(
+    title = "Lock the SAP", easyClose = FALSE,
+    shiny::p("Locking is final: the plan can no longer be edited, and the outcome is unblinded."),
+    word,
+    shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("lock_err_modal"))),
+    footer = shiny::tagList(shiny::modalButton("Cancel"),
+                            shiny::actionButton(ns("lock_ok"), "Lock", class = "btn-danger")))
+}
+
+# ---- lock checklist and documents: pure helpers ------------------------------------------------------
+
+# The lock checklist: sr_sap_check, or one block row when it cannot be computed; empty with no project.
+.sr_sap_check_view <- function(p) {
+  empty <- data.frame(item = character(), status = character(), detail = character(), stringsAsFactors = FALSE)
+  if (is.null(p)) return(empty)
+  tryCatch(sr_sap_check(p), error = function(e) {
+    data.frame(item = "lock check", status = "block", detail = conditionMessage(e), stringsAsFactors = FALSE)
+  })
+}
+
+# The written documents of the Documents card, per kind: paths relative to the project folder, oldest first.
+.sr_sap_docs_view <- function(p) {
+  rel <- function(kind) {
+    if (is.null(p)) return(character())
+    ex <- .sr_ui_exports(p, kind)
+    substring(ex$path, nchar(p$paths$dir) + 2L)
+  }
+  list(sap = rel("sap"), feas = rel("feasibility"),
+       locked = isTRUE(p$state$sap$locked), off = is.null(p) || isTRUE(p$readonly))
 }
 
 # The builder dialog: the fixed fields, then the schema-driven an_form.
@@ -346,13 +389,14 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     output$banner <- shiny::renderUI(.sr_ui_readonly_banner(project()))
 
     # Why an edit cannot go ahead (no project, busy, read-only, SAP locked), or NULL.
-    refusal <- function() {
+    # `locked_ok` lets a step that must follow the lock (the SAP_v1.docx write) through a locked SAP.
+    refusal <- function(locked_ok = FALSE) {
       p <- shiny::isolate(project())
       .sr_ui_refusal(p, function() busy()) %||%
-        if (!.sr_ui_editable(p)) "the SAP is locked; the plan can no longer be edited"
+        if (!locked_ok && !.sr_ui_editable(p)) "the SAP is locked; the plan can no longer be edited"
     }
-    refuse <- function(label, ev = err) {
-      why <- refusal()
+    refuse <- function(label, ev = err, locked_ok = FALSE) {
+      why <- refusal(locked_ok)
       if (is.null(why)) return(FALSE)
       ev(why)
       .sr_ui_notify(paste0(label, ": ", why), "error")
@@ -360,9 +404,9 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     }
 
     # Run a core step; a core error goes to an_err (verbatim). TRUE when it succeeded.
-    run <- function(label, fn, ev = err) {
+    run <- function(label, fn, ev = err, locked_ok = FALSE) {
       ev("")
-      if (refuse(label, ev)) return(FALSE)
+      if (refuse(label, ev, locked_ok)) return(FALSE)
       ok <- FALSE
       act(label, function(p) {
         tryCatch({
@@ -846,6 +890,166 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
                     .sr_ui_text(input$rule_check), .sr_ui_text(input$rule_action), if (nzchar(alt)) alt)
       }, ev = rule_err)
     })
+
+    # ---- lock checklist, lock and documents
+    chk <- .sr_sap_flag(project, .sr_sap_check_view)
+    n_block <- shiny::reactive(sum(chk()$status == "block"))
+    lock_err <- shiny::reactiveVal("")
+    sap_v1_failed <- shiny::reactiveVal(FALSE)
+    word <- NULL                          # the word typed in the CURRENT lock dialog (see below)
+    libsnap_now <- NULL
+
+    output$check <- DT::renderDT({
+      ch <- chk()
+      esc <- function(x) htmltools::htmlEscape(as.character(x))
+      .sr_ui_dt(data.frame(item = esc(ch$item), status = vapply(as.character(ch$status), .sr_ui_badge, ""),
+                           detail = esc(ch$detail), stringsAsFactors = FALSE), escape = FALSE)
+    }, server = FALSE)
+
+    output$lock_btn <- shiny::renderUI({
+      nb <- n_block()
+      shiny::actionButton(ns("lock"), sprintf("Lock SAP (%d blocks)", nb), class = "btn-danger",
+                          disabled = nb > 0L || !editable())
+    })
+    lock_facts <- .sr_sap_flag(project, function(p) {
+      if (is.null(p)) return(NULL)
+      list(ids = sort(as.character(names(.sr_sap_analyses(p))), method = "radix"),
+           hash = as.character(p$state$sap$lock$libsnap_hash %||% ""))
+    })
+    output$lock_summary <- shiny::renderUI({
+      f <- lock_facts()
+      if (is.null(f)) return(NULL)
+      ch <- chk()
+      warns <- ch$detail[ch$status == "warn"]
+      hash <- if (nzchar(f$hash)) {
+        f$hash
+      } else {
+        if (is.null(libsnap_now)) libsnap_now <<- tryCatch(sr_libsnap_hash(), error = function(e) "")
+        libsnap_now
+      }
+      shiny::tagList(
+        shiny::p(shiny::strong("Analyses: "), if (length(f$ids)) paste(f$ids, collapse = ", ") else "none"),
+        shiny::p(shiny::strong(sprintf("Open warnings (%d)", length(warns)))),
+        if (length(warns)) shiny::tags$ul(lapply(warns, shiny::tags$li)),
+        shiny::p(class = "small", shiny::strong("Library snapshot hash: "), shiny::code(hash)))
+    })
+    output$lock_err <- shiny::renderText(lock_err())
+    output$lock_err_modal <- shiny::renderText(lock_err())
+    output$lock_state <- shiny::renderText({
+      p <- project()
+      if (!isTRUE(p$state$sap$locked)) return("")
+      sprintf("Locked %s, SAP hash %s", p$state$sap$lock$locked_at %||% "",
+              substr(p$state$sap$lock$sap_hash %||% "", 1L, 12L))
+    })
+    output$lock_retry <- shiny::renderUI({
+      if (isTRUE(sap_v1_failed())) {
+        shiny::actionButton(ns("sap_v1_retry"), "Retry writing SAP_v1.docx", class = "btn-warning mt-2")
+      }
+    })
+
+    # A project that is swapped for another one carries nothing over.
+    pdir <- .sr_sap_flag(project, function(p) if (is.null(p)) NA_character_ else as.character(p$paths$dir))
+    shiny::observeEvent(pdir(), {
+      sap_v1_failed(FALSE)
+      lock_err("")
+      word <<- NULL
+    }, ignoreInit = TRUE)
+
+    # Shiny keeps lock_word after the dialog closes and resends only changed values, so the typed word only
+    # counts once it has reported in the CURRENT dialog (the opener resets it first, the word handler runs after).
+    shiny::observeEvent(input$lock, {
+      lock_err("")
+      word <<- NULL
+      if (refuse("Lock SAP", lock_err)) return(invisible(NULL))
+      shiny::showModal(.sr_sap_lock_modal(ns))
+    }, priority = 10)
+    shiny::observeEvent(input$lock_word, {
+      word <<- input$lock_word
+    }, priority = 5, ignoreNULL = FALSE)
+
+    # Write SAP_v1.docx after the lock. The lock stands whatever happens here: a failure is shown (card and
+    # notification) and the retry button writes it again.
+    write_v1 <- function() {
+      ok <- run("Write SAP_v1.docx", function(p) sr_sap_docx(p), ev = lock_err, locked_ok = TRUE)
+      sap_v1_failed(!ok)
+      if (!ok) {
+        .sr_ui_notify(paste0("The SAP is locked, but SAP_v1.docx was not written: ", shiny::isolate(lock_err()),
+                             " Use Retry in the Lock card."), "error")
+      }
+      ok
+    }
+    shiny::observeEvent(input$lock_ok, {
+      lock_err("")
+      if (refuse("Lock SAP", lock_err)) return(invisible(NULL))
+      if (!identical(word, "LOCK")) {
+        lock_err("type LOCK to confirm")
+        return(invisible(NULL))
+      }
+      if (!run("Lock SAP", function(p) sr_sap_lock(p), ev = lock_err)) return(invisible(NULL))
+      shiny::removeModal()
+      word <<- NULL
+      write_v1()
+    })
+    shiny::observeEvent(input$sap_v1_retry, {
+      p <- shiny::isolate(project())
+      if (!isTRUE(shiny::isolate(sap_v1_failed())) || !isTRUE(p$state$sap$locked)) return(invisible(NULL))
+      write_v1()
+    })
+
+    # ---- documents
+    docs <- .sr_sap_flag(project, .sr_sap_docs_view)
+    output$docs <- shiny::renderUI({
+      d <- docs()
+      row <- function(paths, open, dl) {
+        if (!length(paths)) return(NULL)
+        n <- length(paths)
+        shiny::tagList(
+          lapply(paths[-n], function(x) shiny::p(class = "text-muted small mb-1", x)),
+          shiny::div(class = "d-flex gap-2 align-items-center mb-2", shiny::code(paths[n]),
+                     shiny::actionButton(ns(open), "Open folder", class = "btn-sm btn-outline-secondary"),
+                     shiny::downloadButton(ns(dl), "Download", class = "btn-sm btn-outline-secondary")))
+      }
+      shiny::tagList(
+        if (!d$locked) shiny::actionButton(ns("doc_draft"), "Write SAP draft", class = "btn-outline-primary mb-2",
+                                           disabled = d$off),
+        row(d$sap, "open_sap", "dl_sap"), row(d$feas, "open_feas", "dl_feas"),
+        if (!length(d$sap) && !length(d$feas)) shiny::p(class = "text-muted small", "No document has been written yet."))
+    })
+    shiny::observeEvent(input$doc_draft, {
+      if (refuse("SAP draft", function(x) NULL)) return(invisible(NULL))
+      res <- act("SAP draft", function(p) sr_sap_docx(p))
+      if (is.list(res) && !is.null(res$paths)) {
+        ex <- .sr_ui_exports(res, "sap")
+        if (nrow(ex)) .sr_ui_notify(paste0("SAP draft written: ", ex$path[nrow(ex)]))
+      }
+    })
+    newest <- function(kind) {
+      p <- shiny::isolate(project())
+      ex <- if (is.null(p)) NULL else .sr_ui_exports(p, kind)
+      if (is.null(ex) || !nrow(ex)) NA_character_ else ex$path[nrow(ex)]
+    }
+    open_kind <- function(kind, what) {
+      f <- newest(kind)
+      if (is.na(f)) return(.sr_ui_notify(paste0("Open folder: no ", what, " has been written yet"), "error"))
+      .sr_ui_try("Open folder", function() .sr_ui_open_folder(dirname(f)))
+      invisible(NULL)
+    }
+    shiny::observeEvent(input$open_sap, open_kind("sap", "SAP document"))
+    shiny::observeEvent(input$open_feas, open_kind("feasibility", "feasibility report"))
+    dl_kind <- function(kind, what) {
+      shiny::downloadHandler(
+        filename = function() {
+          f <- newest(kind)
+          if (is.na(f)) paste0(kind, ".docx") else basename(f)
+        },
+        content = function(file) {
+          f <- newest(kind)
+          if (is.na(f) || !file.exists(f)) stop("no ", what, " has been written yet", call. = FALSE)
+          file.copy(f, file, overwrite = TRUE)
+        })
+    }
+    output$dl_sap <- dl_kind("sap", "SAP document")
+    output$dl_feas <- dl_kind("feasibility", "feasibility report")
     invisible(NULL)
   })
 }
