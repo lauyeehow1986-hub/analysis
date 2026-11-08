@@ -39,7 +39,7 @@
 }
 
 # The editor body for one table row (a one-row data frame of sr_router_table) and its editor info.
-.sr_design_editor_ui <- function(ns, row, info) {
+.sr_design_editor_ui <- function(ns, row, info, editable = TRUE) {
   line <- function(...) shiny::tags$p(class = "small mb-1", ...)
   where <- if (!is.na(row$table) && nzchar(row$table)) {
     paste0(" (", row$table, if (!is.na(row$column) && nzchar(row$column)) paste0(".", row$column) else "", ")")
@@ -68,11 +68,20 @@
     row$suggested
   }
   parts <- c(parts, list(
-    shiny::selectInput(ns("dec_choice"), "Choice", choices = info$options, selected = selected, width = "100%"),
+    .sr_design_on_control(
+      shiny::selectInput(ns("dec_choice"), "Choice", choices = info$options, selected = selected, width = "100%"),
+      "select", disabled = if (!editable) NA),
     if (identical(row$status, "override_required")) {
-      shiny::checkboxInput(ns("dec_override"), "Override the veto (a reason is required)", FALSE)
+      .sr_design_on_control(
+        shiny::checkboxInput(ns("dec_override"), "Override the veto (a reason is required)", FALSE),
+        "input", disabled = if (!editable) NA)
     }))
   shiny::div(parts)
+}
+
+# Add attributes to the form control(s) inside a shiny input tag (not to its outer div).
+.sr_design_on_control <- function(tag, selector, ...) {
+  htmltools::tagQuery(tag)$find(selector)$addAttrs(...)$allTags()
 }
 
 # ---- UI --------------------------------------------------------------------------------------------
@@ -82,26 +91,28 @@ mod_design_ui <- function(id) {
   jev <- if (identical(sr_mode(), "connected")) .sr_ui_card("Ask Jev", shiny::uiOutput(ns("jev")))
   shiny::tagList(
     shiny::uiOutput(ns("banner")),
-    bslib::layout_columns(
-      col_widths = 12,
-      .sr_ui_card("Research question", shiny::uiOutput(ns("pico_form"))),
-      .sr_ui_card(
-        "Decision table",
-        shiny::uiOutput(ns("run_rules_btn")),
-        DT::DTOutput(ns("table")),
-        shiny::hr(),
-        shiny::uiOutput(ns("editor")),
-        shiny::textAreaInput(ns("dec_reason"), "Reason (required for an override)", rows = 2, width = "100%"),
-        shiny::uiOutput(ns("dec_save_btn")),
-        shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("dec_err")))),
-      jev,
-      .sr_ui_card(
-        "Shadow summary",
-        DT::DTOutput(ns("shadow")),
-        shiny::actionButton(ns("shadow_export"), "Export shadow feed (JSON lines)",
-                            class = "btn-outline-primary mt-2"),
-        shiny::p(class = "small text-muted mt-2 mb-0", shiny::textOutput(ns("shadow_path"))))
-    )
+    do.call(bslib::layout_columns, c(
+      list(col_widths = 12),
+      list(
+        .sr_ui_card("Research question", shiny::uiOutput(ns("pico_form"))),
+        .sr_ui_card(
+          "Decision table",
+          shiny::uiOutput(ns("run_rules_btn")),
+          DT::DTOutput(ns("table")),
+          shiny::hr(),
+          shiny::uiOutput(ns("editor")),
+          shiny::uiOutput(ns("dec_reason_ui")),
+          shiny::uiOutput(ns("dec_save_btn")),
+          shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("dec_err"))))),
+      if (!is.null(jev)) list(jev),
+      list(
+        .sr_ui_card(
+          "Shadow summary",
+          DT::DTOutput(ns("shadow")),
+          shiny::actionButton(ns("shadow_export"), "Export shadow feed (JSON lines)",
+                              class = "btn-outline-primary mt-2"),
+          shiny::p(class = "small text-muted mt-2 mb-0", shiny::textOutput(ns("shadow_path")))))
+    ))
   )
 }
 
@@ -127,13 +138,25 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       p <- project()
       if (is.null(p)) NULL else sr_router_table(p)
     })
+    # The selected row is kept by its key, so a table refresh (every decision rewrites the project and
+    # DT re-renders with an empty selection) neither loses the row nor clears the message shown for it.
+    sel <- shiny::reactiveVal(NULL)
     selected_row <- shiny::reactive({
       tb <- table_df()
-      i <- input$table_rows_selected
-      if (is.null(tb) || length(i) != 1L || is.na(i) || i < 1L || i > nrow(tb)) return(NULL)
-      tb[i, , drop = FALSE]
+      k <- sel()
+      if (is.null(tb) || is.null(k) || !k %in% tb$key) return(NULL)
+      tb[match(k, tb$key), , drop = FALSE]
     })
-    shiny::observeEvent(input$table_rows_selected, err(""), ignoreNULL = FALSE)
+    shiny::observeEvent(input$table_rows_selected, {
+      tb <- shiny::isolate(table_df())
+      i <- input$table_rows_selected
+      if (is.null(tb) || length(i) != 1L || is.na(i) || i < 1L || i > nrow(tb)) return(invisible(NULL))
+      if (!identical(tb$key[i], shiny::isolate(sel()))) {
+        sel(tb$key[i])
+        err("")
+      }
+    }, ignoreNULL = FALSE, priority = 10)
+    editable <- shiny::reactive(.sr_ui_editable(project()))
 
     output$banner <- shiny::renderUI(.sr_ui_readonly_banner(project()))
 
@@ -152,9 +175,9 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
         })))
       }
       fields <- lapply(setdiff(SR_PICO_FIELDS, "aim"), function(f) {
-        shiny::tagAppendAttributes(
+        .sr_design_on_control(
           shiny::textInput(ns(paste0("pico_", f)), .sr_design_pico_labels[[f]], value = val(f), width = "100%"),
-          maxlength = SR_PICO_MAX_CHARS)
+          "input", maxlength = SR_PICO_MAX_CHARS)
       })
       shiny::tagList(
         fields,
@@ -176,8 +199,11 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     output$dec_save_btn <- shiny::renderUI(btn("dec_save", "Save decision", "btn-primary"))
 
     output$table <- DT::renderDT({
+      k <- shiny::isolate(sel())
+      tb <- shiny::isolate(table_df())
       DT::datatable(.sr_design_table_view(table_df()), rownames = FALSE, escape = FALSE,
-                    selection = "single",
+                    selection = list(mode = "single",
+                                     selected = if (!is.null(k) && !is.null(tb) && k %in% tb$key) match(k, tb$key)),
                     options = list(dom = "tip", pageLength = 15L, scrollX = TRUE, ordering = FALSE),
                     class = "compact stripe")
     })
@@ -191,20 +217,26 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       if (is.null(row)) return(shiny::p(class = "text-muted", "Select a row of the table to decide it."))
       na_if_empty <- function(x) if (is.na(x) || !nzchar(x)) NA else x
       info <- sr_router_editor(project(), row$node, na_if_empty(row$table), na_if_empty(row$column))
-      .sr_design_editor_ui(ns, row, info)
+      .sr_design_editor_ui(ns, row, info, editable())
+    })
+    output$dec_reason_ui <- shiny::renderUI({
+      ed <- editable()
+      .sr_design_on_control(
+        shiny::textAreaInput(ns("dec_reason"), "Reason (required for an override)", rows = 2, width = "100%"),
+        "textarea", maxlength = SR_PICO_MAX_CHARS, disabled = if (!ed) NA)
     })
 
     output$dec_err <- shiny::renderText(err())
 
     shiny::observeEvent(input$dec_save, {
       row <- selected_row()
-      if (is.null(row)) {
-        err("Select a row of the table first.")
-        return(invisible(NULL))
-      }
       err("")
       ok <- FALSE
       res <- act("Decide", function(p) {
+        if (is.null(row)) {
+          err("Select a row of the table first.")
+          return(NULL)
+        }
         tryCatch({
           out <- sr_router_decide(p, row$node, input$dec_choice, input$dec_reason,
                                   table = row$table, column = row$column,
@@ -243,13 +275,7 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     shiny::observeEvent(input$shadow_export, {
       label <- "Export shadow feed"
       p <- shiny::isolate(project())
-      refuse <- if (is.null(p)) {
-        "open a project first"
-      } else if (isTRUE(busy())) {
-        "wait for the import to finish"
-      } else if (isTRUE(p$readonly)) {
-        "the project is read-only (locked by another session)"
-      }
+      refuse <- .sr_ui_refusal(p, function() busy())
       if (!is.null(refuse)) {
         .sr_ui_notify(paste0(label, ": ", refuse), "error")
         return(invisible(NULL))

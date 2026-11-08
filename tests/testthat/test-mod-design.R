@@ -162,8 +162,66 @@ test_that("after the lock the table is read-only", {
     expect_match(.md_html(output$dec_save_btn), "disabled")
     expect_match(.md_html(output$run_rules_btn), "disabled")
     session$setInputs(table_rows_selected = 1L)
-    session$setInputs(dec_choice = "x", dec_reason = "y", dec_save = 1)
+    opt <- sr_router_editor(rv(), sr_router_table(rv())$node[1L])$options[1L]
+    session$setInputs(dec_choice = opt, dec_reason = "y", dec_save = 1, pico_population = "a",
+                      pico_outcome = "b", pico_save = 1, run_rules = 1)
     expect_equal(.md_n_events(rv()), n0)
-    expect_true(nzchar(output$dec_err))
+    expect_match(output$dec_err, "SAP is locked")
+    expect_match(.md_html(output$dec_reason_ui), "disabled")
+  })
+})
+
+test_that("PICO fields and the reason box carry maxlength on the control itself", {
+  withr::local_options(sr.mode = "airgap")
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    html <- .md_html(output$pico_form)
+    expect_match(html, "<input[^>]*maxlength=\"2000\"")
+    expect_false(grepl("form-group[^>]*maxlength", html))
+    expect_match(.md_html(output$dec_reason_ui), "<textarea[^>]*maxlength=\"2000\"")
+  })
+})
+
+test_that("a veto keeps the row selected and its message across the table refresh", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  old <- sr_node_get("design")
+  sr_node_register(sr_node("design", old$label, old$options, question = old$question, rule = old$rule,
+                           applies = old$applies, facts = old$facts,
+                           veto = function(ctx, choice) if (identical(choice, "rct")) "no RCT here" else NULL))
+  withr::defer(sr_node_register(old))
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    i <- .md_row(rv(), "design")
+    session$setInputs(table_rows_selected = i)
+    session$setInputs(dec_choice = "rct", dec_reason = "x", dec_save = 1)
+    expect_match(output$dec_err, "no RCT here")
+    # DT re-renders after the project changed and reports an empty selection
+    session$setInputs(table_rows_selected = integer(0))
+    expect_match(output$dec_err, "no RCT here")
+    expect_equal(sel(), "design")
+    expect_match(.md_html(output$editor), "Design|design")
+    for (k in 2:3) session$setInputs(dec_choice = "rct", dec_reason = "x", dec_save = k)
+    session$setInputs(table_rows_selected = integer(0))
+    expect_match(.md_html(output$editor), "dec_override")
+    expect_match(output$dec_err, "no RCT here")
+    # a different row clears the message
+    j <- setdiff(seq_len(nrow(sr_router_table(rv()))), i)[1L]
+    session$setInputs(table_rows_selected = j)
+    expect_equal(output$dec_err, "")
+  })
+})
+
+test_that("read-only with no row selected gives the read-only refusal, not 'Select a row'", {
+  withr::local_options(sr.mode = "airgap")
+  seen <- .ui_spy_notify()
+  p <- .fx_ui_project()
+  p$readonly <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    session$setInputs(dec_save = 1)
+    expect_true(any(grepl("read-only", seen$msg)))
+    expect_equal(output$dec_err, "")
+    expect_match(.md_html(output$dec_reason_ui), "disabled")
   })
 })

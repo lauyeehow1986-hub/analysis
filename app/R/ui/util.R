@@ -47,22 +47,24 @@
   bslib::card(fill = FALSE, bslib::card_header(header), bslib::card_body(fillable = FALSE, fill = FALSE, ...))
 }
 
+# Why an edit is refused (no project, busy, read-only), or NULL when it may go ahead. Shared by act() and
+# the actions that do not return a project.
+.sr_ui_refusal <- function(p, busy = function() FALSE) {
+  if (is.null(p)) return("open a project first")
+  if (isTRUE(busy())) return("wait for the import to finish")
+  if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
+  NULL
+}
+
 #' The act(label, fn) closure of a module: runs a project-changing step for the user. Refuses with no project,
 #' while `busy()` is TRUE and on a read-only project; reports core errors and warnings as notifications and
 #' writes back any result that carries `$paths` (a project). `project` is the reactiveVal holding the project.
 .sr_ui_actor <- function(project, busy = function() FALSE) {
   function(label, fn) {
     p <- shiny::isolate(project())
-    if (is.null(p)) {
-      .sr_ui_notify(paste0(label, ": open a project first"), "error")
-      return(invisible(NULL))
-    }
-    if (isTRUE(busy())) {
-      .sr_ui_notify(paste0(label, ": wait for the import to finish"), "error")
-      return(invisible(NULL))
-    }
-    if (isTRUE(p$readonly)) {
-      .sr_ui_notify(paste0(label, ": the project is read-only (locked by another session)"), "error")
+    why <- .sr_ui_refusal(p, busy)
+    if (!is.null(why)) {
+      .sr_ui_notify(paste0(label, ": ", why), "error")
       return(invisible(NULL))
     }
     res <- .sr_ui_try(label, function() fn(p))
