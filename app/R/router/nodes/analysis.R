@@ -63,14 +63,16 @@ sr_node_register(sr_node(
 sr_node_register(sr_node(
   "primary_route", "Primary analysis route",
   function(ctx) c(sort(unique(sr_routes()$id)), "none"), scope = "table",
-  depends = c("purpose", "outcome_type"),
+  depends = "purpose",
   rule = function(ctx) {
-    route <- .sr_node_route_for(ctx$dep$purpose, ctx$dep$outcome_type)
+    type <- sr_router_choice(ctx$project, "outcome_type", ctx$table)
+    route <- .sr_node_route_for(ctx$dep$purpose, type)
     if (is.null(route) || !route %in% sr_routes()$id) return(NULL)
     list(choice = route,
          reason = paste0("route '", route, "' is the P1 route for the ", ctx$dep$purpose, " purpose",
-                         if (identical(ctx$dep$purpose, "describe")) "" else paste0(" and a ", ctx$dep$outcome_type, " outcome")))
+                         if (identical(ctx$dep$purpose, "describe")) "" else paste0(" and a ", type, " outcome")))
   },
+  facts = function(ctx) list(outcome_type = sr_router_choice(ctx$project, "outcome_type", ctx$table)),
   veto = function(ctx, choice) {
     if (identical(choice, "none")) return(NULL)
     rt <- sr_routes()

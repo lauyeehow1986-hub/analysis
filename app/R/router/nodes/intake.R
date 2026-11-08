@@ -21,7 +21,7 @@ sr_node_register(sr_node(
   "design", "Study design", SR_DESIGNS, scope = "project", cite = "vonelm2007",
   facts = function(ctx) {
     roles <- ctx$project$state$roles
-    tb <- sort(names(roles))
+    tb <- sort(names(roles)[vapply(roles, length, 1L) > 0L])
     list(tables = vapply(tb, function(t) paste0(t, ": ", .sr_role_counts_text(roles[[t]])), "",
                          USE.NAMES = FALSE))
   },

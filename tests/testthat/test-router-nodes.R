@@ -206,7 +206,60 @@ test_that("the design question is metadata only", {
   expect_match(pv$body, "outcome: Death", fixed = TRUE)
   expect_match(pv$body, "outcome=1", fixed = TRUE)
   expect_match(pv$body, "covariate=5", fixed = TRUE)
-  for (v in c("\\\"F\\\"", "\\\"M\\\"", "SECRET", "61.5")) expect_false(grepl(v, pv$body, fixed = TRUE))
+  df <- .nd_df()
+  probes <- c(df$age[7L], df$age[11L], df$fu_days[7L], df$fu_days[100L])
+  for (v in probes) expect_false(grepl(as.character(v), pv$body, fixed = TRUE), info = as.character(v))
+})
+
+test_that("a rule that the node vetoes leaves the instance pending", {
+  p <- sr_roles_set(.nd_ready(), "t", c(id = "id"))
+  p <- sr_router_run(sr_pico_set(p, population = "adults", outcome = "death", exposure = "Death",
+                                 aim = "explain-causal"))
+  expect_identical(sr_router_choice(p, "outcome_col", "t"), "death")
+  expect_identical(.nd_row(p, "outcome_col@t")$resolver, "rules")
+  expect_identical(.nd_row(p, "exposure_col@t")$status, "pending")
+  expect_identical(.nd_row(p, "exposure_col@t")$vetoes, 0L)
+})
+
+test_that("two outcome roles are a conflict the rule does not settle", {
+  p <- .nd_ready()
+  p$state$roles$t <- c(id = "id", death = "outcome", age = "outcome")
+  p <- sr_router_run(sr_pico_set(p, population = "adults", outcome = "mortality", aim = "explain-causal"))
+  expect_identical(.nd_row(p, "outcome_col@t")$status, "pending")
+})
+
+test_that("primary_route follows the purpose and watches the outcome type", {
+  pd <- sr_router_run(sr_pico_set(sr_roles_set(.nd_ready(), "t", c(id = "id")), population = "adults",
+                                  outcome = "mortality", aim = "describe"))
+  expect_identical(sr_router_choice(pd, "primary_route", "t"), "table1")
+  expect_identical(.nd_row(pd, "outcome_col@t")$status, "pending")
+  expect_identical(.nd_row(pd, "outcome_type@t")$status, "waiting")
+  p <- sr_router_run(.nd_pico(.nd_ready(), aim = "explain-causal"))
+  expect_identical(sr_router_choice(p, "primary_route", "t"), "logistic")
+  p <- sr_router_decide(p, "outcome_type", "count", reason = "override", table = "t")
+  expect_identical(.nd_row(p, "primary_route@t")$status, "stale")
+})
+
+test_that("design facts list only tables with a confirmed role", {
+  p <- .nd_small(.nd_df(), character())
+  ctx <- .sr_router_ctx(p, "design")
+  expect_identical(length(sr_node_get("design")$facts(ctx)$tables), 0L)
+})
+
+test_that("the covariate timing question is masked on request", {
+  p <- sr_router_run(.nd_pico(.nd_ready(), aim = "explain-causal"))
+  v <- names(.nd_df())
+  d <- data.frame(variable = v, label = ifelse(v == "bmi_6m", "Zebra BMI", ""), type = "text", units = "",
+                  min = "", max = "", stringsAsFactors = FALSE)
+  d$levels <- rep(list(data.frame(code = character(), label = character(), stringsAsFactors = FALSE)), length(v))
+  d$missing_codes <- rep(list(character()), length(v))
+  d$source <- "test"
+  p <- sr_dict_set(p, "t", d, source = "test")
+  pm <- sr_router_preview(p, "covariate_timing", "t", "bmi_6m", mask = TRUE)
+  expect_false(is.null(pm))
+  expect_match(pm$text, "fact.column_name: c005", fixed = TRUE)
+  expect_false(grepl("bmi_6m", pm$body, fixed = TRUE))
+  expect_false(grepl("Zebra", pm$body, fixed = TRUE))
 })
 
 test_that("the column question names the columns and masks them on request", {

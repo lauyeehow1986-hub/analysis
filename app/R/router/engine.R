@@ -164,6 +164,11 @@ sr_router_run <- function(project, backends = character(), approve = character()
     rule <- tryCatch(.sr_router_rule(ctx), error = function(e) {
       .sr_router_signal("sr_router_error", conditionMessage(e), project)
     })
+    # A rule's choice that the node vetoes is not applied: the instance stays pending (no event).
+    if (!is.null(rule) && !is.null(node$veto)) {
+      vt <- node$veto(ctx, rule$choice)
+      if (!is.null(vt) && length(vt) == 1L && !is.na(vt) && nzchar(vt)) rule <- NULL
+    }
     if (!is.null(rule)) {
       project <- sr_project_append(project, "router.decided", c(
         .sr_rt_head(key, node$id, tb, cl),
