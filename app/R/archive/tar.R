@@ -69,6 +69,8 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
     if (identical(h[258:265], SR_TAR_USTAR)) {
       pre <- .sr_tar_str(h[346:500])
       if (nzchar(pre)) nm <- paste0(pre, "/", nm)
+    } else if (any(h[346:500] != as.raw(0L))) {          # non-POSIX magic: prefix is ambiguous
+      stop("ambiguous ustar prefix in member", call. = FALSE)
     }
     padded <- ceiling(sz / 512) * 512
     if (identical(ty, "L")) {                            # GNU long name for the next member
@@ -93,7 +95,7 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
              stringsAsFactors = FALSE)
 }
 
-.sr_win_device_re <- "^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$"
+.sr_win_device_re <- "^(CON|PRN|AUX|NUL|CONIN[$]|CONOUT[$]|(COM|LPT)[1-9\u00b9\u00b2\u00b3])$"
 
 .sr_archive_safe_path <- function(x) {
   vapply(as.character(x), function(n) {
@@ -116,25 +118,17 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
   for (i in seq_len(nrow(entries))) {
     n <- entries$name[i]; t <- entries$type[i]
     if (!t %in% c("0", "5")) {
-      stop(sprintf("archive member 
-'%s'
- is a link or special file (type %s)", n, t), call. = FALSE)
+      stop(sprintf("archive member '%s' is a link or special file (type %s)", n, t), call. = FALSE)
     }
     if (!.sr_archive_safe_path(n) || (t == "0" && endsWith(n, "/"))) {
-      stop(sprintf("unsafe archive member name 
-'%s'
-", n), call. = FALSE)
+      stop(sprintf("unsafe archive member name '%s'", n), call. = FALSE)
     }
     if (entries$size[i] > SR_TAR_MAX_MEMBER) {
-      stop(sprintf("archive member 
-'%s'
- exceeds the size limit", n), call. = FALSE)
+      stop(sprintf("archive member '%s' exceeds the size limit", n), call. = FALSE)
     }
   }
   key <- tolower(sub("/+$", "", sub("[. ]+$", "", sub("/+$", "", entries$name))))
   d <- which(duplicated(key))
-  if (length(d)) stop(sprintf("duplicate archive member 
-'%s'
-", entries$name[d[1]]), call. = FALSE)
+  if (length(d)) stop(sprintf("duplicate archive member '%s'", entries$name[d[1]]), call. = FALSE)
   invisible(TRUE)
 }

@@ -98,10 +98,38 @@ test_that("an oversized GNU long name is refused", {
 test_that("ustar prefix joins with / only for the ustar magic and 00 version", {
   f <- .tar_file(.fx_tar_header("leaf.txt", prefix = "some/dir"))
   expect_identical(.sr_tar_entries(f)$name, "some/dir/leaf.txt")
-  f2 <- .tar_file(.fx_tar_header("leaf.txt", prefix = "some/dir", magic = "ustar ", version = " \001"))
+  # no prefix bytes: old GNU magic and odd versions are read as plain names
+  f2 <- .tar_file(.fx_tar_header("leaf.txt", magic = "ustar "))
   expect_identical(.sr_tar_entries(f2)$name, "leaf.txt")
-  f3 <- .tar_file(.fx_tar_header("leaf.txt", prefix = "some/dir", version = "01"))
+  f3 <- .tar_file(.fx_tar_header("leaf.txt", version = "01"))
   expect_identical(.sr_tar_entries(f3)$name, "leaf.txt")
+})
+
+test_that("a non-POSIX magic with a non-empty prefix field is ambiguous and refused", {
+  f <- .tar_file(.fx_tar_header("leaf.txt", prefix = "../x", magic = "ustar "))
+  expect_error(.sr_tar_entries(f), "ambiguous ustar prefix in member")
+  f2 <- .tar_file(.fx_tar_header("leaf.txt", prefix = "../x", magic = ""))
+  expect_error(.sr_tar_entries(f2), "ambiguous ustar prefix in member")
+  f3 <- .tar_file(.fx_tar_header("leaf.txt", prefix = "../x", version = "01"))
+  expect_error(.sr_tar_entries(f3), "ambiguous ustar prefix in member")
+})
+
+test_that("error messages are single-line and complete", {
+  e <- data.frame(name = "x", type = "2", size = 0)
+  expect_error(.sr_tar_check(e), "archive member 'x' is a link or special file (type 2)", fixed = TRUE)
+  expect_error(.sr_tar_check(data.frame(name = "../x", type = "0", size = 1)),
+               "unsafe archive member name '../x'", fixed = TRUE)
+  expect_error(.sr_tar_check(data.frame(name = "x", type = "0", size = 2^34)),
+               "archive member 'x' exceeds the size limit", fixed = TRUE)
+  expect_error(.sr_tar_check(data.frame(name = c("x", "X"), type = "0", size = 1)),
+               "duplicate archive member 'X'", fixed = TRUE)
+})
+
+test_that("console handles and superscript COM/LPT aliases are refused", {
+  sup <- function(p, cp) intToUtf8(c(utf8ToInt(p), cp))
+  bad <- c("CONIN$", "conout$", "x/CONIN$.txt", sup("COM", 0xb9), sup("com", 0xb2), sup("x/LPT", 0xb3), sup("LPT", 0xb2))
+  expect_false(any(.sr_archive_safe_path(bad)))
+  expect_true(all(.sr_archive_safe_path(c("conin", "CONIN2", "COM0", "comx"))))
 })
 
 test_that("base-256 sizes decode; negative or huge ones are refused", {
