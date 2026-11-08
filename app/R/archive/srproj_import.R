@@ -32,17 +32,23 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   partial <- paste0(dir, ".partial")
   if (file.exists(partial)) stop(basename(partial), " already exists; remove it first", call. = FALSE)
 
-  # TOCTOU guard: the archive is hashed before the scan and again after the extraction; a file that
-  # changed in between is refused, so what was scanned is what was extracted.
+  # TOCTOU guard: the archive is hashed before the scan, after the scan and check, and after the
+  # extraction; all three must match, so what was scanned is what was extracted.
   arch_sha <- sr_sha256_file(archive)
   ent <- .sr_tar_entries(archive)
   .sr_tar_check(ent)
+  if (!identical(sr_sha256_file(archive), arch_sha)) {
+    stop("the archive changed while it was being scanned", call. = FALSE)
+  }
   files <- ent$name[ent$type == "0"]
   if (!("srproj.json" %in% files)) stop("not a StatRouter archive (no srproj.json)", call. = FALSE)
   special <- files[grepl("(^|/)[.]lock$|[.]partial$|[.]tmp$", files, ignore.case = TRUE)]
   if (length(special)) {
     stop("archive member '", special[1L], "' is a lock or temporary file", call. = FALSE)
   }
+  # the index is written into out/freezes/<label>/ by the importer, so no member may sit there already
+  occ <- files[grepl("^out/freezes/[^/]+/srproj[.]json$", files, ignore.case = TRUE)]
+  if (length(occ)) stop("the archive already holds ", occ[1L], call. = FALSE)
   cap <- suppressWarnings(as.numeric(sr_opt("srproj_max_total", 68719476736)))
   if (length(cap) != 1L || is.na(cap) || cap < 0) {
     stop("sr.srproj_max_total must be a number of bytes, zero or more", call. = FALSE)
@@ -51,12 +57,16 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
     stop("the archive total size exceeds the limit (sr.srproj_max_total)", call. = FALSE)
   }
 
+  # made_dir: the project folder at `dir` is this call's own (renamed into place). was_empty: `dir` was a
+  # pre-existing empty folder, which cleanup puts back (empty) rather than leaving nothing.
   made_dir <- FALSE
+  was_empty <- dir.exists(dir)
   done <- FALSE
   on.exit({
     if (dir.exists(partial)) unlink(partial, recursive = TRUE)
     if (!done && made_dir) {
       unlink(dir, recursive = TRUE)
+      if (was_empty) dir.create(dir)
     }
   }, add = TRUE)
 
@@ -107,23 +117,25 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
          call. = FALSE)
   }
 
-  if (paste("out", "freezes", label, "srproj.json", sep = "/") %in% body) {
-    stop("the archive already holds out/freezes/", label, "/srproj.json", call. = FALSE)
-  }
   fdir <- file.path(partial, "out", "freezes", label)
   dir.create(fdir, recursive = TRUE, showWarnings = FALSE)
   if (!isTRUE(file.rename(file.path(partial, "srproj.json"), file.path(fdir, "srproj.json")))) {
     stop("could not place the archive index", call. = FALSE)
   }
-  if (dir.exists(dir)) {
-    # re-checked empty just now; recursive = TRUE is how Windows removes even an empty folder
+  # Windows cannot rename over an existing folder, so an empty `dir` is removed only now, right before the
+  # rename, after re-checking it is empty (recursive = TRUE is how Windows removes even an empty folder);
+  # if the rename then fails the empty folder is put back.
+  if (was_empty) {
     if (length(list.files(dir, all.files = TRUE, no.. = TRUE))) {
       stop("the target folder is not empty: ", dir, call. = FALSE)
     }
     unlink(dir, recursive = TRUE)
     if (dir.exists(dir)) stop("could not replace the empty target folder ", dir, call. = FALSE)
   }
-  if (!isTRUE(file.rename(partial, dir))) stop("could not move the imported project into place", call. = FALSE)
+  if (!isTRUE(file.rename(partial, dir))) {
+    if (was_empty && !dir.exists(dir)) dir.create(dir)
+    stop("could not move the imported project into place", call. = FALSE)
+  }
   made_dir <- TRUE
 
   q <- sr_project_open(dir)

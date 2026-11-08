@@ -166,3 +166,82 @@ test_that("hostile member names and a pre-existing .partial are refused before a
   expect_false(dir.exists(file.path(root, "d4")))
   .no_trace(root, c("d1", "d2", "d3"))
 })
+
+test_that("a read-only open is refused, the project is closed and nothing is left", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  real_open <- sr_project_open; real_close <- sr_project_close
+  closed <- 0L
+  withr::defer({
+    assign("sr_project_open", real_open, envir = globalenv())
+    assign("sr_project_close", real_close, envir = globalenv())
+  })
+  assign("sr_project_open", function(...) { q <- real_open(...); q$readonly <- TRUE; q }, envir = globalenv())
+  assign("sr_project_close", function(p) { closed <<- closed + 1L; real_close(p) }, envir = globalenv())
+  expect_error(sr_srproj_import(s$path, file.path(root, "d1")), "could not be opened for writing")
+  expect_identical(closed, 1L)
+  .no_trace(root, "d1")
+})
+
+test_that("member-name refusals happen before any folder is created", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  made <- function(label, fn) .fx_srproj_reindexed(s$path, root, fn = fn)
+  a1 <- made("p", function(x) writeLines("x", file.path(x, "stray.partial")))
+  a2 <- made("t", function(x) writeLines("x", file.path(x, "stray.tmp")))
+  a3 <- made("o", function(x) {
+    writeLines("{}", file.path(x, "out", "freezes", "submission-v1", "srproj.json"))
+  })
+  real_dc <- dir.create
+  withr::defer(rm("dir.create", envir = globalenv()))
+  assign("dir.create", function(path, ...) {
+    if (grepl("[.]partial", path)) stop("a .partial folder was created") else real_dc(path, ...)
+  }, envir = globalenv())
+  expect_error(sr_srproj_import(a1, file.path(root, "d1")), "lock or temporary")
+  expect_error(sr_srproj_import(a2, file.path(root, "d2")), "lock or temporary")
+  expect_error(sr_srproj_import(a3, file.path(root, "d3")), "already holds|srproj.json")
+  expect_identical(list.files(root, pattern = "^d[0-9]"), character())
+  .no_trace(root, c("d1", "d2", "d3"))
+})
+
+test_that("a failed rename leaves a pre-existing empty target folder in place", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  empty <- file.path(root, "empty"); dir.create(empty)
+  real <- file.rename
+  withr::defer(rm("file.rename", envir = globalenv()))
+  assign("file.rename", function(from, to) {
+    if (grepl("[.]partial$", from)) FALSE else real(from, to)
+  }, envir = globalenv())
+  expect_error(sr_srproj_import(s$path, empty), "could not move")
+  expect_true(dir.exists(empty))
+  expect_length(list.files(empty, all.files = TRUE, no.. = TRUE), 0L)
+  expect_false(dir.exists(paste0(empty, ".partial")))
+})
+
+test_that("an archive swapped after the scan, or after the check, is refused", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  other <- .fx_srproj_reindexed(s$path, root, edit = "events.jsonl")
+  for (fn in c(".sr_tar_entries", ".sr_tar_check")) {
+    copy <- file.path(root, paste0(fn, ".srproj")); file.copy(s$path, copy)
+    real <- get(fn)
+    assign(fn, function(...) { r <- real(...); file.copy(other, copy, overwrite = TRUE); r }, envir = globalenv())
+    expect_error(sr_srproj_import(copy, file.path(root, paste0("d", fn))), "changed while")
+    assign(fn, real, envir = globalenv())
+    .no_trace(root, paste0("d", fn))
+  }
+})
+
+test_that("verify_data = FALSE skips data files that verify_data = TRUE flags", {
+  s <- .fx_srproj("full")
+  root <- withr::local_tempdir()
+  m <- sr_freeze_manifest(s$p, "submission-v1")
+  part <- Filter(function(f) f$kind == "part", m$files)[[1]]$path
+  bad <- .fx_srproj_reindexed(s$path, root, edit = part)
+  expect_error(sr_srproj_import(bad, file.path(root, "d1")), "does not verify")
+  .no_trace(root, "d1")
+  q <- sr_srproj_import(bad, file.path(root, "d2"), verify_data = FALSE)
+  withr::defer(sr_project_close(q))
+  expect_true(q$import$verify$ok)
+})
