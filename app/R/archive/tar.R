@@ -90,7 +90,9 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
     if (length(h) < 512L) stop("truncated tar archive", call. = FALSE)
     if (all(h == as.raw(0L))) break
     i <- i + 1L
-    stored <- tryCatch(.sr_tar_size(h[149:156]), error = function(e) NA_real_)
+    # untar2 reads the checksum as octal only, so a base-256 checksum is refused (strict parity)
+    stored <- if (as.integer(h[149]) >= 128L) NA_real_ else
+      tryCatch(.sr_tar_size(h[149:156]), error = function(e) NA_real_)
     h2 <- h
     h2[149:156] <- as.raw(32L)
     if (is.na(stored) || stored != sum(as.integer(h2))) {
@@ -167,7 +169,7 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
   s <- sub("/$", "", v)
   out[ok] <- nzchar(s) & nchar(v, type = "bytes") <= 255L &
     !grepl("[[:cntrl:]]", v) & !grepl("\\", v, fixed = TRUE) & !grepl(":", v, fixed = TRUE) &
-    !startsWith(v, "/") & !endsWith(s, "/") & !grepl("//", s, fixed = TRUE) &
+    !startsWith(v, "/") & !startsWith(v, "~") & !endsWith(s, "/") & !grepl("//", s, fixed = TRUE) &
     !grepl("(^|/)[.]{1,2}(/|$)", s) &                    # "." and ".." segments
     !grepl("[. ](/|$)", s) &                              # a segment ending in a dot or space
     !grepl(.sr_win_device_seg_re, toupper(s))

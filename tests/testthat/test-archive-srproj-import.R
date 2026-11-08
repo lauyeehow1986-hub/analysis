@@ -72,6 +72,7 @@ test_that("the target folder must be new or empty; the archive must be a .srproj
   for (d in names) {
     expect_false(dir.exists(file.path(root, d)))
     expect_false(dir.exists(file.path(root, paste0(d, ".partial"))))
+    expect_false(dir.exists(file.path(root, paste0(d, ".partial.src"))))
   }
 }
 
@@ -124,8 +125,9 @@ test_that("an archive that changes between the scan and the extraction is refuse
   copy <- file.path(root, "copy.srproj"); file.copy(s$path, copy)
   real <- .sr_tar_check
   withr::defer(assign(".sr_tar_check", real, envir = globalenv()))
+  own <- file.path(root, "d1.partial.src", "archive.srproj")   # the private copy is what gets extracted
   assign(".sr_tar_check", function(e) {
-    r <- real(e); file.copy(other, copy, overwrite = TRUE); r
+    r <- real(e); file.copy(other, own, overwrite = TRUE); r
   }, envir = globalenv())
   expect_error(sr_srproj_import(copy, file.path(root, "d1")), "changed while")
   .no_trace(root, "d1")
@@ -183,7 +185,7 @@ test_that("a read-only open is refused, the project is closed and nothing is lef
   .no_trace(root, "d1")
 })
 
-test_that("member-name refusals happen before any folder is created", {
+test_that("member-name refusals happen before the extraction folder is created", {
   s <- .fx_srproj("lean")
   root <- withr::local_tempdir()
   made <- function(label, fn) .fx_srproj_reindexed(s$path, root, fn = fn)
@@ -195,7 +197,8 @@ test_that("member-name refusals happen before any folder is created", {
   real_dc <- dir.create
   withr::defer(rm("dir.create", envir = globalenv()))
   assign("dir.create", function(path, ...) {
-    if (grepl("[.]partial", path)) stop("a .partial folder was created") else real_dc(path, ...)
+    # the private copy folder (<dir>.partial.src) is made first by design; the extraction folder is not
+    if (grepl("[.]partial$", path)) stop("a .partial folder was created") else real_dc(path, ...)
   }, envir = globalenv())
   expect_error(sr_srproj_import(a1, file.path(root, "d1")), "lock or temporary")
   expect_error(sr_srproj_import(a2, file.path(root, "d2")), "lock or temporary")
@@ -226,7 +229,8 @@ test_that("an archive swapped after the scan, or after the check, is refused", {
   for (fn in c(".sr_tar_entries", ".sr_tar_check")) {
     copy <- file.path(root, paste0(fn, ".srproj")); file.copy(s$path, copy)
     real <- get(fn)
-    assign(fn, function(...) { r <- real(...); file.copy(other, copy, overwrite = TRUE); r }, envir = globalenv())
+    own <- file.path(root, paste0("d", fn, ".partial.src"), "archive.srproj")
+    assign(fn, function(...) { r <- real(...); file.copy(other, own, overwrite = TRUE); r }, envir = globalenv())
     expect_error(sr_srproj_import(copy, file.path(root, paste0("d", fn))), "changed while")
     assign(fn, real, envir = globalenv())
     .no_trace(root, paste0("d", fn))
@@ -325,4 +329,49 @@ test_that("a folder member with data (a link header hidden in it) is refused and
     expect_length(list.files(sentinel, all.files = TRUE, no.. = TRUE), 0L)
     .no_trace(root, "d1")
   }
+})
+
+test_that("an archive swapped for an evil one while untar runs only touches the caller's path", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  arch <- file.path(root, "a.srproj"); file.copy(s$path, arch)
+  sentinel <- file.path(sub("^[A-Za-z]:", "", normalizePath(withr::local_tempdir(), winslash = "/")),
+                        "sentinel.txt")
+  evil <- file.path(root, "evil.bin")
+  writeBin(c(.fx_tar_header("srproj.json", size = 2), charToRaw("{}"), raw(510),
+             .fx_tar_header(sentinel, type = "1", linkname = "srproj.json"), raw(1024)), evil)
+  good <- file.path(root, "good.bin"); file.copy(s$path, good)
+  suppressMessages(trace("untar", where = asNamespace("utils"), print = FALSE,
+                         tracer = bquote(file.copy(.(evil), .(arch), overwrite = TRUE)),
+                         exit = bquote(file.copy(.(good), .(arch), overwrite = TRUE))))
+  withr::defer(suppressMessages(untrace("untar", where = asNamespace("utils"))))
+  q <- sr_srproj_import(arch, file.path(root, "d1"))
+  sr_project_close(q)
+  expect_false(file.exists(sentinel))
+  expect_true(file.exists(file.path(root, "d1", "events.jsonl")))
+  expect_false(dir.exists(file.path(root, "d1.partial")))
+  expect_false(dir.exists(file.path(root, "d1.partial.src")))
+  expect_false(any(grepl("srproj", list.files(file.path(root, "d1")))))   # the copy is not in the project
+})
+
+test_that("the archive changing before its private copy is made is refused; the copy goes on every path", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  other <- .fx_srproj_reindexed(s$path, root, edit = "events.jsonl")
+  copy <- file.path(root, "copy.srproj"); file.copy(s$path, copy)
+  real <- .sr_srproj_private_copy
+  withr::defer(assign(".sr_srproj_private_copy", real, envir = globalenv()))
+  assign(".sr_srproj_private_copy", function(archive, src) {
+    file.copy(other, archive, overwrite = TRUE); real(archive, src)
+  }, envir = globalenv())
+  expect_error(sr_srproj_import(copy, file.path(root, "d1")), "changed while")
+  .no_trace(root, "d1")
+  assign(".sr_srproj_private_copy", real, envir = globalenv())
+  q <- sr_srproj_import(s$path, file.path(root, "d2")); sr_project_close(q)
+  expect_false(dir.exists(file.path(root, "d2.partial.src")))
+  expect_error(sr_srproj_import(other, file.path(root, "d3")), "does not match|verify")
+  .no_trace(root, "d3")
+  dir.create(file.path(root, "d4.partial.src"))
+  expect_error(sr_srproj_import(s$path, file.path(root, "d4")), "already exists")
+  expect_false(dir.exists(file.path(root, "d4")))
 })

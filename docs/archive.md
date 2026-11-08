@@ -96,11 +96,16 @@ absolute path the events hold, so check it before sharing an archive.
 ## 6. Import and what it verifies
 
 `sr_srproj_import(archive, dir, verify_data = TRUE)` imports at any path, all or nothing: on any failure the
-partial folder, and the project folder once renamed, are removed. `dir` must be new or empty. Steps:
+partial folders, and the project folder once renamed, are removed. `dir` must be new or empty, and neither
+`<dir>.partial` nor `<dir>.partial.src` may exist. Steps:
 
+0. the archive is hashed and copied into a private folder `<dir>.partial.src` (beside the target, never
+   inside the imported project, removed on success and on every failure); the copy must hash the same, and
+   from here on only the copy is read, so changing the original file during the import has no effect. This
+   needs free disk space equal to the archive's size, for the length of the import;
 1. the tar headers are scanned before anything is extracted, reading each name exactly as R's internal
    extractor will (a GNU long name, the name and the prefix field); any way they could disagree is refused;
-2. the archive is hashed before the scan, after it and after extraction, and all must match;
+2. the copy is hashed again after the scan and after extraction, and every hash must match;
 3. only the regular files the scan approved are extracted, to `<dir>.partial`, and their sizes checked
    against the headers;
 4. the index is read (format known, version not newer than this build) and every member is checked against
@@ -115,12 +120,12 @@ A lean import reports the missing data under `verify$absent`; those are not prob
 
 **Limits and refusals.** Members are at most 8 GiB, names at most 255 bytes, the archive at most 64 GiB in
 total (`sr.srproj_max_total`) and 1e6 members. Refused: any member that is not a regular file or folder
-(symlinks, hard links, devices, pax `x` and `g` headers), an absolute or `..` path, a backslash, colon,
+(symlinks, hard links, devices, pax `x` and `g` headers), a non-file member that declares data, an absolute, `~` or `..` path, a backslash, colon,
 control character, Windows device name or trailing dot or space, case-insensitive duplicates, members under
 a `.lock` folder or ending in `.partial` or `.tmp` (files and folders), a member already at
 `out/freezes/<label>/srproj.json`, a GNU long name with bytes past its declared size, an embedded NUL, or
 followed by anything but a regular file, bytes after the terminating NUL of a name or prefix field, a size
-field with a non-octal character, a bad header checksum and a truncated tar. If the `.partial` folder
+field with a non-octal character (also mode and mtime), a bad or base-256 header checksum and a truncated tar. If the `.partial` folder
 cannot be removed after a failure, a warning names it.
 
 ## 7. Data versioning and diffs

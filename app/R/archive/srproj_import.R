@@ -2,9 +2,10 @@
 #
 #   sr_srproj_import(archive, dir, verify_data = TRUE)
 #
-# Order: scan the tar headers (.sr_tar_check) before anything is extracted, extract to <dir>.partial,
+# Order: copy the archive to a private <dir>.partial.src (hash-checked; only the copy is used), scan its
+# tar headers (.sr_tar_check) before anything is extracted, extract to <dir>.partial,
 # check every member against the index (SHA-256, no extra, no missing), rename into place, open, and
-# run sr_freeze_verify. Any failure removes the partial folder and, once renamed, the project folder too.
+# run sr_freeze_verify. Any failure removes the partial and copy folders and, once renamed, the project too.
 
 sr_reducer_register("srproj.imported", function(state, event) {
   im <- state$srproj_imports %||% list()
@@ -31,13 +32,40 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   if (!dir.exists(parent)) stop("the folder ", parent, " does not exist", call. = FALSE)
   partial <- paste0(dir, ".partial")
   if (file.exists(partial)) stop(basename(partial), " already exists; remove it first", call. = FALSE)
+  src <- paste0(dir, ".partial.src")
+  if (file.exists(src)) stop(basename(src), " already exists; remove it first", call. = FALSE)
 
-  # TOCTOU guard: the archive is hashed before the scan, after the scan and check, and after the
-  # extraction; all three must match, so what was scanned is what was extracted.
+  # made_dir: the project folder at `dir` is this call's own (renamed into place). was_empty: `dir` was a
+  # pre-existing empty folder, which cleanup puts back (empty) rather than leaving nothing.
+  made_dir <- FALSE
+  was_empty <- dir.exists(dir)
+  done <- FALSE
+  on.exit({
+    for (p in c(src, partial)) {
+      if (dir.exists(p)) {
+        unlink(p, recursive = TRUE)
+        if (dir.exists(p)) warning("could not remove ", basename(p), "; remove it by hand", call. = FALSE)
+      }
+    }
+    if (!done && made_dir) {
+      unlink(dir, recursive = TRUE)
+      if (was_empty) dir.create(dir)
+    }
+  }, add = TRUE)
+
+  # TOCTOU guard: the caller's archive is hashed once, then copied into a private sibling folder
+  # (<dir>.partial.src, never inside the extracted tree, removed on every exit). Only that copy is hashed
+  # again, scanned, checked and extracted, so swapping the caller's file later changes nothing; the copy is
+  # re-hashed after the scan and after the extraction, and every hash must match.
   arch_sha <- sr_sha256_file(archive)
-  ent <- .sr_tar_entries(archive)
+  dir.create(src)
+  own <- .sr_srproj_private_copy(archive, src)
+  if (!identical(sr_sha256_file(own), arch_sha)) {
+    stop("the archive changed while it was being copied", call. = FALSE)
+  }
+  ent <- .sr_tar_entries(own)
   .sr_tar_check(ent)
-  if (!identical(sr_sha256_file(archive), arch_sha)) {
+  if (!identical(sr_sha256_file(own), arch_sha)) {
     stop("the archive changed while it was being scanned", call. = FALSE)
   }
   files <- ent$name[ent$type == "0"]
@@ -58,29 +86,13 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
     stop("the archive total size exceeds the limit (sr.srproj_max_total)", call. = FALSE)
   }
 
-  # made_dir: the project folder at `dir` is this call's own (renamed into place). was_empty: `dir` was a
-  # pre-existing empty folder, which cleanup puts back (empty) rather than leaving nothing.
-  made_dir <- FALSE
-  was_empty <- dir.exists(dir)
-  done <- FALSE
-  on.exit({
-    if (dir.exists(partial)) {
-      unlink(partial, recursive = TRUE)
-      if (dir.exists(partial)) warning("could not remove ", basename(partial), "; remove it by hand", call. = FALSE)
-    }
-    if (!done && made_dir) {
-      unlink(dir, recursive = TRUE)
-      if (was_empty) dir.create(dir)
-    }
-  }, add = TRUE)
-
   dir.create(partial)
   # files = limits only the REGULAR files untar2 writes to the scanner-approved names (defence in depth);
   # it does not filter folder or link members. Safety rests on the scan: it refuses every link and special
   # type, any non-file member with data, and anything untar2 would read differently, so untar2 meets only
   # the regular files and folders that were checked.
-  utils::untar(archive, files = files, exdir = partial, tar = "internal")
-  if (!identical(sr_sha256_file(archive), arch_sha)) {
+  utils::untar(own, files = files, exdir = partial, tar = "internal")
+  if (!identical(sr_sha256_file(own), arch_sha)) {
     stop("the archive changed while it was being imported", call. = FALSE)
   }
   for (i in which(ent$type == "0")) {
@@ -181,4 +193,14 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
                    parts_missing = parts, sources_missing = srcs, verify = v)
   done <- TRUE
   q
+}
+
+# Copies the caller's archive into the private staging folder `src` and returns the copy's path; only this
+# copy is ever scanned or extracted. Needs free space equal to the archive's size until the import ends.
+.sr_srproj_private_copy <- function(archive, src) {
+  own <- file.path(src, "archive.srproj")
+  if (!isTRUE(file.copy(archive, own, copy.mode = FALSE, copy.date = FALSE))) {
+    stop("could not copy the archive to ", basename(src), call. = FALSE)
+  }
+  own
 }

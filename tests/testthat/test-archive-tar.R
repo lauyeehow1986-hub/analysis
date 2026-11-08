@@ -335,3 +335,20 @@ test_that("randomized parity: whenever the scan and check pass, untar2 lists exa
   }
   expect_gt(checked, 40L)                                 # 49 with this seed
 })
+
+test_that("a leading tilde is refused (file() would expand it to the home folder)", {
+  expect_false(any(.sr_archive_safe_path(c("~", "~/x.txt", "~user/x.txt", "~x"))))
+  expect_true(all(.sr_archive_safe_path(c("a/~", "a/~b", "a~b"))))
+})
+
+test_that("a base-256 checksum field is refused (untar2 reads checksums as octal only)", {
+  h <- .fx_tar_header("a.txt", size = 1)
+  sz <- sum(as.integer(replace(h, 149:156, as.raw(32L))))
+  h[149:156] <- as.raw(0L)
+  h[149] <- as.raw(0x80)
+  h[155] <- as.raw(bitwAnd(bitwShiftR(sz, 8L), 255L))
+  h[156] <- as.raw(bitwAnd(sz, 255L))
+  f <- tempfile(fileext = ".tar"); on.exit(unlink(f))
+  writeBin(c(h, charToRaw("x"), raw(511), raw(1024)), f)
+  expect_error(.sr_tar_entries(f), "bad header checksum")
+})
