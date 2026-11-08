@@ -231,7 +231,7 @@ sr_freeze <- function(project, label = sr_freeze_next_label(project)) {
     project_id = project$meta$id, schema_version = project$meta$schema_version,
     events = list(seq = as.integer(seq), sha256 = .sr_events_prefix_sha(paths$events, seq)),
     audit_tip = tip, sap_hash = project$state$sap$lock$sap_hash,
-    libsnap = snap, libsnap_hash = sr_libsnap_hash(snap),
+    libsnap = .sr_libsnap_json(snap), libsnap_hash = sr_libsnap_hash(snap),
     lock_libsnap_hash = .sr_freeze_chr1(project$state$sap$lock$libsnap_hash),
     tables = tables, runs = runl, files = unname(files))
   .sr_write_json_file(file.path(st, "manifest.json"), manifest)

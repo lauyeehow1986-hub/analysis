@@ -26,3 +26,10 @@ sr_libsnap_hash <- function(snap = sr_libsnap()) {
   snap$pkgs <- as.list(snap$pkgs)
   .sr_sha256(sr_canonical_json(snap))
 }
+
+# A snapshot as stored in an event payload or a manifest: pkgs is a named list, because a named
+# character vector is written as a JSON array and loses its names.
+.sr_libsnap_json <- function(snap) {
+  snap$pkgs <- as.list(snap$pkgs)
+  snap
+}

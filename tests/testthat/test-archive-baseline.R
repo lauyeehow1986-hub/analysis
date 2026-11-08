@@ -41,3 +41,21 @@ test_that("re-baseline without a freeze is refused", {
   expect_error(sr_rebaseline_diff(p), "no freeze yet")
   expect_error(sr_rebaseline(p, "x"), "no freeze yet")
 })
+
+test_that("the baseline names survive a real event write and a project reopen", {
+  p <- .fx_writer_project()
+  p <- sr_freeze(p)
+  dir <- p$paths$dir
+  sr_project_close(p)
+  q <- sr_project_open(dir)
+  withr::defer(sr_project_close(q))
+  expect_identical(names(q$state$lib_baseline$snap$pkgs), names(sr_libsnap()$pkgs))
+  withr::local_options(sr.cran_snapshot = "2099-01-01")
+  expect_identical(sr_rebaseline_diff(q)$item, "snapshot_date")
+  q <- sr_rebaseline(q, "moved")
+  sr_project_close(q)
+  r <- sr_project_open(dir)
+  withr::defer(sr_project_close(r))
+  expect_identical(names(r$state$lib_baseline$snap$pkgs), names(sr_libsnap()$pkgs))
+  expect_identical(nrow(sr_rebaseline_diff(r)), 0L)
+})

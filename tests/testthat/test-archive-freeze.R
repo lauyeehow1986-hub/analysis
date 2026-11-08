@@ -109,3 +109,11 @@ test_that("sr_freeze_verify and sr_freeze_manifest refuse a non-scalar label", {
   expect_error(sr_freeze_verify(p, c("a", "b")), "unknown freeze label")
   expect_error(sr_freeze_manifest(p, NA_character_), "unknown freeze label")
 })
+
+test_that("the manifest keeps the package names of the library snapshot", {
+  p <- .fx_writer_project()
+  p <- sr_freeze(p)
+  m <- .sr_read_json_file(file.path(.sr_freeze_dir(p, "submission-v1"), "manifest.json"))
+  expect_identical(names(m$libsnap$pkgs), names(sr_libsnap()$pkgs))
+  expect_identical(m$libsnap_hash, sr_libsnap_hash())
+})

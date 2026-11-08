@@ -78,10 +78,3 @@ sr_rebaseline <- function(project, reason, snap = sr_libsnap()) {
   stop("the library differs from the baseline of freeze '", b$label, "' (", n, " change(s)); ",
        "review sr_rebaseline_diff() and call sr_rebaseline() with a reason before running", call. = FALSE)
 }
-
-# A snapshot as stored in an event payload: pkgs is a named list, because a named character vector is
-# written as a JSON array and loses its names.
-.sr_libsnap_json <- function(snap) {
-  snap$pkgs <- as.list(snap$pkgs)
-  snap
-}
