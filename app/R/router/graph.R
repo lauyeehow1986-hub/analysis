@@ -16,9 +16,11 @@ SR_NODE_SCOPES <- c("project", "table", "column")
 #' `options`: chr or function(ctx) -> chr. `applies`: lgl, NULL = always. `rule`: NULL | list(choice, reason).
 #' `question`: NULL | list(instructions, criteria), NULL = rule / user only. `facts`: named list.
 #' `veto`: NULL | chr reason. `columns`: chr, the instance columns of a column-scope node (required).
+#' `facts_columns`: TRUE when the question needs the table's column metadata in its state (router/state.R).
 sr_node <- function(id, label, options, scope = c("project", "table", "column"), depends = character(),
                     applies = NULL, rule = NULL, question = NULL, facts = NULL, veto = NULL,
-                    danger = list(), columns = NULL, cite = NA_character_, version = 1L) {
+                    danger = list(), columns = NULL, facts_columns = FALSE, cite = NA_character_,
+                    version = 1L) {
   scope <- match.arg(scope)
   if (!is.character(id) || length(id) != 1L || !grepl("^[a-z][a-z0-9_]*$", id)) {
     stop("sr_node: id must match ^[a-z][a-z0-9_]*$", call. = FALSE)
@@ -43,9 +45,13 @@ sr_node <- function(id, label, options, scope = c("project", "table", "column"),
   if (identical(scope, "column") && is.null(columns)) {
     stop("sr_node '", id, "': a column-scope node needs `columns`", call. = FALSE)
   }
+  if (!is.logical(facts_columns) || length(facts_columns) != 1L || is.na(facts_columns)) {
+    stop("sr_node '", id, "': facts_columns must be TRUE or FALSE", call. = FALSE)
+  }
   structure(list(id = id, label = label, options = options, scope = scope, depends = depends,
                  applies = applies, rule = rule, question = question, facts = facts, veto = veto,
-                 danger = danger, columns = columns, cite = cite, version = as.integer(version)),
+                 danger = danger, columns = columns, facts_columns = facts_columns, cite = cite,
+                 version = as.integer(version)),
             class = "sr_node")
 }
 
