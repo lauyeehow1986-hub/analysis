@@ -42,7 +42,7 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   }
   files <- ent$name[ent$type == "0"]
   if (!("srproj.json" %in% files)) stop("not a StatRouter archive (no srproj.json)", call. = FALSE)
-  special <- files[grepl("(^|/)[.]lock$|[.]partial$|[.]tmp$", files, ignore.case = TRUE)]
+  special <- files[grepl("(^|/)[.]lock(/|$)|[.]partial$|[.]tmp$", files, ignore.case = TRUE)]
   if (length(special)) {
     stop("archive member '", special[1L], "' is a lock or temporary file", call. = FALSE)
   }

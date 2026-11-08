@@ -245,3 +245,13 @@ test_that("verify_data = FALSE skips data files that verify_data = TRUE flags", 
   withr::defer(sr_project_close(q))
   expect_true(q$import$verify$ok)
 })
+
+test_that("a member under a .lock folder is refused before any folder is made", {
+  root <- withr::local_tempdir()
+  f <- file.path(root, "l.srproj")
+  con <- gzfile(f, "wb")
+  writeBin(c(.fx_tar_header("srproj.json"), .fx_tar_header(".lock/x"), raw(1024)), con)
+  close(con)
+  expect_error(sr_srproj_import(f, file.path(root, "d1")), "lock or temporary")
+  .no_trace(root, "d1")
+})
