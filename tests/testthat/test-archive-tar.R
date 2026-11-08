@@ -166,3 +166,9 @@ test_that("a multi-MiB member is skipped and the next member is found", {
 test_that("more than 1e6 members is refused", {
   expect_error(.sr_tar_check(data.frame(name = rep("a", 1e6 + 1), type = "0", size = 0)), "too many")
 })
+
+test_that("device stems are matched after stripping trailing spaces, and CLOCK$ is refused", {
+  bad <- c("CON .txt", "con  .x", "NUL .", "x/aux  .log", "CLOCK$", "clock$.txt")
+  expect_false(any(.sr_archive_safe_path(bad)))
+  expect_true(all(.sr_archive_safe_path(c("console.txt", "connect", "clock", "clocks.txt"))))
+})

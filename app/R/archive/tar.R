@@ -95,7 +95,7 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
              stringsAsFactors = FALSE)
 }
 
-.sr_win_device_re <- "^(CON|PRN|AUX|NUL|CONIN[$]|CONOUT[$]|(COM|LPT)[1-9\u00b9\u00b2\u00b3])$"
+.sr_win_device_re <- "^(CON|PRN|AUX|NUL|CONIN[$]|CONOUT[$]|CLOCK[$]|(COM|LPT)[1-9\u00b9\u00b2\u00b3])$"
 
 .sr_archive_safe_path <- function(x) {
   vapply(as.character(x), function(n) {
@@ -108,7 +108,7 @@ SR_TAR_USTAR <- as.raw(c(0x75, 0x73, 0x74, 0x61, 0x72, 0x00, 0x30, 0x30))   # "u
     seg <- strsplit(s, "/", fixed = TRUE)[[1]]
     if (length(seg) == 0L || any(seg %in% c("", ".", ".."))) return(FALSE)
     if (any(grepl("[. ]$", seg))) return(FALSE)
-    if (any(grepl(.sr_win_device_re, toupper(sub("[.].*$", "", seg))))) return(FALSE)
+    if (any(grepl(.sr_win_device_re, toupper(sub("[. ]+$", "", sub("[.].*$", "", seg)))))) return(FALSE)
     TRUE
   }, logical(1), USE.NAMES = FALSE)
 }
