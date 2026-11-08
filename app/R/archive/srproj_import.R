@@ -14,6 +14,9 @@ sr_reducer_register("srproj.imported", function(state, event) {
   state
 })
 
+# the archive FILE may exceed sr.srproj_max_total by at most this much (tar headers, padding, end blocks)
+SR_SRPROJ_HEADER_ALLOWANCE <- 64 * 1048576
+
 #' @return the open, writable project at `dir`; `$import` holds label, data_mode, archive_sha256,
 #'   parts_missing, sources_missing and the sr_freeze_verify result.
 sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
@@ -37,11 +40,23 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
 
   # made_dir: the project folder at `dir` is this call's own (renamed into place). was_empty: `dir` was a
   # pre-existing empty folder, which cleanup puts back (empty) rather than leaving nothing.
+  # own_src / own_partial: set only once dir.create() succeeded, so cleanup never removes a folder that
+  # another process made between the existence check above and this call's dir.create().
+  cap <- suppressWarnings(as.numeric(sr_opt("srproj_max_total", 68719476736)))
+  if (length(cap) != 1L || is.na(cap) || cap < 0) {
+    stop("sr.srproj_max_total must be a number of bytes, zero or more", call. = FALSE)
+  }
+  # no copy is made of a file larger than the member cap plus a 64 MiB allowance for tar headers and padding
+  if (isTRUE(file.size(archive) > cap + SR_SRPROJ_HEADER_ALLOWANCE)) {
+    stop("the archive file is larger than the limit (sr.srproj_max_total)", call. = FALSE)
+  }
   made_dir <- FALSE
   was_empty <- dir.exists(dir)
   done <- FALSE
+  own_src <- FALSE
+  own_partial <- FALSE
   on.exit({
-    for (p in c(src, partial)) {
+    for (p in c(if (own_src) src, if (own_partial) partial)) {
       if (dir.exists(p)) {
         unlink(p, recursive = TRUE)
         if (dir.exists(p)) warning("could not remove ", basename(p), "; remove it by hand", call. = FALSE)
@@ -58,8 +73,11 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   # again, scanned, checked and extracted, so swapping the caller's file later changes nothing; the copy is
   # re-hashed after the scan and after the extraction, and every hash must match.
   arch_sha <- sr_sha256_file(archive)
-  dir.create(src)
-  own <- .sr_srproj_private_copy(archive, src)
+  if (!isTRUE(suppressWarnings(dir.create(src)))) {
+    stop("could not create ", basename(src), call. = FALSE)
+  }
+  own_src <- TRUE
+  own <-.sr_srproj_private_copy(archive, src)
   if (!identical(sr_sha256_file(own), arch_sha)) {
     stop("the archive changed while it was being copied", call. = FALSE)
   }
@@ -78,15 +96,14 @@ sr_srproj_import <- function(archive, dir, verify_data = TRUE) {
   # the index is written into out/freezes/<label>/ by the importer, so no member may sit there already
   occ <- files[grepl("^out/freezes/[^/]+/srproj[.]json$", files, ignore.case = TRUE)]
   if (length(occ)) stop("the archive already holds ", occ[1L], call. = FALSE)
-  cap <- suppressWarnings(as.numeric(sr_opt("srproj_max_total", 68719476736)))
-  if (length(cap) != 1L || is.na(cap) || cap < 0) {
-    stop("sr.srproj_max_total must be a number of bytes, zero or more", call. = FALSE)
-  }
   if (sum(as.numeric(ent$size[ent$type == "0"])) > cap) {
     stop("the archive total size exceeds the limit (sr.srproj_max_total)", call. = FALSE)
   }
 
-  dir.create(partial)
+  if (!isTRUE(suppressWarnings(dir.create(partial)))) {
+    stop("could not create ", basename(partial), call. = FALSE)
+  }
+  own_partial <- TRUE
   # files = limits only the REGULAR files untar2 writes to the scanner-approved names (defence in depth);
   # it does not filter folder or link members. Safety rests on the scan: it refuses every link and special
   # type, any non-file member with data, and anything untar2 would read differently, so untar2 meets only

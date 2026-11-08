@@ -102,7 +102,9 @@ partial folders, and the project folder once renamed, are removed. `dir` must be
 0. the archive is hashed and copied into a private folder `<dir>.partial.src` (beside the target, never
    inside the imported project, removed on success and on every failure); the copy must hash the same, and
    from here on only the copy is read, so changing the original file during the import has no effect. This
-   needs free disk space equal to the archive's size, for the length of the import;
+   needs free disk space equal to the archive's size, for the length of the import. An archive file larger
+   than `sr.srproj_max_total` plus 64 MiB (for tar headers) is refused before it is copied. A writable
+   target parent folder is outside the threat model: whoever can write there can change the copy;
 1. the tar headers are scanned before anything is extracted, reading each name exactly as R's internal
    extractor will (a GNU long name, the name and the prefix field); any way they could disagree is refused;
 2. the copy is hashed again after the scan and after extraction, and every hash must match;

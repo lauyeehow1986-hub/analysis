@@ -375,3 +375,34 @@ test_that("the archive changing before its private copy is made is refused; the 
   expect_error(sr_srproj_import(s$path, file.path(root, "d4")), "already exists")
   expect_false(dir.exists(file.path(root, "d4")))
 })
+
+test_that("an archive file larger than the cap plus the header allowance is refused before any copy", {
+  root <- withr::local_tempdir()
+  withr::local_options(sr.srproj_max_total = 0)
+  big <- file.path(root, "big.srproj")
+  writeBin(raw(SR_SRPROJ_HEADER_ALLOWANCE + 1), big)
+  withr::defer(rm("dir.create", envir = globalenv()))
+  assign("dir.create", function(path, ...) stop("a folder was created"), envir = globalenv())
+  expect_error(sr_srproj_import(big, file.path(root, "d1")), "archive file is larger than the limit")
+  .no_trace(root, "d1")
+})
+
+test_that("a staging folder another process made first is not removed", {
+  s <- .fx_srproj("lean")
+  root <- withr::local_tempdir()
+  real_dc <- dir.create
+  withr::defer(rm("dir.create", envir = globalenv()))
+  for (sfx in c(".partial.src", ".partial")) {
+    d <- file.path(root, paste0("r", nchar(sfx)))
+    target <- paste0(d, sfx)
+    assign("dir.create", function(path, ...) {
+      if (identical(path, target)) {                     # someone else wins the race to this name
+        real_dc(path); writeLines("theirs", file.path(path, "keep.txt")); return(FALSE)
+      }
+      real_dc(path, ...)
+    }, envir = globalenv())
+    expect_error(sr_srproj_import(s$path, d), paste0("could not create ", basename(target)), fixed = TRUE)
+    expect_true(file.exists(file.path(target, "keep.txt")), info = sfx)
+    expect_false(dir.exists(d))
+  }
+})
