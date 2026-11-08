@@ -33,8 +33,11 @@ design; this file holds *what has happened* and *what we learned*.
    guide `docs/router.md`).
    The freeze (P1d.3) is done (plan `docs/superpowers/plans/2026-11-08-p1d-freeze.md`, branch `p1d-freeze`,
    guide `docs/archive.md`).
-   **Next: the P1d UI plan** (it owns the router panel, the payload preview, the consent dialog and the freeze,
-   export and import buttons). Writer and router open items (carried into the UI, P2 and P3 work):
+   **Next: the P1d UI, split 2026-11-08 into three sub-projects, each with its own spec, plan and branch:**
+   (1) Design + SAP panels (spec `docs/superpowers/specs/2026-11-08-p1d-ui-design-sap-design.md`, branch
+   `p1d-ui-sap`); (2) Analyses (run, long jobs, post-lock analyses, results); (3) Write + Archive + Settings.
+   Together they own the router panel, the payload preview, the consent dialog and the freeze, export and
+   import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
      - The router has no UI yet; only Jev is registered (the `local` and `clm` ids are reserved for P3), and
        the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
      - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
