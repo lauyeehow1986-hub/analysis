@@ -16,6 +16,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-11-07 | P1d.1 writer done (branch `p1d-writer`, Tasks 1-12): the placeholder registry and document model (`app/R/writer/placeholders.R`, `fragments.R`, `tables.R`, `figures.R`, `model.R`), small-cell suppression (`sdc_out.R`, one `suppress_k` per document), the claim guard G1-G9 (`guard.R`), the STROBE checklist (`checklist.R`), references (`cite.R`), the Word renderer with journal presets (`docx.R`), the analysis script and lockfile (`script.R`), the SAP and feasibility Word files (`sapdoc.R`), and `sr_export` (out/exports/export-NNN, with a `doc.exported` event per file). Guide `docs/writer.md`; `docs/analysis.md` section 13. Lint `LINT OK (76 files)`. Full suite: run by the controller at the P1d.1 review; its counts are not recorded here |
 | 2026-11-08 | P1d.2 router done (branch `p1d-router`, Tasks 1-11): the PICO record (`pico.set`), the decision-node graph with input hashes and staleness, the metadata-only state builder with column-name masking and the token budget, the System One request / response contract, the abstain rule, the rules backend and the Jev cloud backend (gates: mode, key, DPA ack, session consent, payload approval; shadow mode, predictions never applied), the P1 nodes (design, purpose, guideline, outcome / exposure column, outcome type, primary route, covariate timing), the decision table, the shadow report and golden-set export, the SAP lock gate and router hash part, and the writer study-design paragraph, decision table and STROBE items 3-5. Guide `docs/router.md`. Full suite 13355 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), 1 warning (shiny built under a newer R), `LINT OK (89 files)`; after the final-review fixes (PICO in the design and purpose hashes, decisions frozen at the lock, vanished instances, mask punctuation, shadow same_input) 13483 pass, 0 fail, 4 skip, 1 warning, `LINT OK (89 files)`. The first full run failed 2 tests (test-writer-checklist): the cached writer template outlives `test-spec`, which empties the route registry, so `.fx_writer_project` now re-registers the routes |
 | 2026-11-08 | P1d.3 freeze done (branch `p1d-freeze`, Tasks 1-7): `sr_freeze` (gated, manifest with SHA-256 of store, sources, extracts, fits, exports and code; pinned events prefix and audit tip), the library baseline gate in `sr_run` with `sr_rebaseline_diff` / `sr_rebaseline`, the `.srproj` export (full / lean / auto, owner names scrubbed) and all-or-nothing import with a pure-R tar header scanner, `sr_freeze_diff` and `sr_freeze_results_diff`; `docs/archive.md`. P1 exit item 7 passes end to end (`test-archive-e2e.R`). Archives are not signed (out of scope). Full suite 13859 pass, 1 fail (the flaky 5 s timing assert in `test-archive-tar.R`, 10.9 s under load; see the gotcha), 4 skip (no fst, no sas7bdat fixture, NHEFS unset, one more textbook skip), `LINT OK (95 files)` |
+| 2026-11-09 | P1d UI sub-project 1 (Design + SAP panels) done (branch `p1d-ui-sap`, Tasks 1-9): the Design panel (`app/R/ui/mod_design.R`: PICO, run rules, decision table, shadow summary and feed export; the Ask Jev card only outside air-gap mode) and the SAP panel (`mod_sap.R`: analyses with the typed spec form, feasibility assess and decide, families and rules, the lock checklist, the typed-word lock, SAP_v1.docx and the feasibility report), wired into `app/app.R` after Data; the empty Profile tab is gone. Shared helpers `.sr_ui_*` in `app/R/ui/util.R`; the spec form is driven by `SR_FORM_KINDS` (`spec_form.R`). Tests run per file (lint, ui-util, ui-spec-form, mod-design, mod-sap, app-launch) all pass; the full suite was NOT run for this task (controller ruling). Browser walk on synthetic cardiac data (import, roles, PICO, rules, add/edit/add analyses, feasibility, DQ decisions, lock, SAP_v1.docx) found the stale-checklist issue below |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -33,9 +34,9 @@ design; this file holds *what has happened* and *what we learned*.
    guide `docs/router.md`).
    The freeze (P1d.3) is done (plan `docs/superpowers/plans/2026-11-08-p1d-freeze.md`, branch `p1d-freeze`,
    guide `docs/archive.md`).
-   **Next: the P1d UI, split 2026-11-08 into three sub-projects, each with its own spec, plan and branch:**
-   (1) Design + SAP panels (spec `docs/superpowers/specs/2026-11-08-p1d-ui-design-sap-design.md`, branch
-   `p1d-ui-sap`); (2) Analyses (run, long jobs, post-lock analyses, results); (3) Write + Archive + Settings.
+   **P1d UI sub-project 1 (Design + SAP) is done 2026-11-09 (branch `p1d-ui-sap`). Next: sub-projects (2) and (3), each with its own spec, plan and branch:**
+   (2) Analyses (run, long jobs, post-lock analyses, results); (3) Write + Archive + Settings.
+   Together they own the payload preview, the consent dialog and the freeze, export and import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
    Together they own the router panel, the payload preview, the consent dialog and the freeze, export and
    import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
      - The router has no UI yet; only Jev is registered (the `local` and `clm` ids are reserved for P3), and
@@ -236,6 +237,35 @@ design; this file holds *what has happened* and *what we learned*.
 - **Replay loses the names of `libsnap$pkgs`:** after an event replay the stored snapshot's `pkgs` is a list, not a named character vector (the `.sr_libsnap_json` quirk). The baseline gate therefore compares hashes only and never recomputes one from a stored snapshot; `.sr_libsnap_items` normalises for diffs.
 - **Old manifests have an unnamed `libsnap$pkgs`:** a freeze written before the names fix cannot be compared package by package; `sr_freeze_diff` then compares R and the snapshot date and reports one `packages` row (`unknown`) when the hashes differ.
 - **No absolute-time asserts:** a 5 s bound on `.sr_tar_check` of 50000 entries flaked under load (10.9 s). `.sr_tar_check` and `.sr_archive_safe_path` are now vectorised and the test checks scaling (time(40000) / max(time(10000), 0.05) < 8), which load does not break; write performance tests that way.
+
+
+### P1d UI (Design + SAP) gotchas and rulings
+- **Helpers.** `.sr_ui_*` (`app/R/ui/util.R`) hold the shared pieces: `.sr_ui_try`, `.sr_ui_actor` (the busy-guarded
+  `act`), the DT wrapper, badges and the export lister. `.sr_data_try` stays as a wrapper of `.sr_ui_try`.
+- **New route field.** Add its kind to `SR_FORM_KINDS` (`app/R/ui/spec_form.R`); the SAP spec form is built from it.
+- **Mode.** The air-gap / cloud mode is read once at module start, so a mode change needs a new session. In
+  air-gap mode there is no Ask Jev card.
+- **Liveness.** Panels never cache project state; `project` is the reactiveVal and every panel re-reads it.
+  Shiny keeps a modal's input values after the modal closes and resends only CHANGED values, so a re-opened
+  modal can carry the last session's values. Rule: every modal field is reset or re-set on open from the row
+  being edited; checked in the walk (edit a1, edit a2, then Add showed clean defaults).
+  Derived views use `.sr_sap_flag` (invalidates only when the derived value changes), never a bare renderUI on
+  `project()`; do not let DT selections reset on a project change.
+- **Test mocks.** In sourced app code `testthat::local_mocked_bindings(.env = globalenv())` errors; use the
+  globalenv assign-and-restore helper `.ms_mock`.
+- **Retry after a failed SAP document.** Core `sr_sap_docx` refuses a retry when `SAP_v1.docx` exists on disk
+  without a `doc.exported` event; there is no UI recovery (delete the file by hand).
+- **Environmental warning.** "shiny built under R 4.5.3" in the test output is environmental, not a defect.
+- **Layout.** Data, Design and SAP are NOT in `fillable` (fillable squashed and overlapped the Design cards);
+  the placeholder panels and Project stay fillable.
+- **Open: stale lock checklist.** In the walk, after DQ runs and decisions made in the Data tab, the SAP lock
+  checklist kept showing "no DQ run recorded for this table" (2 blocks) while the project on disk had no block
+  (`sr_sap_check` clean). Reopening the project refreshed it to 0 blocks. It fails safe (blocks, never
+  allows). Cause not found; look at what the Data module writes back to `project()` after a DQ action.
+- **Observed, not changed.** A failed Project "Create new" (directory not empty) closes the open project and
+  hides Data / Design / SAP; "Open existing" recovers. The Lock dialog's Lock button was enabled before the
+  word was typed (the core still checks the word). Accepting a leakage `drop_var` DQ decision adds a recipe
+  step, which the checklist shows as a warn until applied.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

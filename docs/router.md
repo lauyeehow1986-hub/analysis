@@ -9,8 +9,8 @@ to the SAP lock and to the manuscript. The analysis layer the router feeds is in
 StatRouter is a research and governance tool, not for clinical or diagnostic use. Every output needs
 review by a qualified statistician.
 
-All calls in this guide are headless. The router panel, the payload preview dialog and the consent dialog
-belong to the P1d UI plan; the calls they will use (`sr_router_table`, `sr_router_preview`,
+All calls in this guide are headless. The Design panel (`app/R/ui/mod_design.R`, P1d UI sub-project 1) drives
+the router; the payload preview dialog and the consent dialog follow in a later UI sub-project. The calls they use (`sr_router_table`, `sr_router_preview`,
 `sr_router_consent`, `sr_router_jev_ack`) are described here.
 
 ## 1. Principles
@@ -366,7 +366,7 @@ and then enables a model per node. Until then no model output is applied.
 
 ## 12. Known limitations
 
-- **No UI yet.** The router panel, the payload preview dialog and the consent dialog are in the P1d UI plan.
+- **Partial UI.** The Design panel covers PICO, run rules, the decision table and the shadow feed. The payload preview dialog and the consent dialog are still to come (later P1d UI sub-projects).
 - **Only Jev is registered.** The escalation order lists `local` and `clm`, but they are skipped until P3.
 - **The abstain thresholds are placeholders** (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`).
 - **Free text leaves the machine as typed.** PICO fields and column labels are sent as written; masking

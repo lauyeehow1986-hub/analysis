@@ -36,4 +36,8 @@ test_that("tools/run_app.R serves the StatRouter shell", {
   expect_match(body, "Reviewer", fixed = TRUE)
   expect_match(body, "no network", fixed = TRUE)
   expect_match(body, "Coming in P1b-P1d", fixed = TRUE)
+  # Design and SAP are real tabs after Data; Profile is gone (its content lives in Data).
+  expect_match(body, 'data-value="Design"', fixed = TRUE)
+  expect_match(body, 'data-value="SAP"', fixed = TRUE)
+  expect_false(grepl('data-value="Profile"', body, fixed = TRUE))
 })

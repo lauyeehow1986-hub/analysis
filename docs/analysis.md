@@ -560,7 +560,7 @@ The phase that owns each item is in brackets.
 - The Riley (pmsampsize) criteria for prediction routes [P6]. No prediction route exists yet; the
   engine marks a route it does not know as `not_applicable`.
 - Clustered RMST. The route refuses it, so it has no feasibility cell.
-- The SAP_v1.docx document and the lock UI [P1d]. P1c owns the `sap.*` events, the lock and its
+- The SAP_v1.docx document and the lock UI: done in the SAP panel (`app/R/ui/mod_sap.R`, P1d UI sub-project 1). P1c owns the `sap.*` events, the lock and its
   refusals, because every run needs them.
 - SAP amendment after the lock and data versioning [P2]. In P1c a run on data that changed after the
   lock is refused.
