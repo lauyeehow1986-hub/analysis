@@ -12,8 +12,8 @@
 # drive reruns from its cache. No event holds an absolute path.
 #
 # State: state$runs[[analysis]] = list(analysis, key, extract_sha, ok, cached, error, elapsed,
-#        lib_changed, ok_key); run.completed replaces it, and ok_key is the key of the latest ok run
-#        (kept across a later failed run), the result sr_result() shows.
+#        lib_changed, ok_key, ok_extract_sha); run.completed replaces it. ok_key and ok_extract_sha are the
+#        key and the extract of the latest ok run (kept across a later failed run); sr_result() shows that run.
 
 # ---- the spec as the state holds it (ruling R14) ----------------------------------------------------
 
@@ -52,7 +52,10 @@ sr_reducer_register("run.completed", function(state, event) {
   runs[[id]] <- list(analysis = id, key = key, extract_sha = .sr_sap_chr1(p$extract_sha), ok = ok,
                      cached = isTRUE(p$cached), error = .sr_sap_chr1(p$error), elapsed = elapsed,
                      lib_changed = isTRUE(p$lib_changed),
-                     ok_key = if (ok) key else (runs[[id]]$ok_key %||% NA_character_))
+                     ok_key = if (ok) key else (runs[[id]]$ok_key %||% NA_character_),
+                     ok_extract_sha = if (ok) .sr_sap_chr1(p$extract_sha) else (runs[[id]]$ok_extract_sha %||% NA_character_),
+                     ok_lib_hash = if (ok) .sr_sap_chr1(p$lib_hash) else (runs[[id]]$ok_lib_hash %||% NA_character_),
+                     ok_hw_fp = if (ok) .sr_sap_chr1(p$hw_fp) else (runs[[id]]$ok_hw_fp %||% NA_character_))
   state$runs <- runs
   state
 })
@@ -213,7 +216,9 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   .sr_emit_check(body, "analysis")
   ex <- sr_extract(project, a$table, cols)
   route_key <- .sr_route_key(a$route, a$route_version)
-  key <- sr_content_hash(ex$sha, list(route = route_key, spec = spec), spec$seed)
+  lib_hash <- sr_libsnap_hash()
+  hw_fp <- sr_hw_fingerprint()
+  key <- sr_content_hash(ex$sha, list(route = route_key, spec = spec), spec$seed, lib_hash, hw_fp)
 
   res <- sr_exec_cached(project, key, paste(.sr_run_prologue(ex), body, sep = "\n"),
                         inputs = list(sr_project_dir = project$paths$dir), seed = spec$seed,
@@ -234,7 +239,8 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   }
   sr_project_append(project, "run.completed", list(
     analysis = analysis_id, key = key, extract_sha = ex$sha, ok = ok, cached = isTRUE(res$cached),
-    error = err, elapsed = res$elapsed, lib_changed = !identical(sr_libsnap_hash(), lock$libsnap_hash)))
+    error = err, elapsed = res$elapsed, lib_changed = !identical(lib_hash, lock$libsnap_hash),
+    lib_hash = lib_hash, hw_fp = hw_fp))
 }
 
 #' The presented result (checked against the result contract) of the latest ok run of an analysis,

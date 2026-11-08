@@ -13,6 +13,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-10-10 | P1b data layer done (branch `p1b-data`, Tasks 1-23): DuckDB ingest to a Parquet store (chunked, resumable, external mode, pre-flight), dictionaries (CSV, REDCap CSV / ODM), join and cohort builder, profiling, the DQ check library (6 domains), Data Action Suggestor, recipe, readiness panel and the Data tab; `docs/data.md` user guide; `tools/scale_test.R`. Full suite 6558 pass, 0 fail, 2 skip (no fst package, no sas7bdat fixture), `LINT OK (41 files)`. Scale smoke 2M x 20 on the laptop and with `--profile=locked16`: PASS (peak RSS 1.07 GB / 0.83 GB) |
 | 2026-10-18 | P1c analysis done (branch `p1c-analysis`, Tasks 1-16): emitted-code quoting and the result contract, SAP drafting, families, rules and the lock (moved from P1d), the hashed extract and cached run engine, routes table1 / lm / logistic / modpois / cox / rmst with g-computation marginal effects, MI (mice + Rubin, von Hippel auto-m), the bootstrap layer (percentile / BCa / normal, cluster, MI x boot), effect-size diagnostics with figures, sensitivity nodes, deviations and multiplicity; `docs/analysis.md`, `docs/validation.md`. Textbook reproductions (lung, GBSG, nhanes; NHEFS 3.52 kg when `SR_NHEFS_CSV` is set) and the CI-coverage simulation (6 cells, all pass). Final review fixed: `sr_sap_add` compiles every spec and checks binary event coding before the lock. Full suite 9967 pass, 0 fail, 3 skip (no fst, no sas7bdat fixture, NHEFS unset), `LINT OK (60 files)` |
 | 2026-10-18 | P1c.1 study feasibility verdict done (branch `p1c1-feasibility`, Tasks 1-6): the outcome-blind engine (`app/R/sap/feas_engine.R`: SEs, design effect, h, MDE, tiers, blockers, warnings), the `feasibility.assessed` / `feasibility.decided` events, assess / decide / report / fragment API (`app/R/sap/feasibility.R`), the lock gate (`sr_sap_check` feasibility rows, the verdict frozen into `sr_sap_hash`, `sr_sap_remove` and `sr_run` honour a stop). Validation: the predicted null-effect SE is within 10% of the empirical SD in 11/11 cells at 1000 reps (with and without clustering), and on NHEFS the marginal-value prediction is conservative (predicted MD SE 0.472 vs actual 0.463); `tools/feas_sim.R`, `docs/validation.md` section 3. `docs/analysis.md` section 4. Full suite 10691 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), `LINT OK (63 files)` |
+| 2026-11-07 | P1d.1 writer done (branch `p1d-writer`, Tasks 1-12): the placeholder registry and document model (`app/R/writer/placeholders.R`, `fragments.R`, `tables.R`, `figures.R`, `model.R`), small-cell suppression (`sdc_out.R`, one `suppress_k` per document), the claim guard G1-G9 (`guard.R`), the STROBE checklist (`checklist.R`), references (`cite.R`), the Word renderer with journal presets (`docx.R`), the analysis script and lockfile (`script.R`), the SAP and feasibility Word files (`sapdoc.R`), and `sr_export` (out/exports/export-NNN, with a `doc.exported` event per file). Guide `docs/writer.md`; `docs/analysis.md` section 13. Lint `LINT OK (76 files)`. Full suite: run by the controller at the P1d.1 review; its counts are not recorded here |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -24,7 +25,18 @@ design; this file holds *what has happened* and *what we learned*.
 6. ~~P1c.1 study feasibility verdict~~ done 2026-10-18 (branch `p1c1-feasibility`; plan
    `docs/superpowers/plans/2026-10-18-p1c1-feasibility.md`); review and merge the branch. The SAP lock
    requires its verdict.
-7. **Next: write the P1d plan** (router + writer + freeze + UI), then the **P1e scale** plan
+7. **P1d is split into four plans: writer, router, freeze, UI.** The writer (P1d.1) is done (plan
+   `docs/superpowers/plans/2026-10-18-p1d-writer.md`, branch `p1d-writer`, guide `docs/writer.md`).
+   **Next: the P1d router plan** (PICO and study design, the System One router), then the freeze and UI
+   plans. Writer open items (carried into the router, freeze and P2 work):
+     - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
+       the journal's author guide. The jama preset narrows the side margins for its 178 mm figures.
+     - The bibliographic data of the method references copied from the plan (Task 5) must be re-checked
+       against the publisher records before release.
+     - "Refresh numbers" in an edited docx is P2. The writer stores only the first-use bookmarks (`sr_E<n>`)
+       and `placeholders.json`; later uses of a token are not refreshed (R30).
+     - STROBE items 1-5 (the author items) stay amber until the router records PICO and the study design.
+   Then the **P1e scale** plan
    (big-data engines: SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox), and execute
    them in that order.
    - P1d also owns: the SAP_v1.docx and lock UI, the feasibility panel and report docx, the Methods
