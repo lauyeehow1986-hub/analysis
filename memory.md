@@ -35,7 +35,6 @@ design; this file holds *what has happened* and *what we learned*.
    guide `docs/archive.md`).
    **Next: the P1d UI plan** (it owns the router panel, the payload preview, the consent dialog and the freeze,
    export and import buttons). Writer and router open items (carried into the UI, P2 and P3 work):
-   consent dialog). Writer and router open items (carried into the freeze, UI, P2 and P3 work):
      - The router has no UI yet; only Jev is registered (the `local` and `clm` ids are reserved for P3), and
        the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
      - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
@@ -228,11 +227,12 @@ design; this file holds *what has happened* and *what we learned*.
   first; `sr_ph_resolve(.sr_wr_m_design(p, reg), reg)` fails with "unknown placeholder {{L1}}".
 - **After a freeze, `sr_run` refuses a changed library** (`sr.cran_snapshot` changes the hash): tests that change the library after `sr_freeze` must `sr_rebaseline` first.
 - **A `.srproj` is the project at the freeze:** `events.jsonl` and `audit.log` are cut after `freeze.created`, so later runs and exports are not in it.
-- **R's internal tar** is the only archiver on the locked PC (`utils::zip` needs an external program); members are limited to 8 GiB and names to 255 bytes. `utils::tar` writes the local `uname` into each header; `.sr_srproj_scrub_owner` blanks it and rewrites the checksums, so the account name never travels.
+- **R's internal tar** is the only archiver on the locked PC (`utils::zip` needs an external program); members are limited to 8 GiB and names to 255 bytes. `utils::tar` writes the local `uname` into each header; `.sr_srproj_scrub_owner` blanks it and rewrites the checksums. The history is not scrubbed: the `actor` of every event and audit entry is `sr_opt("user")`, which falls back to the OS user name, so set `sr.user` / `SR_USER` to a role or pseudonym before recording a project that will be shared; `sr_srproj_export` warns when the exported history holds the OS user name (tests set `sr.user = "sr-test"` in `helper-load.R`).
+- **`utils:::untar2` reads names differently from GNU tar**: a GNU `L` long name is the whole padded block up to its last non-zero byte (not the declared size), name and prefix fields run to their last non-zero byte, and a long name passes over a folder entry to the next file. The scanner reads names exactly that way and refuses any case where the readings could differ, and import extracts only the scanner-approved files (`untar(files = ...)`). Parity tests must call `utils::untar(..., tar = "internal")`: the default may be the external `tar.exe`, which agrees with GNU, not with untar2. untar2 also blanks a whole `C:...` path (a bad drive regex), so an escape test uses an absolute path without a drive letter.
 - **Tar scanner rules (`.sr_tar_entries` / `.sr_tar_check`):** only regular files and folders pass; links, devices and pax `x` / `g` headers are refused before extraction; names are checked for traversal, Windows device names, trailing dots, case-insensitive duplicates and 255 bytes; GNU `L` long names are followed, and a non-ustar header with a prefix field is ambiguous and refused.
 - **Replay loses the names of `libsnap$pkgs`:** after an event replay the stored snapshot's `pkgs` is a list, not a named character vector (the `.sr_libsnap_json` quirk). The baseline gate therefore compares hashes only and never recomputes one from a stored snapshot; `.sr_libsnap_items` normalises for diffs.
 - **Old manifests have an unnamed `libsnap$pkgs`:** a freeze written before the names fix cannot be compared package by package; `sr_freeze_diff` then compares R and the snapshot date and reports one `packages` row (`unknown`) when the hashes differ.
-- **A timing assert can fail under load:** the 5 s bound on `.sr_tar_check` of 50000 entries in `test-archive-tar.R` is flaky on a busy machine; re-run it alone before suspecting a defect.
+- **No absolute-time asserts:** a 5 s bound on `.sr_tar_check` of 50000 entries flaked under load (10.9 s). `.sr_tar_check` and `.sr_archive_safe_path` are now vectorised and the test checks scaling (time(40000) / max(time(10000), 0.05) < 8), which load does not break; write performance tests that way.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

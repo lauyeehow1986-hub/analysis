@@ -41,11 +41,12 @@ The first freeze is `submission-v1`; later ones are `revision-r1`, `revision-r2`
 
 1. the project is read-only;
 2. the label is invalid or already used;
-3. the SAP is not locked;
-4. a table's full source SHA-256 is missing (run `sr_source_hash()`);
-5. a primary analysis has no successful run;
-6. a stored result or its extract is missing for an ok run;
-7. the project does not verify (events/audit mismatch, or an event without an audit entry).
+3. `events.jsonl` ends in an unterminated line (a torn write; the next recorded event repairs it);
+4. the SAP is not locked;
+5. a table's full source SHA-256 is missing (run `sr_source_hash()`);
+6. a primary analysis has no successful run;
+7. a stored result or its extract is missing for an ok run;
+8. the project does not verify (events/audit mismatch, or an event without an audit entry).
 
 ## 4. The library gate and re-baseline
 
@@ -71,7 +72,11 @@ is the latest freeze. The archive is the project as it stood at the freeze: `pro
 and `audit.log` cut after the `freeze.created` entry (later runs and exports are not in it), the folders of
 this and earlier freezes, and the files the manifest lists. `srproj.json` is the index (SHA-256 and size of
 every member, plus what was left out). A `srproj.exported` event is appended last; it records the file
-name, not the folder. Owner and group names are blanked in the tar headers so no account name travels.
+name, not the folder. Owner and group names are blanked in the tar headers. The history itself is not
+scrubbed: every `events.jsonl` line and `audit.log` entry has an `actor` field, which is the OS user name
+unless the `sr.user` option (env `SR_USER`) is set to a role or pseudonym before the project is recorded.
+The export warns when the exported history holds the OS user name. Before staging, every member the freeze
+manifest lists must still hash as the manifest says (a file changed during the export is refused).
 
 **Data modes.**
 
@@ -93,9 +98,11 @@ absolute path the events hold, so check it before sharing an archive.
 `sr_srproj_import(archive, dir, verify_data = TRUE)` imports at any path, all or nothing: on any failure the
 partial folder, and the project folder once renamed, are removed. `dir` must be new or empty. Steps:
 
-1. the tar headers are scanned before anything is extracted;
+1. the tar headers are scanned before anything is extracted, reading each name exactly as R's internal
+   extractor will (a GNU long name, the name and the prefix field); any way they could disagree is refused;
 2. the archive is hashed before the scan, after it and after extraction, and all must match;
-3. members are extracted to `<dir>.partial` and their sizes checked against the headers;
+3. only the regular files the scan approved are extracted, to `<dir>.partial`, and their sizes checked
+   against the headers;
 4. the index is read (format known, version not newer than this build) and every member is checked against
    it: SHA-256, none extra, none missing;
 5. the folder is renamed into place and opened: it must open writable, its history must verify and end
@@ -110,8 +117,11 @@ A lean import reports the missing data under `verify$absent`; those are not prob
 total (`sr.srproj_max_total`) and 1e6 members. Refused: any member that is not a regular file or folder
 (symlinks, hard links, devices, pax `x` and `g` headers), an absolute or `..` path, a backslash, colon,
 control character, Windows device name or trailing dot or space, case-insensitive duplicates, members under
-a `.lock` folder or ending in `.partial` or `.tmp`, a member already at `out/freezes/<label>/srproj.json`,
-a bad header checksum and a truncated tar.
+a `.lock` folder or ending in `.partial` or `.tmp` (files and folders), a member already at
+`out/freezes/<label>/srproj.json`, a GNU long name with bytes past its declared size, an embedded NUL, or
+followed by anything but a regular file, bytes after the terminating NUL of a name or prefix field, a size
+field with a non-octal character, a bad header checksum and a truncated tar. If the `.partial` folder
+cannot be removed after a failure, a warning names it.
 
 ## 7. Data versioning and diffs
 
