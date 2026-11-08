@@ -189,6 +189,8 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   if (!identical(sr_store_hash(sr_store_manifest(project, a$table)), locked_hash)) {
     stop("table '", a$table, "' changed after the SAP lock", call. = FALSE)
   }
+  lib_hash <- sr_libsnap_hash()
+  .sr_baseline_check(project, lib_hash)
 
   route <- sr_route_get(a$route, a$route_version)
   spec <- .sr_spec_from_state(a$spec)
@@ -216,7 +218,6 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   .sr_emit_check(body, "analysis")
   ex <- sr_extract(project, a$table, cols)
   route_key <- .sr_route_key(a$route, a$route_version)
-  lib_hash <- sr_libsnap_hash()
   hw_fp <- sr_hw_fingerprint()
   key <- sr_content_hash(ex$sha, list(route = route_key, spec = spec), spec$seed, lib_hash, hw_fp)
 

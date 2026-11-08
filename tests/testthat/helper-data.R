@@ -188,3 +188,82 @@ local({
   }
   p
 }
+
+# One 512-byte ustar header (raw) for hand-built tar fixtures; Task 5 reuses it. `magic` is the 6-byte
+# magic ("ustar\0" by default; pass "ustar " for old GNU), `size_raw` overrides the 12-byte size field.
+.fx_tar_header <- function(name, type = "0", size = 0, linkname = "", prefix = "",
+                           magic = "ustar", version = "00", size_raw = NULL) {
+  h <- raw(512)
+  oct <- function(x, w) {
+    s <- as.character(as.octmode(as.integer(x)))
+    paste0(strrep("0", w - nchar(s)), s)
+  }
+  put <- function(h, off, s, len) {
+    b <- charToRaw(s)
+    stopifnot(length(b) <= len)
+    h[off + seq_along(b)] <- b
+    h
+  }
+  h <- put(h, 0, name, 100)
+  h <- put(h, 100, "0000644", 7)
+  h <- put(h, 108, "0000000", 7)
+  h <- put(h, 116, "0000000", 7)
+  h <- put(h, 124, oct(size, 11), 11)
+  h <- put(h, 136, "00000000000", 11)
+  h <- put(h, 156, type, 1)
+  h <- put(h, 157, linkname, 100)
+  h <- put(h, 257, magic, 6)
+  h <- put(h, 263, version, 2)
+  h <- put(h, 345, prefix, 155)
+  if (!is.null(size_raw)) h[125:136] <- size_raw
+  h[149:156] <- as.raw(32L)
+  ck <- sum(as.integer(h))
+  h <- put(h, 148, oct(ck, 6), 6)
+  h[148 + 7] <- as.raw(0L)
+  h[148 + 8] <- as.raw(32L)
+  h
+}
+
+# ---- .srproj fixtures (archive import tests) ----
+
+# Freeze .fx_writer_project() and export it to a fresh temp folder: list(p, path).
+.fx_srproj <- function(data = "full", env = parent.frame()) {
+  p <- sr_freeze(.fx_writer_project(env))
+  path <- file.path(withr::local_tempdir(.local_envir = env), "study.srproj")
+  p <- sr_srproj_export(p, path, data = data)
+  list(p = p, path = path)
+}
+
+# Untar `archive` under `root`, optionally append a byte to member `edit` (events.jsonl: change the
+# first line's "ts" value, staying valid JSON), re-hash every member into srproj.json, merge `index`
+# fields, and re-tar to a new .srproj under `root`.
+.fx_srproj_reindexed <- function(archive, root, edit = NULL, index = NULL, fn = NULL) {
+  x <- tempfile("reidx", tmpdir = root)
+  dir.create(x)
+  utils::untar(archive, exdir = x, tar = "internal")
+  if (!is.null(edit)) {
+    f <- file.path(x, edit)
+    if (identical(edit, "events.jsonl")) {
+      ln <- readLines(f, warn = FALSE)
+      ln[1L] <- sub("\"ts\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\"ts\":\"2000-01-01T00:00:00Z\"", ln[1L])
+      writeBin(charToRaw(paste0(paste(ln, collapse = "\n"), "\n")), f)
+    } else {
+      cat("x", file = f, append = TRUE)
+    }
+  }
+  if (is.function(fn)) fn(x)
+  ip <- file.path(x, "srproj.json")
+  idx <- .sr_read_json_file(ip)
+  # every member on disk is (re)listed, so members added by `fn` are in the index too
+  mem <- setdiff(list.files(x, recursive = TRUE, all.files = TRUE), "srproj.json")
+  idx$files <- lapply(mem, function(p) {
+    ff <- file.path(x, p)
+    list(path = p, sha256 = sr_sha256_file(ff), bytes = as.numeric(file.size(ff)))
+  })
+  if (is.function(index)) idx <- index(idx) else for (k in names(index)) idx[[k]] <- index[[k]]
+  .sr_write_json_file(ip, idx)
+  out <- tempfile("reidx", tmpdir = root, fileext = ".srproj")
+  withr::with_dir(x, utils::tar(out, list.files(".", recursive = TRUE, all.files = TRUE),
+                                tar = "internal", compression = "gzip"))
+  out
+}
