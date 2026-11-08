@@ -225,3 +225,122 @@ test_that("read-only with no row selected gives the read-only refusal, not 'Sele
     expect_match(.md_html(output$dec_reason_ui), "disabled")
   })
 })
+
+# ---- Ask Jev -------------------------------------------------------------------------------------
+
+# Ack and consent through the dialogs, then fire the preview.
+.md_jev_ready <- function(session) {
+  session$setInputs(jev_ack = 1, jev_ack_reason = "DPA and IT sign-off documented, ref SYN-1", jev_ack_ok = 1)
+  session$setInputs(jev_consent = 1, jev_consent_ok = 1)
+  session$setInputs(jev_ask = 1)
+}
+
+test_that("air-gap: no Jev card, transport never called", {
+  withr::local_options(sr.mode = "airgap", sr.jev_key = "sk-test-SENTINEL-0000",
+                       sr.jev_transport = function(...) stop("transport called in air-gap"))
+  .ui_spy_notify()
+  spy <- local_fetch_spy("https://api.typesafe.ai")
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    session$setInputs(pico_population = "adults", pico_outcome = "y", pico_aim = "explain-causal", pico_save = 1)
+    session$setInputs(run_rules = 1)
+    session$setInputs(jev_ask = 1)
+    session$setInputs(jev_pick = "abc", jev_send = 1)
+    expect_error(output$jev)
+  })
+  expect_length(spy$calls, 0L)
+})
+
+test_that("only ticked SHAs are sent", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    .md_jev_ready(session)
+    pl <- .sr_design_payloads(rv(), FALSE)
+    expect_gte(length(pl), 2L)
+    expect_match(.md_html(output$jev_payloads), pl[[1]]$sha, fixed = TRUE)
+    session$setInputs(jev_pick = pl[[1]]$sha, jev_send = 1)
+    expect_length(env$.calls, 1L)
+    expect_identical(env$.calls[[1]]$body, pl[[1]]$body)
+  })
+})
+
+test_that("masking changes the SHAs and the send uses the masked body", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    session$setInputs(pico_population = "adults", pico_outcome = "y", pico_aim = "explain-causal", pico_save = 1)
+    session$setInputs(run_rules = 1)
+    .md_jev_ready(session)
+    plain <- .sr_design_payloads(rv(), FALSE)
+    session$setInputs(jev_mask = TRUE)
+    masked <- .sr_design_payloads(rv(), TRUE)
+    expect_gte(length(masked), 1L)
+    plain_shas <- vapply(plain, function(x) x$sha, "")
+    new <- Filter(function(x) !x$sha %in% plain_shas, masked)
+    expect_gte(length(new), 1L)
+    session$setInputs(jev_pick = new[[1]]$sha, jev_send = 1)
+    expect_length(env$.calls, 1L)
+    expect_identical(env$.calls[[1]]$body, new[[1]]$body)
+  })
+})
+
+test_that("send with nothing ticked is refused", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    .md_jev_ready(session)
+    session$setInputs(jev_send = 1)
+    expect_equal(output$jev_err, "tick at least one payload to send")
+    expect_length(env$.calls, 0L)
+  })
+})
+
+test_that("gates show each closed reason, never the key", {
+  env <- environment()
+  .fx_connected(env)
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    expect_match(.md_html(output$jev_gates), "no DPA / IT acknowledgement for this project", fixed = TRUE)
+    session$setInputs(jev_ack = 1, jev_ack_reason = "", jev_ack_ok = 1)
+    expect_match(output$jev_err, "needs a reason")
+    session$setInputs(jev_ack_reason = "DPA and IT sign-off documented", jev_ack_ok = 2)
+    expect_equal(output$jev_err, "")
+    expect_match(.md_html(output$jev_gates), "no consent in this session", fixed = TRUE)
+    expect_match(.md_html(output$jev_gates), "key set", fixed = TRUE)
+    expect_false(grepl("SENTINEL", .md_html(output$jev_gates)))
+    session$setInputs(jev_consent = 1, jev_consent_ok = 1)
+    expect_false(grepl("no consent", .md_html(output$jev_gates)))
+    session$setInputs(jev_withdraw = 1)
+    expect_match(.md_html(output$jev_gates), "no consent in this session", fixed = TRUE)
+  })
+})
+
+test_that("Jev controls are refused on a locked or read-only project", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  p <- .fx_ui_project()
+  p$readonly <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    n0 <- .md_n_events(rv())
+    session$setInputs(jev_ack = 1, jev_ack_reason = "DPA and IT sign-off documented", jev_ack_ok = 1)
+    session$setInputs(jev_consent = 1, jev_consent_ok = 1)
+    session$setInputs(jev_pick = "x", jev_send = 1)
+    expect_equal(.md_n_events(rv()), n0)
+    expect_length(env$.calls, 0L)
+    expect_match(.md_html(output$jev), "disabled", fixed = TRUE)
+  })
+})

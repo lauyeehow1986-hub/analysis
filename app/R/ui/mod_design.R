@@ -118,8 +118,168 @@ mod_design_ui <- function(id) {
 
 # ---- server ----------------------------------------------------------------------------------------
 
-# The Ask Jev card server. A stub here; Task 5 fills it in.
-.sr_design_jev_server <- function(input, output, session, project, act) invisible(NULL)
+# ---- Ask Jev (connected mode only) -----------------------------------------------------------------
+
+# The four gates of .sr_jev_available, all checked (not only the first failing one), as
+# list(mode, key, ack, consent), each list(ok, text). The key itself is never returned.
+.sr_design_gates <- function(p) {
+  gate <- function(ok, label, closed) list(ok = ok, text = if (ok) paste0(label, ": ok") else closed)
+  key <- sr_opt("jev_key", "")
+  key_ok <- is.character(key) && length(key) == 1L && !is.na(key) && nzchar(key)
+  list(
+    mode = gate(identical(sr_mode(), "connected"), "connected mode", "air-gap mode"),
+    key = gate(key_ok, "key set", "no Jev key (set SR_JEV_KEY)"),
+    ack = gate(!is.null(p) && !is.null(p$state$router$jev_ack), "DPA / IT acknowledged",
+               "no DPA / IT acknowledgement for this project"),
+    consent = gate(!is.null(p) && isTRUE(p$state$router$consent[[sr_router_session()]]),
+                   "consent given in this session", "no consent in this session"))
+}
+
+# The pending payloads: one list(key, sha, body) per pending / override_required row of the decision table
+# whose preview is non-NULL under `mask`.
+.sr_design_payloads <- function(p, mask) {
+  if (is.null(p)) return(list())
+  tb <- sr_router_table(p)
+  tb <- tb[tb$status %in% c("pending", "override_required"), , drop = FALSE]
+  out <- list()
+  for (i in seq_len(nrow(tb))) {
+    pv <- sr_router_preview(p, tb$node[i], tb$table[i], tb$column[i], mask = mask)
+    if (!is.null(pv)) out[[length(out) + 1L]] <- list(key = pv$key, sha = pv$sha, body = pv$body)
+  }
+  out
+}
+
+.sr_design_jev_server <- function(input, output, session, project, act) {
+  ns <- session$ns
+  editable <- shiny::reactive(.sr_ui_editable(project()))
+  jerr <- shiny::reactiveVal("")
+  asked <- shiny::reactiveVal(FALSE)
+  off <- function(x) if (!editable()) shiny::tagAppendAttributes(x, disabled = NA) else x
+  btn <- function(id, label, cls = "btn-outline-primary") {
+    off(shiny::actionButton(ns(id), label, class = cls))
+  }
+
+  # The card. It re-renders only when editability changes, so the mask box and the ticks survive.
+  output$jev <- shiny::renderUI({
+    shiny::tagList(
+      shiny::p(class = "small text-muted",
+               "Jev is an optional cloud model. It only ever sees the payloads you tick below, exactly as shown,",
+               "and its answer is a shadow prediction: it never decides anything."),
+      shiny::uiOutput(ns("jev_gates")),
+      shiny::div(class = "d-flex gap-2 mb-2",
+                 btn("jev_ack", "Acknowledge DPA / IT sign-off"), btn("jev_consent", "Consent this session"),
+                 btn("jev_withdraw", "Withdraw consent")),
+      shiny::div(class = "d-flex gap-2 align-items-center mb-2",
+                 btn("jev_ask", "Preview the payloads", "btn-primary"),
+                 off(.sr_design_on_control(shiny::checkboxInput(ns("jev_mask"), "Mask names and values", FALSE),
+                                           "input"))),
+      shiny::uiOutput(ns("jev_payloads")),
+      off(.sr_design_on_control(
+        shiny::checkboxGroupInput(ns("jev_pick"), "Send these payloads to Jev", choices = character()),
+        "input")),
+      btn("jev_send", "Send the ticked payloads", "btn-primary"),
+      shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("jev_err"))))
+  })
+  output$jev_err <- shiny::renderText(jerr())
+
+  output$jev_gates <- shiny::renderUI({
+    g <- .sr_design_gates(project())
+    shiny::tags$ul(class = "list-unstyled small mb-2", lapply(g, function(x) {
+      shiny::tags$li(shiny::span(class = if (x$ok) "text-success" else "text-danger",
+                                 paste0(if (x$ok) "[ok] " else "[closed] ", x$text)))
+    }))
+  })
+
+  payloads <- shiny::reactive({
+    if (!asked()) return(list())
+    .sr_design_payloads(project(), isTRUE(input$jev_mask))
+  })
+  shiny::observe({
+    pl <- payloads()
+    shas <- vapply(pl, function(x) x$sha, "")
+    keep <- intersect(shiny::isolate(input$jev_pick), shas)
+    lab <- vapply(pl, function(x) paste0(x$key, " (", substr(x$sha, 1L, 8L), ")"), "")
+    shiny::updateCheckboxGroupInput(session, "jev_pick", choices = stats::setNames(shas, lab), selected = keep)
+  })
+  output$jev_payloads <- shiny::renderUI({
+    pl <- payloads()
+    if (!length(pl)) {
+      return(shiny::p(class = "small text-muted",
+                      if (asked()) "Nothing is pending." else "Press Preview to see what would be sent."))
+    }
+    shiny::tagList(lapply(pl, function(x) {
+      body <- tryCatch(as.character(jsonlite::prettify(x$body)), error = function(e) x$body)
+      shiny::div(class = "mb-2",
+                 shiny::tags$strong(x$key), shiny::span(class = "small text-muted", paste0(" sha256 ", x$sha)),
+                 shiny::tags$pre(class = "small border p-2 mb-0", style = "max-height:14em;overflow:auto;", body))
+    }))
+  })
+
+  shiny::observeEvent(input$jev_ask, {
+    jerr("")
+    if (!editable()) {
+      jerr(.sr_ui_refusal(shiny::isolate(project())) %||% "the plan can no longer be edited")
+      return(invisible(NULL))
+    }
+    asked(TRUE)
+  })
+
+  # A core refusal is shown verbatim in jev_err.
+  guarded <- function(label, fn) {
+    jerr("")
+    act(label, function(p) {
+      tryCatch(fn(p), error = function(e) {
+        jerr(conditionMessage(e))
+        NULL
+      })
+    })
+  }
+
+  shiny::observeEvent(input$jev_ack, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Acknowledge the DPA / IT sign-off",
+      shiny::p("Record that the DPA / PDPA and the institutional IT sign-off for Jev are documented."),
+      shiny::textAreaInput(ns("jev_ack_reason"), "Reference (required)", rows = 2, width = "100%"),
+      footer = shiny::tagList(shiny::modalButton("Cancel"),
+                              shiny::actionButton(ns("jev_ack_ok"), "Acknowledge", class = "btn-primary")),
+      easyClose = TRUE))
+  })
+  shiny::observeEvent(input$jev_ack_ok, {
+    r <- input$jev_ack_reason
+    guarded("Acknowledge Jev", function(p) sr_router_jev_ack(p, if (is.null(r)) "" else r))
+    if (!nzchar(shiny::isolate(jerr()))) shiny::removeModal()
+  })
+  shiny::observeEvent(input$jev_consent, {
+    shiny::showModal(shiny::modalDialog(
+      title = "Consent for this session",
+      shiny::p("Allow payloads you tick to be sent to Jev (a cloud service) in this session. Consent ends with the session."),
+      footer = shiny::tagList(shiny::modalButton("Cancel"),
+                              shiny::actionButton(ns("jev_consent_ok"), "I consent", class = "btn-primary")),
+      easyClose = TRUE))
+  })
+  shiny::observeEvent(input$jev_consent_ok, {
+    guarded("Consent to Jev", function(p) sr_router_consent(p, TRUE))
+    shiny::removeModal()
+  })
+  shiny::observeEvent(input$jev_withdraw, {
+    guarded("Withdraw consent", function(p) sr_router_consent(p, FALSE))
+  })
+
+  shiny::observeEvent(input$jev_send, {
+    jerr("")
+    pick <- input$jev_pick
+    if (!editable()) {
+      jerr(.sr_ui_refusal(shiny::isolate(project())) %||% "the plan can no longer be edited")
+      return(invisible(NULL))
+    }
+    if (!length(pick)) {
+      jerr("tick at least one payload to send")
+      return(invisible(NULL))
+    }
+    withr::with_options(list(sr.router_mask = isTRUE(input$jev_mask)),
+      guarded("Ask Jev", function(p) sr_router_run(p, backends = "jev", approve = pick)))
+  })
+}
 
 mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
   shiny::moduleServer(id, function(input, output, session) {
@@ -289,7 +449,8 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       if (!is.null(path)) shadow_path(path)
     })
 
-    .sr_design_jev_server(input, output, session, project, act)
+    # Air-gap: no Jev observer, preview or transport code is ever created.
+    if (identical(sr_mode(), "connected")) .sr_design_jev_server(input, output, session, project, act)
     invisible(NULL)
   })
 }
