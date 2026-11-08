@@ -78,3 +78,34 @@ test_that("events after the freeze do not change its verification; a read-only p
   ro <- p; ro$readonly <- TRUE
   expect_error(sr_freeze(ro, "revision-r1"), "read-only")
 })
+
+test_that("only a primary analysis without an ok run blocks the freeze", {
+  p <- .fx_writer_project()
+  p$state$runs$a_mp$ok_key <- NA_character_            # a_mp is a pre-specified sensitivity analysis
+  expect_identical(p$state$analyses$a_mp$label, "sensitivity")
+  p <- sr_freeze(p)
+  m <- sr_freeze_manifest(p, "submission-v1")
+  expect_false("a_mp" %in% names(m$runs))
+  expect_true("a_lr" %in% names(m$runs))
+  p2 <- .fx_writer_project()
+  p2$state$runs$a_lr$ok_key <- NA_character_
+  expect_error(sr_freeze(p2), "primary analysis 'a_lr' has no successful run")
+})
+
+test_that("the gate refuses a missing extract and a project that does not verify", {
+  p <- .fx_writer_project()
+  sha <- p$state$runs$a_lr$ok_extract_sha
+  file.remove(file.path(p$paths$dir, "data", "extracts", paste0(sha, ".rds")))
+  expect_error(sr_freeze(p), "the extract of .* is missing")
+  p <- .fx_writer_project()
+  b <- .sr_read_bytes(p$paths$audit); b[length(b) - 5L] <- as.raw(bitwXor(as.integer(b[length(b) - 5L]), 1L))
+  writeBin(b, p$paths$audit)
+  expect_error(sr_freeze(p), "the project does not verify")
+  expect_false(dir.exists(file.path(p$paths$out, "freezes", "submission-v1")))
+})
+
+test_that("sr_freeze_verify and sr_freeze_manifest refuse a non-scalar label", {
+  p <- .fx_writer_project()
+  expect_error(sr_freeze_verify(p, c("a", "b")), "unknown freeze label")
+  expect_error(sr_freeze_manifest(p, NA_character_), "unknown freeze label")
+})

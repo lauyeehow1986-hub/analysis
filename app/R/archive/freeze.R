@@ -99,7 +99,9 @@ sr_freeze_manifest <- function(project, label) {
          " is missing; run sr_source_hash() first", call. = FALSE)
   }
   runs <- project$state$runs %||% list()
-  for (id in names(.sr_sap_analyses(project))) {
+  an <- .sr_sap_analyses(project)
+  prim <- names(an)[vapply(an, function(a) identical(a$label, "primary"), NA)]
+  for (id in prim) {
     if (is.na(.sr_freeze_chr1(runs[[id]]$ok_key))) {
       stop("primary analysis '", id, "' has no successful run", call. = FALSE)
     }
@@ -263,6 +265,9 @@ sr_freeze <- function(project, label = sr_freeze_next_label(project)) {
 #' With `data = FALSE` the data kinds are skipped, neither hashed nor reported.
 #' @return list(ok, problems, checked = files hashed, absent).
 sr_freeze_verify <- function(project, label, data = TRUE) {
+  if (!is.character(label) || length(label) != 1L || is.na(label)) {
+    stop("unknown freeze label '", paste(format(label), collapse = ","), "'", call. = FALSE)
+  }
   problems <- character()
   absent <- character()
   checked <- 0L
