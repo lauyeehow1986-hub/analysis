@@ -1,5 +1,8 @@
 # Tests for router/state.R: the metadata-only state, masking, the budget and the payload preview.
 
+# These tests register toy nodes: set the real P1 nodes aside for this file.
+.fx_isolate_nodes()
+
 .rs_dict <- function(variable, label) {
   n <- length(variable)
   d <- data.frame(variable = variable, label = label, type = "text", units = "", min = "", max = "",
@@ -308,4 +311,15 @@ test_that("a state over the token budget stops the request", {
   expect_gt(st$tokens, SR_ROUTER_MAX_TOKENS)
   expect_identical(st$omitted, 0L)
   expect_null(sr_router_request(ctx, FALSE))
+})
+
+test_that("the column-choice builder keys the columns and the extras", {
+  p <- .rs_project()
+  ctx <- .sr_router_ctx(p, .rs_col_node(), "t")
+  q <- .sr_router_column_question(ctx, "Pick the outcome column.", extra = c("none", "other"))
+  expect_identical(q$instructions, "Pick the outcome column.")
+  expect_identical(names(q$criteria), c(sprintf("c%03d", 1:6), "none", "other"))
+  expect_identical(q$criteria$c002, "the column age")
+  expect_true(is.character(q$criteria$none) && nzchar(q$criteria$none))
+  expect_identical(names(.sr_router_column_question(ctx, "x")$criteria)[7L], "none")
 })

@@ -199,3 +199,14 @@ sr_router_preview <- function(project, node, table = NA, column = NA,
   list(key = sr_router_key(node$id, table, column), body = sr_sysone_body(r$request), sha = r$sha,
        text = r$request$state)
 }
+
+#' The question of a column choice: list(instructions, criteria). One criterion per column of the table,
+#' keyed by its c001 key with the text "the column <name>" (the request builder masks the names), and one
+#' per `extra` option, keyed by itself. The node needs facts_columns = TRUE and `options(ctx)` = the column
+#' names plus the extras.
+.sr_router_column_question <- function(ctx, instructions, extra = "none") {
+  cols <- sr_router_columns(ctx$project, ctx$table, mask = FALSE)
+  criteria <- as.list(stats::setNames(paste0("the column ", cols$name), cols$key))
+  criteria[extra] <- as.list(paste0("the option ", extra))
+  list(instructions = instructions, criteria = criteria)
+}

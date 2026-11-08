@@ -30,6 +30,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "io/read_columnar", "io/read_sheet", "io/ingest", "io/dictionary", "io/redcap_dict", "io/join",
   "intake/roles", "intake/pico", "router/sysone", "router/abstain", "router/graph", "router/state",
   "router/backends/rules", "router/engine",
+  "router/nodes/intake", "router/nodes/roles", "router/nodes/analysis",
   "profile/profile", "profile/dq", "profile/dq_conformance", "profile/dq_completeness",
   "profile/dq_plausibility", "profile/dq_structure", "profile/dq_leakage", "profile/recipe",
   "io/cohort", "profile/suggest", "profile/query", "profile/flow", "routes/emit", "routes/result",

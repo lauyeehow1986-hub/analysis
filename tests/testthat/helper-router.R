@@ -46,3 +46,17 @@
   }, envir = env)
   invisible(id)
 }
+
+#' Set the node registry aside (empty) until `env` exits, so a test file of toy nodes does not meet the
+#' real P1 nodes. File level: `.fx_isolate_nodes()` (it cleans up when the file ends).
+.fx_isolate_nodes <- function(env = parent.frame()) {
+  nodes <- .sr_node_env$nodes
+  order <- .sr_node_env$order
+  .sr_node_env$nodes <- list()
+  .sr_node_env$order <- character()
+  withr::defer({
+    .sr_node_env$nodes <- nodes
+    .sr_node_env$order <- order
+  }, envir = env)
+  invisible(NULL)
+}

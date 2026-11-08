@@ -1,5 +1,8 @@
 # Tests for router/backends/rules.R and router/engine.R. Synthetic toy nodes only.
 
+# These tests register toy nodes: set the real P1 nodes aside for this file.
+.fx_isolate_nodes()
+
 .re_project <- function(env = parent.frame()) {
   p <- .fx_project(env = env)
   p$state$roles <- list(t = c(a = "outcome"))

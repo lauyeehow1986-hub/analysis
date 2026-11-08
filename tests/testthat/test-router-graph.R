@@ -1,5 +1,8 @@
 # Tests for router/graph.R: node contract, DAG registry, instances and the input hash.
 
+# These tests register toy nodes: set the real P1 nodes aside for this file.
+.fx_isolate_nodes()
+
 test_that("a node may depend only on registered nodes", {
   .fx_toy_nodes()
   expect_error(sr_node_register(sr_node("x", "X", c("p", "q"), depends = "nope")), "nope")
