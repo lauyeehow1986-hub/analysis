@@ -185,9 +185,10 @@ mod_sap_ui <- function(id) {
   shiny::modalDialog(
     title = "Lock the SAP", easyClose = FALSE,
     shiny::p("Locking is final: the plan can no longer be edited, and the outcome is unblinded."),
+    shiny::uiOutput(ns("lock_summary_modal")),
     word,
     shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("lock_err_modal"))),
-    footer = shiny::tagList(shiny::modalButton("Cancel"),
+    footer = shiny::tagList(shiny::actionButton(ns("lock_cancel"), "Cancel"),
                             shiny::actionButton(ns("lock_ok"), "Lock", class = "btn-danger")))
 }
 
@@ -895,8 +896,12 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     chk <- .sr_sap_flag(project, .sr_sap_check_view)
     n_block <- shiny::reactive(sum(chk()$status == "block"))
     lock_err <- shiny::reactiveVal("")
-    sap_v1_failed <- shiny::reactiveVal(FALSE)
-    word <- NULL                          # the word typed in the CURRENT lock dialog (see below)
+    # SAP_v1.docx is owed when the SAP is locked and no SAP_v1 export is in the event log (derived from the
+    # project, so a reopened project or a new session shows it too).
+    v1_owed <- .sr_sap_flag(project, function(p) {
+      !is.null(p) && isTRUE(p$state$sap$locked) && !"SAP_v1" %in% .sr_ui_exports(p, "sap")$id
+    })
+    word <- NULL                         # the word typed in the CURRENT lock dialog (see below)
     libsnap_now <- NULL
 
     output$check <- DT::renderDT({
@@ -916,7 +921,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       list(ids = sort(as.character(names(.sr_sap_analyses(p))), method = "radix"),
            hash = as.character(p$state$sap$lock$libsnap_hash %||% ""))
     })
-    output$lock_summary <- shiny::renderUI({
+    summary_ui <- function() {
       f <- lock_facts()
       if (is.null(f)) return(NULL)
       ch <- chk()
@@ -932,8 +937,10 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
         shiny::p(shiny::strong(sprintf("Open warnings (%d)", length(warns)))),
         if (length(warns)) shiny::tags$ul(lapply(warns, shiny::tags$li)),
         shiny::p(class = "small", shiny::strong("Library snapshot hash: "), shiny::code(hash)))
-    })
-    output$lock_err <- shiny::renderText(lock_err())
+    }
+    output$lock_summary <- shiny::renderUI(summary_ui())
+    output$lock_summary_modal <- shiny::renderUI(summary_ui())
+    output$lock_err <-shiny::renderText(lock_err())
     output$lock_err_modal <- shiny::renderText(lock_err())
     output$lock_state <- shiny::renderText({
       p <- project()
@@ -942,7 +949,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
               substr(p$state$sap$lock$sap_hash %||% "", 1L, 12L))
     })
     output$lock_retry <- shiny::renderUI({
-      if (isTRUE(sap_v1_failed())) {
+      if (isTRUE(v1_owed())) {
         shiny::actionButton(ns("sap_v1_retry"), "Retry writing SAP_v1.docx", class = "btn-warning mt-2")
       }
     })
@@ -950,7 +957,6 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     # A project that is swapped for another one carries nothing over.
     pdir <- .sr_sap_flag(project, function(p) if (is.null(p)) NA_character_ else as.character(p$paths$dir))
     shiny::observeEvent(pdir(), {
-      sap_v1_failed(FALSE)
       lock_err("")
       word <<- NULL
     }, ignoreInit = TRUE)
@@ -963,6 +969,11 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       if (refuse("Lock SAP", lock_err)) return(invisible(NULL))
       shiny::showModal(.sr_sap_lock_modal(ns))
     }, priority = 10)
+    shiny::observeEvent(input$lock_cancel, {
+      shiny::removeModal()
+      lock_err("")
+      word <<- NULL
+    })
     shiny::observeEvent(input$lock_word, {
       word <<- input$lock_word
     }, priority = 5, ignoreNULL = FALSE)
@@ -971,7 +982,6 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     # notification) and the retry button writes it again.
     write_v1 <- function() {
       ok <- run("Write SAP_v1.docx", function(p) sr_sap_docx(p), ev = lock_err, locked_ok = TRUE)
-      sap_v1_failed(!ok)
       if (!ok) {
         .sr_ui_notify(paste0("The SAP is locked, but SAP_v1.docx was not written: ", shiny::isolate(lock_err()),
                              " Use Retry in the Lock card."), "error")
@@ -991,8 +1001,7 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       write_v1()
     })
     shiny::observeEvent(input$sap_v1_retry, {
-      p <- shiny::isolate(project())
-      if (!isTRUE(shiny::isolate(sap_v1_failed())) || !isTRUE(p$state$sap$locked)) return(invisible(NULL))
+      if (!isTRUE(shiny::isolate(v1_owed()))) return(invisible(NULL))
       write_v1()
     })
 
