@@ -261,9 +261,13 @@ sr_router_choice <- function(project, node, table = NA, column = NA) {
 #' The expert decision table, one row per applicable instance. `status`: "decided", "stale" (decided
 #' under an older input hash; the stored choice is still shown), "pending", "waiting" (a dependency is
 #' undecided) or "override_required" (pending, with SR_ROUTER_MAX_VETOES or more vetoes). The model
-#' columns come from the latest successful prediction under the current input hash.
+#' columns come from the latest successful prediction under the current input hash. Once the SAP is
+#' locked with a snapshot (.sr_router_frozen) a snapshot key is "decided" with its stored choice, any
+#' other decision is "stale", and a snapshot key whose instance has gone since the lock still gets a
+#' "decided" row, so the table shows exactly the decisions the SAP was locked with.
 sr_router_table <- function(project) {
   inst <- .sr_router_instances(project)
+  fz <- .sr_router_frozen(project)
   rows <- list()
   for (i in seq_len(nrow(inst))) {
     nd <- sr_node_get(inst$node[i])
@@ -274,7 +278,7 @@ sr_router_table <- function(project) {
     if (!.sr_router_applies(ctx)) next
     waiting <- .sr_router_waiting(ctx)
     hash <- sr_router_input_hash(ctx)
-    dec <- project$state$router$decisions[[key]]
+    dec <- if (!is.null(fz[[key]])) fz[[key]] else project$state$router$decisions[[key]]
     vetoes <- project$state$router$vetoes[[key]]
     vetoes <- if (is.null(vetoes)) 0L else as.integer(vetoes)
     status <- if (!is.null(dec)) {
@@ -300,6 +304,20 @@ sr_router_table <- function(project) {
       confidence = if (is.null(pr)) NA_real_ else pr$confidence,
       would_act = if (is.null(pr)) NA else isTRUE(pr$would_act),
       vetoes = vetoes)
+  }
+  # frozen decisions whose instance no longer applies (a column that left its role after the lock)
+  seen <- vapply(rows, function(r) r$key, "")
+  for (key in setdiff(names(fz), seen)) {
+    d <- fz[[key]]
+    sd <- project$state$router$decisions[[key]]
+    nid <- if (!is.null(sd$node)) as.character(sd$node) else sub("@.*$", "", key)
+    vetoes <- project$state$router$vetoes[[key]]
+    rows[[length(rows) + 1L]] <- list(
+      key = key, node = nid, label = if (nid %in% sr_nodes()) sr_node_get(nid)$label else nid,
+      table = .sr_rt_chr(sd$table), column = .sr_rt_chr(sd$column), status = "decided",
+      choice = d$choice, resolver = d$resolver, override = isTRUE(d$override), reason = d$reason,
+      suggested = NA_character_, backend = NA_character_, model_choice = NA_character_,
+      confidence = NA_real_, would_act = NA, vetoes = if (is.null(vetoes)) 0L else as.integer(vetoes))
   }
   col <- function(f, type) vapply(rows, function(r) r[[f]], type)
   data.frame(key = col("key", ""), node = col("node", ""), label = col("label", ""),

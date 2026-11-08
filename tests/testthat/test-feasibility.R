@@ -545,6 +545,7 @@ test_that("the SAP hash covers the feasibility record, and only when there is on
   q$state$feasibility <- NULL
   q$state$pico <- NULL                         # nor the router part (P1d): no question, no decisions
   q$state$router <- NULL
+  q$state$sap$lock$router <- NULL              # a lock made before P1d has no router snapshot
   legacy <- .sr_sha256(sr_canonical_json(list(
     analyses = unname(lapply(.sr_sap_analyses(q), identity)),
     families = list(), rules = list())))

@@ -113,9 +113,11 @@ sr_node_register(sr_node(
   },
   facts = function(ctx) {
     m <- .sr_ct_meta(ctx)
-    role <- ctx$project$state$roles[[ctx$table]][[ctx$column]]
+    # single-bracket lookup: a column that has left the roles map gives NA ("unassigned"), not an error
+    role <- unname(ctx$project$state$roles[[ctx$table]][ctx$column])
     list(column_name = ctx$column, column_label = m$label, column_type = m$type,
-         column_role = if (is.null(role)) "unassigned" else role, finding_ids = .sr_ct_findings(ctx))
+         column_role = if (length(role) != 1L || is.na(role)) "unassigned" else role,
+         finding_ids = .sr_ct_findings(ctx))
   },
   question = function(ctx) list(
     instructions = "Decide when the covariate column described in the facts is measured relative to the outcome.",

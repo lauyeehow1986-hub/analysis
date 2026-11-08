@@ -17,10 +17,11 @@ SR_NODE_SCOPES <- c("project", "table", "column")
 #' `question`: NULL | list(instructions, criteria), NULL = rule / user only. `facts`: named list.
 #' `veto`: NULL | chr reason. `columns`: chr, the instance columns of a column-scope node (required).
 #' `facts_columns`: TRUE when the question needs the table's column metadata in its state (router/state.R).
+#' `pico`: TRUE when the node's input hash includes the PICO text (its decision goes stale on a PICO edit).
 sr_node <- function(id, label, options, scope = c("project", "table", "column"), depends = character(),
                     applies = NULL, rule = NULL, question = NULL, facts = NULL, veto = NULL,
-                    danger = list(), columns = NULL, facts_columns = FALSE, cite = NA_character_,
-                    version = 1L) {
+                    danger = list(), columns = NULL, facts_columns = FALSE, pico = FALSE,
+                    cite = NA_character_, version = 1L) {
   scope <- match.arg(scope)
   if (!is.character(id) || length(id) != 1L || !grepl("^[a-z][a-z0-9_]*$", id)) {
     stop("sr_node: id must match ^[a-z][a-z0-9_]*$", call. = FALSE)
@@ -48,10 +49,13 @@ sr_node <- function(id, label, options, scope = c("project", "table", "column"),
   if (!is.logical(facts_columns) || length(facts_columns) != 1L || is.na(facts_columns)) {
     stop("sr_node '", id, "': facts_columns must be TRUE or FALSE", call. = FALSE)
   }
+  if (!is.logical(pico) || length(pico) != 1L || is.na(pico)) {
+    stop("sr_node '", id, "': pico must be TRUE or FALSE", call. = FALSE)
+  }
   structure(list(id = id, label = label, options = options, scope = scope, depends = depends,
                  applies = applies, rule = rule, question = question, facts = facts, veto = veto,
-                 danger = danger, columns = columns, facts_columns = facts_columns, cite = cite,
-                 version = as.integer(version)),
+                 danger = danger, columns = columns, facts_columns = facts_columns, pico = pico,
+                 cite = cite, version = as.integer(version)),
             class = "sr_node")
 }
 
@@ -100,11 +104,46 @@ sr_router_key <- function(node, table = NA, column = NA) {
 # Memo for one top-level .sr_router_current call: key -> current choice (NA when undecided or stale).
 .sr_router_memo <- new.env(parent = emptyenv())
 
-#' The current choice stored for a key, or NA when undecided or stale. A decision is current while the
-#' input hash it was made under equals the hash of its instance now. The hash of an instance depends on
-#' its dependencies' current choices, so the check recurses in topological order; one top-level call
-#' memoises each key. A decision whose node is no longer registered counts as stale.
+#' The router decisions frozen by the SAP lock: a named list key -> list(choice, resolver, override,
+#' reason, input_hash), or NULL when the SAP is open or its lock carries no snapshot (a lock made before
+#' P1d keeps the live view). Each record is normalised as the decision reducer stores it, so a re-read
+#' of the event (NA -> NULL) gives the same values.
+.sr_router_frozen <- function(project) {
+  if (!isTRUE(project$state$sap$locked)) return(NULL)
+  snap <- project$state$sap$lock$router
+  if (is.null(snap) || !is.list(snap)) return(NULL)
+  recs <- snap$decisions
+  if (!length(recs)) return(stats::setNames(list(), character()))
+  lapply(recs, function(r) {
+    list(choice = .sr_rt_chr(r$choice), resolver = .sr_rt_chr(r$resolver), override = isTRUE(r$override),
+         reason = .sr_rt_chr(r$reason), input_hash = .sr_rt_chr(r$input_hash))
+  })
+}
+
+# TRUE when (node, table, column) is one of .sr_router_instances(project): a project node always is; a
+# table node needs a table with confirmed roles; a column node also needs the column among its
+# `columns(ctx)`. One instance at a time, so it recurses only into the node's dependencies.
+.sr_router_has_instance <- function(project, node, table, column) {
+  nd <- sr_node_get(node)
+  if (nd$scope == "project") return(is.na(table) && is.na(column))
+  if (is.na(table) || !table %in% names(project$state$roles)) return(FALSE)
+  if (nd$scope == "table") return(is.na(column))
+  !is.na(column) && column %in% as.character(nd$columns(.sr_router_ctx(project, nd, table, NA)))
+}
+
+#' The current choice stored for a key, or NA when undecided or stale. Once the SAP is locked the frozen
+#' snapshot answers (.sr_router_frozen): a snapshot key is current with its stored choice and every other
+#' key is not, whatever changed since. Otherwise a decision is current while the input hash it was made
+#' under equals the hash of its instance now. The hash of an instance depends on its dependencies'
+#' current choices, so the check recurses in topological order; one top-level call memoises each key. A
+#' decision whose node is no longer registered, or whose instance is gone (a column that left its role,
+#' a table without roles), is not current: the instance is checked before the hash, so it never errors.
 .sr_router_current <- function(project, key) {
+  fz <- .sr_router_frozen(project)
+  if (!is.null(fz)) {
+    r <- fz[[key]]
+    return(if (is.null(r)) NA_character_ else r$choice)
+  }
   dec <- project$state$router$decisions[[key]]
   if (is.null(dec)) return(NA_character_)
   top <- is.null(.sr_router_memo$env)
@@ -120,8 +159,10 @@ sr_router_key <- function(node, table = NA, column = NA) {
       !is.null(dec$node) && dec$node %in% sr_nodes()) {
     tb <- if (is.null(dec$table)) NA_character_ else dec$table
     cl <- if (is.null(dec$column)) NA_character_ else dec$column
-    now <- .sr_router_ctx(project, dec$node, tb, cl)
-    if (identical(sr_router_input_hash(now), as.character(dec$input_hash))) out <- as.character(ch)
+    if (.sr_router_has_instance(project, dec$node, tb, cl)) {
+      now <- .sr_router_ctx(project, dec$node, tb, cl)
+      if (identical(sr_router_input_hash(now), as.character(dec$input_hash))) out <- as.character(ch)
+    }
   }
   memo[[key]] <- out
   out
@@ -180,11 +221,14 @@ sr_router_key <- function(node, table = NA, column = NA) {
   do.call(rbind, rows)
 }
 
-#' SHA-256 of the node id and version, its options, its facts and its dependencies' choices.
+#' SHA-256 of the node id and version, its options, its facts and its dependencies' choices, plus the
+#' PICO text (.sr_pico_text) for a node with `pico = TRUE`. A node without the flag hashes as it did
+#' before the flag existed.
 sr_router_input_hash <- function(ctx) {
   nd <- ctx$node
   opts <- if (is.function(nd$options)) nd$options(ctx) else nd$options
   facts <- if (is.null(nd$facts)) list() else nd$facts(ctx)
-  .sr_sha256(sr_canonical_json(list(node = nd$id, version = nd$version, options = opts, facts = facts,
-                                    dep = ctx$dep)))
+  parts <- list(node = nd$id, version = nd$version, options = opts, facts = facts, dep = ctx$dep)
+  if (isTRUE(nd$pico)) parts$pico <- .sr_pico_text(ctx$project)
+  .sr_sha256(sr_canonical_json(parts))
 }

@@ -9,7 +9,8 @@
 #   state$sap$families[[id]]  list(id, members, method)
 #   state$sap$rules[[id]]     list(id, analysis, check, action, alternative)
 #   state$sap$locked / $lock  TRUE / list(sap_hash, tables = list(<t> = list(store_hash)), libsnap_hash,
-#                                         locked_at)
+#                                         locked_at, router = list(frozen, decisions = <key> -> list(choice,
+#                                         resolver, override, reason, input_hash)))
 # The outcome stays blind until the lock (sr_blind reads state$sap$locked), and the lock is refused
 # while a table is not ready, a kept-for-sensitivity finding has no sensitivity analysis, or an analysis
 # cannot be fitted in memory, or a primary analysis has no current feasibility decision (proceed or
@@ -517,8 +518,10 @@ sr_sap_check <- function(project) {
 }
 
 #' Lock the SAP (`sap.locked`): refused, listing every block row of sr_sap_check, while anything blocks.
-#' The event records the SAP hash, the store hash of every analysed table, the library snapshot hash and
-#' the time; once it is applied sr_blind() is FALSE and the SAP can no longer be edited.
+#' The event records the SAP hash, the store hash of every analysed table, the library snapshot hash, the
+#' time and `router`, the snapshot of the router decisions current at the lock (router/gate.R; it is not
+#' an input to the hash). Once it is applied sr_blind() is FALSE, the SAP can no longer be edited and
+#' every router reader uses the snapshot (router/graph.R .sr_router_frozen).
 #' @return the project.
 sr_sap_lock <- function(project) {
   .sr_sap_open(project, "the SAP is already locked")
@@ -534,5 +537,5 @@ sr_sap_lock <- function(project) {
   for (t in tabs) tables[[t]] <- list(store_hash = sr_store_hash(sr_store_manifest(project, t)))
   sr_project_append(project, "sap.locked", list(
     sap_hash = sr_sap_hash(project), tables = tables, libsnap_hash = sr_libsnap_hash(),
-    locked_at = .sr_now()))
+    locked_at = .sr_now(), router = list(frozen = TRUE, decisions = .sr_router_decision_records(project))))
 }

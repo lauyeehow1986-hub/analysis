@@ -78,22 +78,23 @@
   }
 
   n2 <- length(rows)
-  untimed <- 0L
+  # unique (table, column) pairs: a covariate adjusted for in two primaries is one missing decision
+  untimed <- character()
   for (a in prim) {
     if (!identical(a$purpose, "explain-causal")) next
     for (v in a$terms) {
       ch <- sr_router_choice(project, "covariate_timing", a$table, v)
       if (is.na(ch)) {
-        untimed <- untimed + 1L
+        untimed <- union(untimed, paste(a$table, v, sep = "\r"))
       } else if (ch %in% c("mediator", "post_outcome")) {
         add("covariate timing", "block",
             sprintf("%s is a causal primary analysis adjusting for %s, decided %s", a$id, v, ch))
       }
     }
   }
-  if (untimed) {
+  if (length(untimed)) {
     add("covariate timing", "warn",
-        sprintf("%d adjusted covariate(s) have no current timing decision", untimed))
+        sprintf("%d adjusted covariate(s) have no current timing decision", length(untimed)))
   }
   if (length(rows) == n2) add("covariate timing", "ok", "no causal primary analysis adjusts for a mediator or post-outcome column")
 
@@ -101,20 +102,33 @@
              detail = vapply(rows, function(r) r$detail, ""), stringsAsFactors = FALSE)
 }
 
-# The router's part of the SAP hash: list(pico = the eight fields, decisions = every current decision
-# ordered by key as list(key, choice, resolver, override, reason, input_hash)), or NULL when there is no
-# pico.set and no current decision (so a SAP that never used the router keeps its hash).
-.sr_router_hash_part <- function(project) {
-  q <- sr_pico(project)
-  pico <- if (is.null(q)) NULL else q[SR_PICO_FIELDS]
+#' The current router decisions as a named list key -> list(choice, resolver, override, reason,
+#' input_hash), ordered by key. Once the SAP is locked with a snapshot this is the snapshot
+#' (.sr_router_frozen); otherwise it is every decision that is current now. sr_sap_lock writes the live
+#' map into the sap.locked payload, so the frozen map reproduces the router part of the locked hash.
+.sr_router_decision_records <- function(project) {
+  fz <- .sr_router_frozen(project)
+  if (!is.null(fz)) return(fz[sort(as.character(names(fz)), method = "radix")])
   dec <- project$state$router$decisions %||% list()
   keys <- sort(as.character(names(dec)), method = "radix")
   keys <- keys[vapply(keys, function(k) !is.na(.sr_router_current(project, k)), NA)]
-  if (is.null(pico) && !length(keys)) return(NULL)
-  ds <- lapply(keys, function(k) {
+  lapply(stats::setNames(keys, keys), function(k) {
     d <- dec[[k]]
-    list(key = k, choice = d$choice, resolver = d$resolver, override = isTRUE(d$override),
-         reason = d$reason, input_hash = d$input_hash)
+    list(choice = .sr_rt_chr(d$choice), resolver = .sr_rt_chr(d$resolver), override = isTRUE(d$override),
+         reason = .sr_rt_chr(d$reason), input_hash = .sr_rt_chr(d$input_hash))
   })
+}
+
+# The router's part of the SAP hash: list(pico = the eight fields, decisions = every current decision
+# ordered by key as list(key, choice, resolver, override, reason, input_hash)), or NULL when there is no
+# pico.set and no current decision (so a SAP that never used the router keeps its hash). After a lock
+# with a snapshot the decisions are the snapshot's, so later edits (roles, a DQ re-run) leave the hash
+# equal to the locked one.
+.sr_router_hash_part <- function(project) {
+  q <- sr_pico(project)
+  pico <- if (is.null(q)) NULL else q[SR_PICO_FIELDS]
+  recs <- .sr_router_decision_records(project)
+  if (is.null(pico) && !length(recs)) return(NULL)
+  ds <- lapply(names(recs), function(k) c(list(key = k), recs[[k]]))
   list(pico = pico, decisions = unname(ds))
 }

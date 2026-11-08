@@ -1,6 +1,7 @@
 # router/nodes/intake.R - the project-scope P1 nodes: the study design, the analysis purpose and the
 # reporting guideline. Rules decide where the research question or an earlier choice settles them; the
 # questions carry the PICO lines and, for the design, the role counts of the tables (no cell values).
+# The design and the purpose hash the PICO text too (pico = TRUE), so a PICO edit makes both stale.
 
 SR_DESIGNS <- c("cohort_prospective", "cohort_retrospective", "case_control", "cross_sectional", "rct",
                 "other")
@@ -18,7 +19,7 @@ SR_DESIGNS <- c("cohort_prospective", "cohort_retrospective", "case_control", "c
 }
 
 sr_node_register(sr_node(
-  "design", "Study design", SR_DESIGNS, scope = "project", cite = "vonelm2007",
+  "design", "Study design", SR_DESIGNS, scope = "project", pico = TRUE, cite = "vonelm2007",
   facts = function(ctx) {
     roles <- ctx$project$state$roles
     tb <- sort(names(roles)[vapply(roles, length, 1L) > 0L])
@@ -38,7 +39,7 @@ sr_node_register(sr_node(
                 c("rct", "cohort_prospective"))))
 
 sr_node_register(sr_node(
-  "purpose", "Analysis purpose", SR_PURPOSES, scope = "project",
+  "purpose", "Analysis purpose", SR_PURPOSES, scope = "project", pico = TRUE,
   rule = function(ctx) {
     aim <- ctx$pico$aim
     if (is.null(aim) || length(aim) != 1L || is.na(aim) || !aim %in% SR_PURPOSES) return(NULL)
