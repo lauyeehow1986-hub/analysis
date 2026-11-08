@@ -242,7 +242,7 @@ sr_freeze <- function(project, label = sr_freeze_next_label(project)) {
   done <- TRUE
 
   payload <- list(label = label, manifest_sha = msha, audit_tip = tip, events_seq = as.integer(seq),
-                  libsnap_hash = manifest$libsnap_hash, libsnap = snap, n_files = length(files))
+                  libsnap_hash = manifest$libsnap_hash, libsnap = .sr_libsnap_json(snap), n_files = length(files))
   tryCatch(sr_project_append(project, "freeze.created", payload), error = function(e) {
     # the folder goes unless the event did get written (a crash between the event and its audit entry)
     evs <- tryCatch(sr_events_read(paths$events), error = function(e2) list())
