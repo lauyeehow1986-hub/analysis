@@ -893,7 +893,9 @@ mod_sap_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     })
 
     # ---- lock checklist, lock and documents
-    chk <- .sr_sap_flag(project, .sr_sap_check_view)
+    # Lazy on purpose: sr_sap_check is the slow call, so it runs only when an output that is on screen reads
+    # it (Shiny suspends the outputs of a hidden tab), not on every project change made in another tab.
+    chk <- shiny::reactive(.sr_sap_check_view(project()))
     n_block <- shiny::reactive(sum(chk()$status == "block"))
     lock_err <- shiny::reactiveVal("")
     # SAP_v1.docx is owed when the SAP is locked and no SAP_v1 export is in the event log (derived from the

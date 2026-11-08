@@ -37,9 +37,7 @@ design; this file holds *what has happened* and *what we learned*.
    **P1d UI sub-project 1 (Design + SAP) is done 2026-11-09 (branch `p1d-ui-sap`). Next: sub-projects (2) and (3), each with its own spec, plan and branch:**
    (2) Analyses (run, long jobs, post-lock analyses, results); (3) Write + Archive + Settings.
    Together they own the payload preview, the consent dialog and the freeze, export and import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
-   Together they own the router panel, the payload preview, the consent dialog and the freeze, export and
-   import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
-     - The router has no UI yet; only Jev is registered (the `local` and `clm` ids are reserved for P3), and
+     - The router has only the Design panel; the preview and consent dialogs come later. Only Jev is registered (the `local` and `clm` ids are reserved for P3), and
        the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
      - The journal presets are `verified: false` (all four: default, bmj, lancet, jama). Check each against
        the journal's author guide. The jama preset narrows the side margins for its 178 mm figures.
@@ -249,8 +247,8 @@ design; this file holds *what has happened* and *what we learned*.
   Shiny keeps a modal's input values after the modal closes and resends only CHANGED values, so a re-opened
   modal can carry the last session's values. Rule: every modal field is reset or re-set on open from the row
   being edited; checked in the walk (edit a1, edit a2, then Add showed clean defaults).
-  Derived views use `.sr_sap_flag` (invalidates only when the derived value changes), never a bare renderUI on
-  `project()`; do not let DT selections reset on a project change.
+  Stateful renderUI (forms holding typed input) use a value-compared flag (`.sr_sap_flag`, invalidates only when
+  the derived value changes), never a bare renderUI on `project()`; do not let DT selections reset on a project change.
 - **Test mocks.** In sourced app code `testthat::local_mocked_bindings(.env = globalenv())` errors; use the
   globalenv assign-and-restore helper `.ms_mock`.
 - **Retry after a failed SAP document.** Core `sr_sap_docx` refuses a retry when `SAP_v1.docx` exists on disk
@@ -258,13 +256,23 @@ design; this file holds *what has happened* and *what we learned*.
 - **Environmental warning.** "shiny built under R 4.5.3" in the test output is environmental, not a defect.
 - **Layout.** Data, Design and SAP are NOT in `fillable` (fillable squashed and overlapped the Design cards);
   the placeholder panels and Project stay fillable.
-- **Open: stale lock checklist.** In the walk, after DQ runs and decisions made in the Data tab, the SAP lock
-  checklist kept showing "no DQ run recorded for this table" (2 blocks) while the project on disk had no block
-  (`sr_sap_check` clean). Reopening the project refreshed it to 0 blocks. It fails safe (blocks, never
-  allows). Cause not found; look at what the Data module writes back to `project()` after a DQ action.
+- **Open: stale lock checklist (not reproduced).** In the browser walk, after DQ runs and decisions made in the
+  Data tab, the SAP lock checklist kept "no DQ run recorded for this table" (2 blocks) while the project on
+  disk had no block; reopening the project refreshed it. The review could not reproduce it server-side: the
+  real app under testServer updates the checklist and the Lock button count after a DQ run
+  (`test-app-wiring.R`; every write goes through `.sr_ui_actor` -> `project(res)` and the panel observes
+  `project()`). Open suspicion: a second browser session on the same project, or flush timing. It fails safe
+  (blocks, never allows).
+- **Checklist is lazy.** `chk` in `mod_sap.R` is a plain reactive, so `sr_sap_check` runs only when a visible SAP
+  output reads it, not on every project change in another tab (the observe-based flag made Data-tab actions
+  slow). testServer has no hidden tabs, so `test-app-wiring.R` pins the mechanism by source, not by call count.
+- **Execution deviations (decided during the build).** Editing controls are disabled by re-rendering them with
+  `disabled`, not with shinyjs (so testServer can assert it from output HTML). The shadow export uses
+  `.sr_ui_try`, not `act`, because it writes a file and returns a path. `.sr_design_gates` repeats the four gate
+  checks of `.sr_jev_available` so all four show at once; the core gate stays authoritative at send time.
 - **Observed, not changed.** A failed Project "Create new" (directory not empty) closes the open project and
   hides Data / Design / SAP; "Open existing" recovers. The Lock dialog's Lock button was enabled before the
-  word was typed (the core still checks the word). Accepting a leakage `drop_var` DQ decision adds a recipe
+  word was typed (`sr_sap_lock` takes no word; the panel server checks `identical(word, "LOCK")`). Accepting a leakage `drop_var` DQ decision adds a recipe
   step, which the checklist shows as a warn until applied.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
