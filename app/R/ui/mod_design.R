@@ -126,14 +126,7 @@ mod_design_ui <- function(id) {
 # A reactive TRUE/FALSE of .sr_ui_editable(project()) that invalidates its readers only when the value
 # changes (a plain reactive() invalidates on every project change, which would re-render a card and wipe
 # what the user typed or ticked).
-.sr_design_editable <- function(project) {
-  val <- shiny::reactiveVal(.sr_ui_editable(shiny::isolate(project())))
-  shiny::observe({
-    v <- .sr_ui_editable(project())
-    if (!identical(shiny::isolate(val()), v)) val(v)
-  })
-  shiny::reactive(val())
-}
+.sr_design_editable <- function(project) .sr_ui_flag(project, .sr_ui_editable)
 
 # ---- Ask Jev (connected mode only) -----------------------------------------------------------------
 
@@ -314,10 +307,10 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     err <- shiny::reactiveVal("")
     shadow_path <- shiny::reactiveVal("")
 
-    # The PICO form re-renders only when the project or its editability changes (not on every event), so
-    # an unsaved edit is not wiped by another action.
-    form_key <- shiny::reactive({
-      p <- project()
+    # The PICO form re-renders only when the project folder or its editability changes. form_key is a
+    # value-compared flag (a plain reactive() would invalidate on every project() change), so an unsaved
+    # edit is not wiped by another action.
+    form_key <- .sr_ui_flag(project, function(p) {
       list(dir = if (is.null(p)) NULL else p$paths$dir, editable = .sr_ui_editable(p))
     })
     table_df <- shiny::reactive({
@@ -349,6 +342,7 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
     # ---- research question
     output$pico_form <- shiny::renderUI({
       k <- form_key()
+      .sr_design_tick("pico_form")
       p <- shiny::isolate(project())
       if (is.null(p)) return(shiny::p(class = "text-muted", "Open a project first."))
       q <- sr_pico(p)

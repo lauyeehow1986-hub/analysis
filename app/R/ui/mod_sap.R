@@ -312,15 +312,8 @@ mod_sap_ui <- function(id) {
   suppressWarnings(as.numeric(x))
 }
 
-# A reactive that only invalidates when f(project()) changes value.
-.sr_sap_flag <- function(project, f) {
-  val <- shiny::reactiveVal(f(shiny::isolate(project())))
-  shiny::observe({
-    v <- f(project())
-    if (!identical(shiny::isolate(val()), v)) val(v)
-  })
-  shiny::reactive(val())
-}
+# A reactive that only invalidates when f(project()) changes value (see .sr_ui_flag).
+.sr_sap_flag <- function(project, f) .sr_ui_flag(project, f)
 
 # The assessment dialog's fields: the delta, then the assumptions the route / spec call for.
 .sr_sap_assess_fields <- function(ns, measures, show_r2, show_icc, disabled) {

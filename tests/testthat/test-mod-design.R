@@ -446,3 +446,39 @@ test_that("the stateful cards re-render only when editability changes", {
     expect_gt(again[["reason"]], after[["reason"]])
   })
 })
+
+test_that("the PICO form is not re-rendered, and typed text kept, when the project changes", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_ui_project())
+  # a saved question (rules need it) that differs from the unsaved text typed below
+  rv(sr_pico_set(shiny::isolate(rv()), .list = list(population = "saved adults", outcome = "saved y", aim = "explain-causal")))
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    n <- function() .sr_design_renders[["pico_form"]] %||% 0L
+    session$flushReact()
+    output$pico_form
+    base <- n()
+    expect_gt(base, 0L)
+    session$setInputs(pico_population = "typed adults", pico_outcome = "typed outcome")
+    e0 <- .md_n_events(rv())
+    session$setInputs(run_rules = 1)
+    expect_gt(.md_n_events(rv()), e0)
+    session$flushReact()
+    output$pico_form
+    expect_identical(n(), base)
+    expect_equal(input$pico_population, "typed adults")
+    expect_equal(input$pico_outcome, "typed outcome")
+    # a decision rewrites the project too
+    tb <- sr_router_table(shiny::isolate(rv()))
+    i <- .md_row(shiny::isolate(rv()), "outcome_col")
+    session$setInputs(table_rows_selected = i)
+    ch <- sr_router_editor(shiny::isolate(rv()), "outcome_col", tb$table[i], tb$column[i])$options[1L]
+    e1 <- .md_n_events(rv())
+    session$setInputs(dec_choice = ch, dec_reason = "because", dec_save = 1)
+    expect_gt(.md_n_events(rv()), e1)
+    session$flushReact()
+    output$pico_form
+    expect_identical(n(), base)
+    expect_equal(input$pico_population, "typed adults")
+  })
+})

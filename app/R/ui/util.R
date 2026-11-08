@@ -78,6 +78,17 @@
   !is.null(p) && !isTRUE(p$readonly) && !isTRUE(p$state$sap$locked)
 }
 
+# A reactive that invalidates its readers only when f(project()) changes value (a plain reactive() would
+# invalidate on every project change and re-render, wiping what the user typed or ticked).
+.sr_ui_flag <- function(project, f) {
+  val <- shiny::reactiveVal(f(shiny::isolate(project())))
+  shiny::observe({
+    v <- f(project())
+    if (!identical(shiny::isolate(val()), v)) val(v)
+  })
+  shiny::reactive(val())
+}
+
 # The banner that says why the editing controls are off; NULL when they are on or there is no project.
 .sr_ui_readonly_banner <- function(p) {
   if (is.null(p) || .sr_ui_editable(p)) return(NULL)
