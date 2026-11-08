@@ -60,3 +60,19 @@
   }, envir = env)
   invisible(NULL)
 }
+
+#' A fake Jev transport. Records each call (url, body, key, timeout) in `env$.calls`. `body` is a string,
+#' or a function of the request body that gives the string. Returns list(status, body).
+.fx_fake_transport <- function(env, status = 200L, body = "{}") {
+  env$.calls <- list()
+  function(url, body_in, key, timeout) {
+    env$.calls[[length(env$.calls) + 1L]] <- list(url = url, body = body_in, key = key, timeout = timeout)
+    list(status = status, body = if (is.function(body)) body(body_in) else body)
+  }
+}
+
+#' Connected mode with the sentinel key, until `env` exits.
+.fx_connected <- function(env = parent.frame(), key = "sk-test-SENTINEL-0000") {
+  withr::local_options(sr.mode = "connected", sr.jev_key = key, .local_envir = env)
+  invisible(key)
+}
