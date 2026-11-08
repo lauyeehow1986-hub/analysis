@@ -408,3 +408,41 @@ test_that("a read-only project shows the refusal in the card and disables the in
     expect_match(regmatches(.md_html(output$jev), regexpr("<input[^>]*jev_mask[^>]*>", .md_html(output$jev))), "disabled")
   })
 })
+
+test_that("the stateful cards re-render only when editability changes", {
+  env <- environment()
+  .fx_connected(env)
+  withr::local_options(sr.jev_transport = .fx_fake_transport(env))
+  .ui_spy_notify()
+  p0 <- .fx_ui_project()
+  rv <- shiny::reactiveVal(p0)
+  shiny::testServer(mod_design_server, args = list(project = rv), {
+    n <- function(what) .sr_design_renders[[what]] %||% 0L
+    touch <- function() {
+      session$flushReact()
+      output$jev
+      output$dec_reason_ui
+      c(jev = n("jev"), reason = n("dec_reason_ui"))
+    }
+    base <- touch()
+    session$setInputs(pico_population = "adults", pico_outcome = "y", pico_aim = "explain-causal", pico_save = 1)
+    session$setInputs(run_rules = 1)
+    .md_jev_ready(session)
+    session$setInputs(jev_withdraw = 1)
+    session$setInputs(jev_consent = 2, jev_consent_ok = 2)
+    expect_identical(touch(), base)
+    # a real change of editability re-renders both
+    ro <- rv()
+    ro$readonly <- TRUE
+    rv(ro)
+    after <- touch()
+    expect_gt(after[["jev"]], base[["jev"]])
+    expect_gt(after[["reason"]], base[["reason"]])
+    rw <- rv()
+    rw$readonly <- FALSE
+    rv(rw)
+    again <- touch()
+    expect_gt(again[["jev"]], after[["jev"]])
+    expect_gt(again[["reason"]], after[["reason"]])
+  })
+})

@@ -118,6 +118,13 @@ mod_design_ui <- function(id) {
 
 # ---- server ----------------------------------------------------------------------------------------
 
+# Render counters, bumped each time a stateful renderUI runs; read by tests only.
+.sr_design_renders <- new.env(parent = emptyenv())
+.sr_design_tick <- function(what) {
+  .sr_design_renders[[what]] <- (.sr_design_renders[[what]] %||% 0L) + 1L
+  invisible(NULL)
+}
+
 # A reactive TRUE/FALSE of .sr_ui_editable(project()) that invalidates its readers only when the value
 # changes (a plain reactive() invalidates on every project change, which would re-render a card and wipe
 # what the user typed or ticked).
@@ -174,6 +181,7 @@ mod_design_ui <- function(id) {
   # The card. It depends on editable() alone, which changes value only when the project is locked or
   # unlocked, so the mask box and the ticks survive every other project change.
   output$jev <- shiny::renderUI({
+    .sr_design_tick("jev")
     shiny::tagList(
       shiny::p(class = "small text-muted",
                "Jev is an optional cloud model. It only ever sees the payloads you tick below, exactly as shown,",
@@ -400,6 +408,7 @@ mod_design_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       .sr_design_editor_ui(ns, row, info, editable())
     })
     output$dec_reason_ui <- shiny::renderUI({
+      .sr_design_tick("dec_reason_ui")
       ed <- editable()
       .sr_design_on_control(
         shiny::textAreaInput(ns("dec_reason"), "Reason (required for an override)", rows = 2, width = "100%"),
