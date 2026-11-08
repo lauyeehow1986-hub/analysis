@@ -97,7 +97,8 @@ test_that("the main document and the supplement hold the right analyses, heading
   expect_length(m$dropped_families, 0L)
   expect_identical(m$reg$k, 5L)
   expect_s3_class(m$reg, "sr_ph")
-  expect_identical(.md_heads(m$main)[1:2], c("Methods", "Statistical analysis"))
+  expect_identical(.md_heads(m$main)[1:2], c("Methods", "Study design"))
+  expect_identical(.md_heads(m$main)[3L], "Statistical analysis")
   expect_true("Results" %in% .md_heads(m$main))
   expect_identical(.md_heads(m$supplement), c("Sensitivity analyses", "Supplementary tables"))
   who <- function(blocks) unique(vapply(.md_paras(blocks), function(b) b$analysis, NA_character_))
@@ -113,6 +114,8 @@ test_that("the main document and the supplement hold the right analyses, heading
   expect_identical(anyDuplicated(ids), 0L)
   # the order of the Methods: lock sentence, analyses, then the software sentence last
   meth <- Filter(function(b) identical(b$section, "methods"), .md_paras(m$main))
+  expect_identical(meth[[1L]]$id, "methods_design")
+  meth <- meth[-1L]
   expect_match(.md_text(m, meth[[1L]]), "^The statistical analysis plan was locked on ")
   expect_match(.md_text(m, meth[[length(meth)]]), "^Analyses were run in R ")
   # the tables and figures of Task 3
@@ -121,7 +124,7 @@ test_that("the main document and the supplement hold the right analyses, heading
   expect_true(all(c("families", "deviations") %in% .md_ids(m$supplement, "table")))
   expect_setequal(.md_ids(m$main, "table"), c("t1_table1", "main_results"))
   expect_setequal(.md_ids(m$supplement, "table"),
-                  c("t1_missing", "a_lr_coefficients", "a_lr_model_fit", "a_lr_observed_risk", "a_lr_marginal",
+                  c("analysis_decisions", "t1_missing", "a_lr_coefficients", "a_lr_model_fit", "a_lr_observed_risk", "a_lr_marginal",
                     "a_cox_coefficients", "a_cox_model_fit", "a_rmst_rmst", "a_rmst_rmst_difference",
                     "x_age_coefficients", "x_age_model_fit", "a_mp_coefficients", "a_mp_model_fit",
                     "a_mp_observed_risk", "a_mp_marginal", "families", "deviations"))

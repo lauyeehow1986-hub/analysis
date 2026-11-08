@@ -9,7 +9,8 @@
 #   state$sap$families[[id]]  list(id, members, method)
 #   state$sap$rules[[id]]     list(id, analysis, check, action, alternative)
 #   state$sap$locked / $lock  TRUE / list(sap_hash, tables = list(<t> = list(store_hash)), libsnap_hash,
-#                                         locked_at)
+#                                         locked_at, router = list(frozen, decisions = <key> -> list(choice,
+#                                         resolver, override, reason, input_hash)))
 # The outcome stays blind until the lock (sr_blind reads state$sap$locked), and the lock is refused
 # while a table is not ready, a kept-for-sensitivity finding has no sensitivity analysis, or an analysis
 # cannot be fitted in memory, or a primary analysis has no current feasibility decision (proceed or
@@ -380,7 +381,9 @@ sr_sap_rule <- function(project, id, analysis, check, action = c("add_sensitivit
 #' is taken over that label, so it still equals the lock's hash. The feasibility record (assessment and
 #' decision, sap/feasibility.R) of every pre-specified analysis is part of it, ordered by id, so the
 #' frozen verdict is tamper-evident; the element is absent when there is none, so a SAP locked before
-#' P1c.1 keeps its hash.
+#' P1c.1 keeps its hash. The router part (router/gate.R: the PICO and every current router decision,
+#' ordered by key) is part of it when there is one, so the question and the router's calls are frozen
+#' with the SAP; the element is absent for a project that never used the router.
 sr_sap_hash <- function(project) {
   by_id <- function(x) if (length(x)) unname(x[order(names(x), method = "radix")]) else list()
   as_locked <- function(a) {
@@ -398,6 +401,8 @@ sr_sap_hash <- function(project) {
   fe <- project$state$feasibility %||% list()
   fe <- fe[intersect(names(an), names(fe))]
   if (length(fe)) parts$feasibility <- by_id(fe)
+  rp <- .sr_router_hash_part(project)
+  if (!is.null(rp)) parts$router <- rp
   .sr_sha256(sr_canonical_json(parts))
 }
 
@@ -421,7 +426,9 @@ sr_sap_hash <- function(project) {
 #' logical in the data (item "event value"); a feasibility problem (item "feasibility", one row per
 #' .sr_feas_gate detail: a primary analysis without a current proceed / exploratory decision, or any
 #' pre-specified analysis decided stop). warn: a readiness warn row; an analysis naming a family it
-#' is not in.
+#' is not in. The router gate rows (router/gate.R: study design, study purpose, purpose fits the
+#' analyses, primary route, covariate timing) come just before the feasibility rows; design or purpose
+#' undecided or stale, or a causal primary adjusting for a mediator / post-outcome column, block.
 sr_sap_check <- function(project) {
   an <- .sr_sap_analyses(project)
   if (length(an)) an <- an[order(names(an), method = "radix")]
@@ -501,6 +508,8 @@ sr_sap_check <- function(project) {
           sprintf("%s names family %s but is not a member of one with that id", id, .sr_sap_q(fam)))
     }
   }
+  rg <- .sr_router_gate(project)
+  for (i in seq_len(nrow(rg))) add(rg$item[i], rg$status[i], rg$detail[i])
   gate <- .sr_feas_gate(project)
   for (g in gate) add("feasibility", "block", g)
   if (!length(gate)) add("feasibility", "ok", "every primary analysis has a current feasibility decision")
@@ -509,8 +518,10 @@ sr_sap_check <- function(project) {
 }
 
 #' Lock the SAP (`sap.locked`): refused, listing every block row of sr_sap_check, while anything blocks.
-#' The event records the SAP hash, the store hash of every analysed table, the library snapshot hash and
-#' the time; once it is applied sr_blind() is FALSE and the SAP can no longer be edited.
+#' The event records the SAP hash, the store hash of every analysed table, the library snapshot hash, the
+#' time and `router`, the snapshot of the router decisions current at the lock (router/gate.R; it is not
+#' an input to the hash). Once it is applied sr_blind() is FALSE, the SAP can no longer be edited and
+#' every router reader uses the snapshot (router/graph.R .sr_router_frozen).
 #' @return the project.
 sr_sap_lock <- function(project) {
   .sr_sap_open(project, "the SAP is already locked")
@@ -526,5 +537,5 @@ sr_sap_lock <- function(project) {
   for (t in tabs) tables[[t]] <- list(store_hash = sr_store_hash(sr_store_manifest(project, t)))
   sr_project_append(project, "sap.locked", list(
     sap_hash = sr_sap_hash(project), tables = tables, libsnap_hash = sr_libsnap_hash(),
-    locked_at = .sr_now()))
+    locked_at = .sr_now(), router = list(frozen = TRUE, decisions = .sr_router_decision_records(project))))
 }

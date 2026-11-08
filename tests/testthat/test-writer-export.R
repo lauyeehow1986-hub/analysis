@@ -341,3 +341,17 @@ test_that("the doc.exported reducer appends in order and rejects a bad kind", {
   expect_error(red(list(), ev("export-001", "nope")), "kind must be one of")
   expect_error(red(list(), list(payload = list(kind = "manuscript"))), "needs an id")
 })
+test_that("a CONSORT (rct) project exports without a checklist file", {
+  p <- .fx_writer_project(environment(), design = "rct")
+  p1 <- sr_export(p)
+  ex <- sr_exports(p1)
+  dir <- file.path(p$paths$dir, "out", "exports", ex$id[nrow(ex)])
+  expect_true(file.exists(file.path(dir, "manuscript.docx")))
+  expect_false(file.exists(file.path(dir, "checklist_strobe.csv")))
+  man <- .sr_parse_json(paste(readLines(file.path(dir, "manifest.json"), warn = FALSE), collapse = "
+"))
+  expect_false("checklist_strobe.csv" %in% vapply(man$files, function(f) f$path, ""))
+  s <- officer::docx_summary(officer::read_docx(file.path(dir, "supplement.docx")), remove_fields = TRUE)
+  expect_true(any(grepl("CONSORT checklist", s$text, fixed = TRUE)))
+})
+

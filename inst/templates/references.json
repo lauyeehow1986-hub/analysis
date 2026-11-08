@@ -78,5 +78,10 @@
    "author": [{"family": "Harrell", "given": "FE", "suffix": "Jr"}],
    "title": "Regression Modeling Strategies", "edition": "2nd",
    "publisher": "Springer", "publisher-place": "Cham", "issued": {"date-parts": [[2015]]},
-   "DOI": "10.1007/978-3-319-19425-7"}
+   "DOI": "10.1007/978-3-319-19425-7"},
+  {"id": "schulz2010", "type": "article-journal",
+   "author": [{"family": "Schulz", "given": "KF"}, {"family": "Altman", "given": "DG"}, {"family": "Moher", "given": "D"}],
+   "title": "CONSORT 2010 Statement: updated guidelines for reporting parallel group randomised trials",
+   "container-title": "BMJ", "issued": {"date-parts": [[2010]]}, "volume": "340", "page": "c332",
+   "DOI": "10.1136/bmj.c332"}
 ]

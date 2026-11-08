@@ -4,7 +4,8 @@
 #   sr_exports(project)        data.frame(kind, id, n_files, audit_tip, sap_hash), one row per export
 #
 # The folder out/exports/<id>/ holds: manuscript.docx, supplement.docx, figures/*.png, analysis.R,
-# renv.lock, references.json (CSL-JSON), references.ris, placeholders.json, checklist_strobe.csv and
+# renv.lock, references.json (CSL-JSON), references.ris, placeholders.json, checklist_strobe.csv (only when
+# the model has a STROBE checklist: a CONSORT project has none) and
 # manifest.json (the relative path and SHA-256 of every other file, plus id, created, audit_tip, sap_hash,
 # preset, suppress_k and lockfile_matches_runs). The files are written into out/exports/.<id>.partial and the folder is renamed once it is
 # complete, so an export is whole or absent. An export folder is never overwritten.
@@ -76,10 +77,11 @@ sr_exports <- function(project) {
   .sr_json(items)
 }
 
-# The STROBE checklist block of the model as CSV (LF, UTF-8, empty string for NA).
+# The STROBE checklist block of the model as CSV (LF, UTF-8, empty string for NA); nothing is written when the
+# model has none (a CONSORT project).
 .sr_ex_write_checklist <- function(path, model) {
   blk <- Filter(function(b) identical(b$type, "checklist") && identical(b$id, "strobe"), model$supplement)
-  if (!length(blk)) stop("the document model has no STROBE checklist", call. = FALSE)
+  if (!length(blk)) return(invisible(NULL))
   con <- file(path, "wb")
   on.exit(close(con), add = TRUE)
   utils::write.csv(blk[[1L]]$df, con, row.names = FALSE, na = "", eol = "\n", fileEncoding = "UTF-8")

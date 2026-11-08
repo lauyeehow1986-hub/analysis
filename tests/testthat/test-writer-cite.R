@@ -69,13 +69,13 @@ test_that("the route keys follow the plan", {
   expect_identical(anyDuplicated(.sr_cite_keys("cox", .ct_spec(), .ct_eff(rep("wilson", 3), rep("HR", 3)))$methods), 0L)
 })
 
-test_that("the method reference database holds the 16 items, ASCII on disk", {
+test_that("the method reference database holds the 17 items, ASCII on disk", {
   db <- sr_cite_db()
   want <- c("vonelm2007", "zou2004", "rubin1987", "vonhippel2020", "austin2009", "yang2012", "altman1998",
             "firth1993", "heinze2002", "cox1972", "royston2013", "efron1987", "eldridge2006", "wilson1927",
-            "westreich2013", "harrell2015")
+            "westreich2013", "harrell2015", "schulz2010")
   expect_setequal(names(db), want)
-  expect_length(db, 16L)
+  expect_length(db, 17L)
   expect_identical(sr_cite_db(), db)  # read once
   for (id in want) {
     it <- db[[id]]
@@ -85,7 +85,7 @@ test_that("the method reference database holds the 16 items, ASCII on disk", {
     expect_true(length(it$author) >= 1L, info = id)
   }
   art <- Filter(function(it) identical(it$type, "article-journal"), db)
-  expect_length(art, 13L)
+  expect_length(art, 14L)
   for (it in art) expect_match(it$DOI, "^10\\.", info = it$id)
   expect_identical(vapply(db[c("rubin1987", "harrell2015")], function(it) it$type, ""),
                    c(rubin1987 = "book", harrell2015 = "book"))

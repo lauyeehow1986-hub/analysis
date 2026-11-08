@@ -23,6 +23,15 @@ placeholders.
 The SAP and the feasibility report are Word files of their own, written by `sr_sap_docx()` and
 `sr_feasibility_docx()`. Both are plain text with no placeholders, and neither is run through the guard.
 
+**Study design and decisions (from the router).** When the router has decided the study design, the Methods
+open with a "Study design" paragraph: the design, the objective from the PICO and the decided purpose, the
+setting and period, the reporting guideline and a pointer to the decision log. Every PICO field enters
+through a label token, so the claim guard reads it like prose. The supplement gets a table "Analysis
+decisions" (each decided router instance, its choice, who decided it, any override and the reason); it holds
+choices only, never a probability. STROBE items 3 to 5 are scored from the PICO and these decisions. For a
+CONSORT (`rct`) project the Methods cite CONSORT, the supplement carries a note to complete the checklist by
+hand, and no `checklist_strobe.csv` is exported. See [router.md](router.md).
+
 ## 2. The export files
 
 `sr_export()` writes `out/exports/export-NNN/` in the project folder. The folder is written as
@@ -39,7 +48,7 @@ overwritten, and the export id skips any `export-NNN` folder that is already on 
 | `references.json` | The cited references in CSL-JSON, in order of first use. |
 | `references.ris` | The same references as RIS. |
 | `placeholders.json` | The registry rows: id, kind, text, analysis, source, suppressed, and a value only when the row is not suppressed. |
-| `checklist_strobe.csv` | The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
+| `checklist_strobe.csv` | For every guideline except CONSORT, including `none` and an undecided guideline, since STROBE is the default observational checklist. A CONSORT project has no checklist file, and the supplement says to complete it by hand. The Methods name a guideline only when it is STROBE or CONSORT. The 34 STROBE items: item, section, label, status (green, amber or red) and detail. |
 | `manifest.json` | The export id, the creation time, the audit tip, the SAP hash, the preset, `suppress_k`, and the relative path and SHA-256 of every other file. |
 
 Outside the export folder: `out/sap/SAP_v1.docx` (locked; `SAP_draft.docx` before the lock, with a DRAFT
@@ -178,7 +187,7 @@ only.
 - **A crash can still leave an orphan export folder.** If the process dies between the folder rename and the `doc.exported` append, `out/exports/export-NNN/` has no event. The next export skips it and uses the next number; delete the orphan by hand after checking the event log.
 - **A failed append of an SAP or feasibility file** removes the file just written and re-raises the error, so a retry is possible. A crash between the write and the append can still leave a file; `SAP_v1.docx` is then never overwritten, so remove it by hand after checking the event log.
 - **Presets are unverified** (section 6).
-- **STROBE items 1 to 5 stay amber** until the router records the PICO and the study design. They are for
+- **STROBE items 1a, 1b and 2 stay amber**; items 3 to 5 are scored from the router decisions and the PICO (objective, design, setting and dates). The author items are for
   the authors to write.
 - **Method references need re-checking.** The method references were copied from the plan and must be
   checked against the publisher's records before release.

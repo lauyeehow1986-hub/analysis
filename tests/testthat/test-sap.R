@@ -472,7 +472,7 @@ test_that("the lock needs a current feasibility decision on every primary analys
   expect_match(.sap_lock_msg(pr), "feasibility: a1: decision is revise", fixed = TRUE)
 
   # the spec is re-set after the decision: the assessment no longer describes it
-  pp <- sr_feasibility_decide(p, "a1", "proceed")
+  pp <- .fx_routed(sr_feasibility_decide(p, "a1", "proceed"))
   expect_false(any(sr_sap_check(pp)$status == "block"))
   pq <- sr_sap_add(pp, "a1", "stub_sap", .sap_spec(exposure = "sex"), "t", label = "primary")
   expect_match(.sap_lock_msg(pq), "feasibility: a1: the feasibility assessment is stale (the spec changed)",

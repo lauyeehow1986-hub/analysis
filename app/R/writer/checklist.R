@@ -9,7 +9,8 @@
 # The checklist reads the model but is not part of the claim guard (ruling R27): its labels are fixed text.
 
 SR_CK_RULES <- c("author", "flow", "roles", "feasibility", "terms", "methods", "interactions", "missing",
-                 "sensitivity", "table1", "table1_missing", "followup", "events", "primary_ci", "abs_risk")
+                 "sensitivity", "table1", "table1_missing", "followup", "events", "primary_ci", "abs_risk",
+                 "objective", "design", "setting")
 
 # The survival routes (route ids), for the follow-up item.
 SR_CK_SURVIVAL_ROUTES <- c("cox", "rmst")
@@ -168,7 +169,33 @@ sr_checklist_strobe <- function(model, project) {
       .sr_ck_score("amber", "no risk difference, number needed to treat or risk row is reported")
     }
   }
-  scorer <- list(author = s_author, flow = s_flow, roles = s_methods, methods = s_methods,
+  s_design <- function() {
+    d <- .sr_wr_choice(project, "design")
+    if (is.na(d)) return(.sr_ck_score("red", "the study design is not decided in the router"))
+    dtxt <- unname(SR_WR_DESIGN_TEXT[d])
+    .sr_ck_score("green", paste0("design: ", if (is.na(dtxt)) d else dtxt, " (decision log in the supplement)"))
+  }
+  s_objective <- function() {
+    pop <- .sr_wr_pico_field(project, "population")
+    out <- .sr_wr_pico_field(project, "outcome")
+    pur <- .sr_wr_choice(project, "purpose")
+    if (is.na(pop) || is.na(out)) {
+      .sr_ck_score("amber", "set the PICO population and outcome")
+    } else if (is.na(pur)) {
+      .sr_ck_score("amber", "the PICO is set but the analysis purpose is not decided")
+    } else {
+      .sr_ck_score("green", paste0("objective from the PICO (population, outcome) and the ", pur, " purpose"))
+    }
+  }
+  s_setting <- function() {
+    if (!is.na(.sr_wr_pico_field(project, "setting")) && !is.na(.sr_wr_pico_field(project, "period"))) {
+      .sr_ck_score("green", "setting and period are stated from the PICO")
+    } else {
+      .sr_ck_score("amber", "add the setting and dates to the PICO")
+    }
+  }
+  scorer <- list(objective = s_objective, design = s_design, setting = s_setting,
+                 author = s_author, flow = s_flow, roles = s_methods, methods = s_methods,
                  feasibility = s_feasibility, terms = s_terms, interactions = s_interactions, missing = s_missing,
                  sensitivity = s_sensitivity, table1 = s_table1, table1_missing = s_table1, followup = s_followup,
                  events = s_events, primary_ci = s_primary_ci, abs_risk = s_abs_risk)

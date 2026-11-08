@@ -41,11 +41,11 @@
   invisible(TRUE)
 }
 
-# Build the project (not cached). `decision` is the feasibility decision of every primary analysis,
+# Build the project (not cached); `...` goes to .fx_feasible (-> .fx_routed: design, pico). `decision` is the feasibility decision of every primary analysis,
 # `boot` gives a_mp the bootstrap layer (B = 200), `drop` lists analyses never added (x_age too) and
 # `unrun` analyses that are not run. The caller's `env` owns the project folder and its cleanup.
 .fx_writer_build <- function(env = parent.frame(), decision = "proceed", boot = FALSE,
-                             drop = character(), unrun = character()) {
+                             drop = character(), unrun = character(), ...) {
   .fx_writer_routes()
   df <- .fx_writer_frame()
   tau <- round(unname(stats::quantile(df$time, 0.8)), 3)
@@ -78,7 +78,7 @@
   p <- reg(p, "a_mp", "modpois", mp, "sensitivity")
   members <- setdiff(c("a_lr", "a_cox"), drop)
   if (length(members)) p <- sr_sap_family(p, "fam1", members, "holm")
-  p <- sr_sap_lock(.fx_feasible(p, decision))
+  p <- sr_sap_lock(.fx_feasible(p, decision, ...))
   if (!identical(decision, "stop")) {
     for (id in setdiff(c("t1", "a_lr", "a_cox", "a_rmst", "a_mp"), c(drop, unrun))) p <- sr_run(p, id)
   }
@@ -112,7 +112,13 @@
 }
 
 # A fresh, open copy of the cached template project; closed and removed when `env` finishes.
-.fx_writer_project <- function(env = parent.frame()) {
+.fx_writer_project <- function(env = parent.frame(), ...) {
+  # extra arguments (a PICO or a design) go to the uncached builder, before the lock
+  if (length(list(...))) {
+    p <- .fx_writer_build(env = env, ...)
+    return(p)
+  }
+  .fx_writer_routes()  # an earlier test file (test-spec) may have emptied the registry since the template was cached
   tpl <- .fx_writer_template()
   dest <- withr::local_tempdir(.local_envir = env)
   file.copy(tpl, dest, recursive = TRUE)

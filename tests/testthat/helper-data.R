@@ -100,10 +100,51 @@ local({
   p
 }
 
+# Route the project so that the router gate of the SAP lock (router/gate.R) passes: set a PICO
+# (population "test population", outcome "test outcome"; `pico`, a named list, overrides or extends
+# those fields), decide the design (`design`) and the purpose (the route purpose of the first primary
+# analysis, "explain-causal" when there is none), reason "test fixture", then run the rules (no backends)
+# so rule-decided nodes such as the guideline are decided too. A covariate of a primary analysis that the
+# covariate_timing rule marks mediator / post_outcome is decided baseline (override, "test fixture"), so
+# an existing fixture is not blocked by the gate. Returns the project.
+.fx_routed <- function(p, design = "cohort_retrospective", pico = NULL, decide = NULL) {
+  q <- utils::modifyList(list(population = "test population", outcome = "test outcome"), as.list(pico))
+  p <- sr_pico_set(p, .list = q)
+  an <- .sr_sap_analyses(p)
+  prim <- Filter(function(a) identical(a$label, "primary"), an[order(names(an), method = "radix")])
+  purpose <- if (length(prim)) {
+    sr_routes()$purpose[match(prim[[1L]]$route, sr_routes()$id)]
+  } else {
+    "explain-causal"
+  }
+  if (is.na(purpose)) purpose <- "explain-causal"
+  p <- sr_router_decide(p, "design", design, reason = "test fixture")
+  p <- sr_router_decide(p, "purpose", purpose, reason = "test fixture")
+  # extra user decisions (list(node, choice, table, column, override, reason)), before the rules run
+  for (d in decide) {
+    p <- sr_router_decide(p, d$node, d$choice, reason = d$reason %||% "test fixture", table = d$table %||% NA_character_,
+                          column = d$column %||% NA_character_, override = isTRUE(d$override))
+  }
+  p <- sr_router_run(p)
+  adj <- unique(unlist(lapply(prim, function(a) lapply(a$spec$terms, function(t) paste(a$table, t$var, sep = "\r")))))
+  tab <- sr_router_table(p)
+  tab <- tab[tab$node == "covariate_timing" & tab$status == "decided" &
+               tab$choice %in% c("mediator", "post_outcome"), , drop = FALSE]
+  for (i in seq_len(nrow(tab))) {
+    if (!paste(tab$table[i], tab$column[i], sep = "\r") %in% adj) next
+    p <- sr_router_decide(p, "covariate_timing", "baseline", reason = "test fixture", table = tab$table[i],
+                          column = tab$column[i], override = TRUE)
+  }
+  p
+}
+
 # Assess and decide every pre-specified primary analysis (no delta, reason "test fixture"), so that the
 # SAP lock gate (sap/feasibility.R) passes: p <- sr_sap_lock(.fx_feasible(p)). A clustered analysis is
-# given a test ICC (the engine refuses it without one). Returns the project.
-.fx_feasible <- function(p, decision = "proceed") {
+# given a test ICC (the engine refuses it without one). When `routed` is TRUE (the default), .fx_routed(p,
+# ...) runs FIRST (the router gate of the lock needs a decided design and purpose); `...` goes to it.
+# Returns the project.
+.fx_feasible <- function(p, decision = "proceed", routed = TRUE, ...) {
+  if (isTRUE(routed)) p <- .fx_routed(p, ...)
   an <- .sr_sap_analyses(p)
   for (id in sort(as.character(names(an)), method = "radix")) {
     a <- an[[id]]

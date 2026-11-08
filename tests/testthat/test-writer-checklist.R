@@ -15,7 +15,7 @@ test_that("strobe.csv has the 34 items, every rule is known and no label is long
   expect_true(all(words >= 1L & words <= 10L), info = paste(tpl$item[words > 10L], collapse = ", "))
   # the rules of the items, as the plan lists them
   expect_identical(tpl$item[tpl$rule == "author"],
-                   c("1a", "1b", "2", "3", "4", "5", "6b", "8", "9", "12d", "16b", "18", "19", "20", "21", "22"))
+                   c("1a", "1b", "2", "6b", "8", "9", "12d", "16b", "18", "19", "20", "21", "22"))
   expect_identical(tpl$item[tpl$rule == "flow"], c("6a", "13a", "13b", "13c"))
   expect_identical(tpl$item[tpl$rule == "sensitivity"], c("12e", "17"))
   expect_true(all(vapply(tpl$label, function(x) !grepl("[^ -~]", x), NA)))
@@ -62,8 +62,8 @@ test_that("the checklist block is last in the supplement and the STROBE referenc
   refs <- m$main[[length(m$main)]]
   expect_identical(refs$type, "refs")
   expect_identical(sum(refs$keys == "vonelm2007"), 1L)
-  # numbered by first use, in the software sentence after r_core and the packages (not appended at the end)
-  expect_gt(match("vonelm2007", refs$keys), match("pkg_survival", refs$keys))
+  # numbered by first use: the study-design paragraph opens the Methods and cites it first
+  expect_identical(match("vonelm2007", refs$keys), 1L)
   expect_false(anyDuplicated(refs$keys) > 0L)
   g <- sr_claim_guard(m)
   expect_identical(nrow(g), 0L, info = paste(g$block, g$rule, g$detail, collapse = "\n"))
