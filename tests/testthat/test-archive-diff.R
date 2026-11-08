@@ -46,7 +46,7 @@ test_that(".sr_fz_numbers and the changed / structure / missing statuses", {
   expect_identical(r$status[r$analysis == "a_rmst"], "missing")
 })
 
-test_that("results diff: structure, not_run, NA handling", {
+test_that("results diff: structure, not_run", {
   p <- sr_freeze(.fx_writer_project())
   withr::local_options(sr.cran_snapshot = "2099-01-01")
   p <- sr_rebaseline(p, "snapshot moved")
@@ -73,4 +73,59 @@ test_that("an old manifest with an unnamed libsnap pkgs does not crash the diff"
   expect_identical(d$library$from[d$library$item == "packages"], "unknown")
   old$libsnap_hash <- now$libsnap_hash
   expect_identical(nrow(.sr_freeze_diff_manifests(old, now)$library), 0L)
+})
+
+test_that(".sr_fz_compare is exact and never gives NaN", {
+  cmp <- .sr_fz_compare
+  r <- cmp(c(a = Inf, b = 1), c(a = Inf, b = 1))
+  expect_identical(r$status, "identical"); expect_identical(r$max_abs, 0); expect_identical(r$max_rel, 0)
+  r <- cmp(c(a = Inf), c(a = 5))
+  expect_identical(r$status, "changed"); expect_identical(r$max_rel, Inf); expect_identical(r$max_abs, Inf)
+  r <- cmp(c(a = Inf), c(a = -Inf))
+  expect_identical(r$status, "changed"); expect_false(is.nan(r$max_rel))
+  r <- cmp(c(a = NA_real_, b = 1), c(a = 2, b = 1))
+  expect_identical(r$status, "changed"); expect_true(is.na(r$max_abs)); expect_identical(r$n, 2L)
+  r <- cmp(c(a = NaN, b = 1), c(a = NaN, b = 1))
+  expect_identical(r$status, "identical")
+  r <- cmp(c(a = NA_real_), c(a = NA_real_))
+  expect_identical(r$status, "identical")
+  r <- cmp(c(a = 1L), c(a = 1))
+  expect_identical(r$status, "identical")
+  r <- cmp(c(a = 1, b = NA_real_), c(a = 2, b = NA_real_))
+  expect_identical(r$status, "changed"); expect_identical(r$max_abs, 1)
+  expect_identical(cmp(c(a = 1), c(b = 1))$status, "structure")
+  expect_identical(cmp(c(a = 1), c(a = 1, b = 2))$status, "structure")
+})
+
+test_that("results diff: a corrupt fit is missing, a NULL value is structure", {
+  p <- sr_freeze(.fx_writer_project())
+  withr::local_options(sr.cran_snapshot = "2099-01-01")
+  p <- sr_rebaseline(p, "snapshot moved")
+  p <- sr_run(p, "a_lr")
+  f <- file.path(p$paths$fits, paste0(p$state$runs$a_lr$ok_key, ".rds"))
+  s <- readRDS(f); s["value"] <- list(NULL); saveRDS(s, f)
+  expect_identical(sr_freeze_results_diff(p, "submission-v1")$status[sr_freeze_results_diff(p, "submission-v1")$analysis == "a_lr"], "structure")
+  writeBin(as.raw(1:5), f)
+  r <- sr_freeze_results_diff(p, "submission-v1")
+  expect_identical(r$status[r$analysis == "a_lr"], "missing")
+})
+
+test_that(".sr_freeze_diff_manifests handles changed / removed tables, added / removed analyses, from == to", {
+  tb <- function(h, rows = 1, base = "t", version = 0L) list(store_hash = h, rows = rows, base = base, version = version)
+  ru <- function(k) list(ok_key = k)
+  a <- list(tables = list(t = tb("h1", 10), u = tb("h2", 5, "u")), runs = list(x = ru("k1"), y = ru("k2")),
+            libsnap = list(r = "R", snapshot_date = NA, pkgs = list(p = "1")), libsnap_hash = "L", sap_hash = "S")
+  b <- list(tables = list(t = tb("h9", 11)), runs = list(x = ru("k1"), z = ru("k3")),
+            libsnap = a$libsnap, libsnap_hash = "L", sap_hash = "S")
+  d <- .sr_freeze_diff_manifests(a, b)
+  expect_identical(d$tables$change[d$tables$table == "t"], "changed")
+  expect_identical(d$tables$to_rows[d$tables$table == "t"], 11)
+  expect_identical(d$tables$change[d$tables$table == "u"], "removed")
+  expect_true(is.na(d$tables$to_rows[d$tables$table == "u"]))
+  expect_identical(d$analyses$change[d$analyses$analysis == "y"], "removed")
+  expect_identical(d$analyses$change[d$analyses$analysis == "z"], "added")
+  expect_identical(d$analyses$change[d$analyses$analysis == "x"], "same")
+  s <- .sr_freeze_diff_manifests(a, a)
+  expect_true(all(s$tables$change == "same")); expect_true(all(s$analyses$change == "same"))
+  expect_false(s$sap$changed); expect_identical(nrow(s$library), 0L)
 })

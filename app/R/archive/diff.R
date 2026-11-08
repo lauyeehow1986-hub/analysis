@@ -115,6 +115,29 @@ sr_freeze_diff <- function(project, from, to = NULL) {
   .sr_freeze_diff_manifests(a, b)
 }
 
+.sr_fz_unreadable <- structure(list(), class = "sr_fz_unreadable")
+
+# Exact comparison of two named numeric vectors. Status: structure (names or length differ), changed
+# (NA positions differ, or a value differs), identical. Equal values, infinities included, give a difference
+# of 0; a difference involving an infinity is Inf, so the maxima are never NaN. NA and NaN count as NA, and
+# the maxima are NA when the NA positions differ.
+.sr_fz_compare <- function(x, y) {
+  res <- function(status, n = NA_integer_, ab = NA_real_, rel = NA_real_) {
+    list(status = status, n = as.integer(n), max_abs = ab, max_rel = rel)
+  }
+  if (!identical(names(x), names(y)) || length(x) != length(y)) return(res("structure"))
+  n <- length(x)
+  if (!identical(is.na(x), is.na(y))) return(res("changed", n))
+  ok <- !is.na(x)
+  xo <- x[ok]
+  yo <- y[ok]
+  same <- xo == yo
+  d <- ifelse(same, 0, abs(xo - yo))
+  r <- ifelse(same, 0, ifelse(is.infinite(d), Inf, d / pmax(abs(xo), .Machine$double.eps)))
+  mx <- function(v) if (length(v)) max(v) else 0
+  res(if (all(same)) "identical" else "changed", n, mx(d), mx(r))
+}
+
 #' The frozen stored result of each analysis against the current one.
 #' Status: same_run (equal keys), identical (numbers equal), changed, structure (numeric leaves differ in
 #' names or count), not_run (no current ok run), missing (a fit file is absent).
@@ -135,19 +158,12 @@ sr_freeze_results_diff <- function(project, label) {
     ff <- file.path(project$paths$fits, paste0(fk, ".rds"))
     cf <- file.path(project$paths$fits, paste0(ck, ".rds"))
     if (is.na(fk) || !file.exists(ff) || !file.exists(cf)) return(out("missing"))
-    x <- .sr_fz_numbers(readRDS(ff)$value)
-    y <- .sr_fz_numbers(readRDS(cf)$value)
-    if (!identical(names(x), names(y)) || length(x) != length(y)) return(out("structure"))
-    n <- length(x)
-    if (!identical(is.na(x), is.na(y))) return(out("changed", n))
-    ok <- !is.na(x)
-    xo <- x[ok]
-    yo <- y[ok]
-    d <- ifelse(xo == yo, 0, abs(xo - yo))   # equal infinities give 0, not NaN
-    r <- d / pmax(abs(xo), .Machine$double.eps)
-    mx <- function(v) if (length(v)) max(v) else 0
-    if (all(xo == yo)) return(out("identical", n, mx(d), mx(r)))
-    out("changed", n, mx(d), mx(r))
+    vx <- tryCatch(readRDS(ff)$value, error = function(e) .sr_fz_unreadable)
+    vy <- tryCatch(readRDS(cf)$value, error = function(e) .sr_fz_unreadable)
+    if (identical(vx, .sr_fz_unreadable) || identical(vy, .sr_fz_unreadable)) return(out("missing"))
+    if (is.null(vx) || is.null(vy)) return(out("structure"))
+    cmp <- .sr_fz_compare(.sr_fz_numbers(vx), .sr_fz_numbers(vy))
+    out(cmp$status, cmp$n, cmp$max_abs, cmp$max_rel)
   }
   rows <- lapply(ids, one)
   if (!length(rows)) {
