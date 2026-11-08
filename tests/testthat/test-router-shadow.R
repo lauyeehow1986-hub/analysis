@@ -40,13 +40,14 @@ test_that("agreement is joined to the final decision", {
   sh <- sr_router_shadow(p)
   expect_identical(nrow(sh), 1L)
   expect_identical(names(sh), c("key", "node", "table", "column", "backend", "model", "model_choice",
-                                "confidence", "would_act", "error", "final_choice", "resolver",
-                                "override", "agree", "latency_ms"))
+                                "confidence", "would_act", "error", "final_choice", "same_input",
+                                "resolver", "override", "agree", "latency_ms"))
   expect_true(is.na(sh$final_choice))
   expect_true(is.na(sh$agree))
   p <- sr_router_decide(p, "toy_a", "a2")
   sh <- sr_router_shadow(p)
   expect_identical(sh$final_choice, "a2")
+  expect_true(sh$same_input)
   expect_identical(sh$resolver, "user")
   expect_true(sh$agree)
   expect_false(sh$override)
@@ -124,4 +125,63 @@ test_that("an empty project gives empty tables and an empty export", {
   path <- file.path(withr::local_tempdir(), "empty.jsonl")
   sr_router_shadow_export(p, path)
   expect_identical(length(readLines(path, warn = FALSE)), 0L)
+})
+
+# A project-scope toy node with a question whose one fact is the PICO aim, so a PICO edit changes its
+# input hash.
+.rs_aim_node <- function(env = parent.frame()) {
+  nd <- sr_node("toy_aim", "Toy aim", c("a1", "a2"),
+                facts = function(ctx) list(aim = if (is.null(ctx$pico$aim)) NA_character_ else ctx$pico$aim),
+                question = function(ctx) list(instructions = "Pick the better of the two toy options.",
+                                              criteria = list(a1 = "first", a2 = "second")))
+  sr_node_register(nd)
+  withr::defer(.sr_node_unregister("toy_aim"), envir = env)
+  invisible("toy_aim")
+}
+
+.rs_aim <- function(p, aim) sr_pico_set(p, population = "adults", outcome = "death", aim = aim)
+
+test_that("agreement is scored only on the input the model saw", {
+  .rs_aim_node()
+  env <- environment()
+  .fx_fake_backend(env, list(choice = "a2", probabilities = c(a1 = 0.03, a2 = 0.97)))
+  p <- sr_router_run(.rs_aim(.rs_project(), "describe"), backends = "jev")   # predicted under H1
+  h1 <- p$state$router$predictions$toy_aim$jev$input_hash
+  p <- .rs_aim(p, "predict")                                                 # the facts change: H2
+  p <- sr_router_decide(p, "toy_aim", "a2")                                  # decided under H2
+  h2 <- p$state$router$decisions$toy_aim$input_hash
+  expect_false(identical(h1, h2))
+  sh <- sr_router_shadow(p)
+  expect_identical(sh$final_choice, "a2")
+  expect_false(sh$same_input)
+  expect_true(is.na(sh$agree))
+  expect_identical(sh$resolver, "user")
+  expect_false(sh$override)
+  sm <- sr_router_shadow_summary(p)
+  expect_identical(sm$decided, 1L)
+  expect_true(is.na(sm$agree_rate))
+  expect_true(is.na(sm$act_accuracy))
+  path <- file.path(withr::local_tempdir(), "golden.jsonl")
+  sr_router_shadow_export(p, path)
+  rec <- .sr_parse_json(readLines(path, warn = FALSE)[[1L]])
+  expect_identical(rec$input_hash, h1)
+  expect_identical(rec$decision_input_hash, h2)
+  expect_false(rec$same_input)
+  expect_null(rec$agree)
+  # back to H1: the prediction's input again, but the decision (H2) is stale
+  p <- .rs_aim(p, "describe")
+  sh <- sr_router_shadow(p)
+  expect_true(is.na(sh$final_choice))
+  expect_true(is.na(sh$same_input))
+  expect_true(is.na(sh$agree))
+  expect_true(is.na(sh$override))
+  expect_true(is.na(sh$resolver))
+  path2 <- file.path(withr::local_tempdir(), "golden-stale.jsonl")
+  sr_router_shadow_export(p, path2)
+  rec2 <- .sr_parse_json(readLines(path2, warn = FALSE)[[1L]])
+  expect_identical(rec2$input_hash, h1)
+  expect_null(rec2$decision_input_hash)
+  expect_null(rec2$final_choice)
+  expect_null(rec2$agree)
+  expect_null(rec2$override)
 })

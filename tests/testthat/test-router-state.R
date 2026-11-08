@@ -247,9 +247,12 @@ test_that("the mask option is read from sr_opt", {
 
 # ---- fix round 1 ------------------------------------------------------------------------------------
 
+# TRUE when `name` occurs in `x` as a whole token, with the boundary the mask uses (router/state.R): no
+# token character or "." before it, and after it neither a token character nor a "." that a token
+# character follows (so a sentence-final period ends the token, while death.rate stays one token).
 .rs_token <- function(name, x) {
-  grepl(paste0("(?<![A-Za-z0-9_.])", gsub("([][{}()*+?.^$|\\])", "\\\1", name), "(?![A-Za-z0-9_.])"),
-        x, perl = TRUE)
+  esc <- gsub("([][{}()*+?.^$|\\\\])", "\\\\\\1", name)
+  grepl(paste0("(?<![A-Za-z0-9_.])", esc, "(?![A-Za-z0-9_]|\\.[A-Za-z0-9_])"), x, perl = TRUE)
 }
 
 test_that("the mask covers every payload string", {
@@ -322,4 +325,47 @@ test_that("the column-choice builder keys the columns and the extras", {
   expect_identical(q$criteria$c002, "the column age")
   expect_true(is.character(q$criteria$none) && nzchar(q$criteria$none))
   expect_identical(names(.sr_router_column_question(ctx, "x")$criteria)[7L], "none")
+})
+
+# ---- final review: the mask boundary and the role vocabulary ---------------------------------------
+
+test_that("a name followed by punctuation is masked; an interior dot keeps one token", {
+  df <- data.frame(death = c(0, 1, 0, 1), sepsis = c(1, 0, 1, 0), death.rate = c(1, 2, 3, 4),
+                   stringsAsFactors = FALSE)
+  p <- .rs_ingested(df)
+  raw <- .sr_router_columns_raw(p, "t")
+  expect_identical(raw$name, c("death", "sepsis", "death.rate"))
+  mk <- function(x) .sr_router_mask_text(x, raw)
+  expect_identical(mk("outcome is death."), "outcome is c001.")
+  expect_identical(mk("adults with sepsis. Then"), "adults with c002. Then")
+  expect_identical(mk("the death.rate column"), "the c003 column")
+  expect_identical(mk("death.rate."), "c003.")
+  expect_identical(mk("death.ratex and death.r"), "death.ratex and death.r")
+  for (pn in c(",", ";", ":", ")", "?", "!")) {
+    expect_identical(mk(paste0("(death", pn, " sepsis", pn, ")")), paste0("(c001", pn, " c002", pn, ")"),
+                     info = pn)
+  }
+  # the test helper uses the same boundary
+  expect_true(.rs_token("death", "outcome is death."))
+  expect_true(.rs_token("sepsis", "adults with sepsis. Then"))
+  expect_false(.rs_token("death", "the death.rate column"))
+  expect_true(.rs_token("death.rate", "the death.rate column"))
+  # the PICO lines of a masked state
+  nd <- sr_node("toy_punct", "Toy punct", c("x", "y"), scope = "table",
+                question = function(ctx) list(instructions = "Pick.", criteria = list(x = "a", y = "b")))
+  p <- sr_pico_set(p, population = "adults with sepsis.", outcome = "death; within 30 days",
+                   exposure = "sepsis: yes (death)?")
+  st <- sr_router_state(.sr_router_ctx(p, nd, "t"), mask = TRUE)
+  for (n in raw$name) expect_false(.rs_token(n, st$text), info = n)
+  expect_true("population: adults with c002." %in% st$lines)
+})
+
+test_that("the role vocabulary of a column line is not masked", {
+  p <- .rs_project()
+  nd <- .rs_col_node()
+  st <- sr_router_state(.sr_router_ctx(p, nd, "t"), mask = TRUE)
+  # the column literally named outcome is masked as a name, while its role word stays
+  expect_true(any(grepl("^column[.]c005: name=c005; label=; type=[^;]*; role=outcome;", st$lines)))
+  expect_false(grepl("name=outcome", st$text, fixed = TRUE))
+  expect_true(any(grepl("role=covariate", st$lines, fixed = TRUE)))
 })

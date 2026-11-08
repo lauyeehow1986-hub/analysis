@@ -215,6 +215,13 @@ design; this file holds *what has happened* and *what we learned*.
   consent) is skipped with no event; only a missing payload approval is logged, as a failed prediction.
 - **The shadow export keeps the last prediction per (key, backend) and refuses to overwrite;** it never holds
   the key (the sentinel `sk-test-SENTINEL-0000` must not appear in events, audit, errors or an export).
+- **The lock freezes the router's view:** `sr_sap_lock` stores the current decisions in the `sap.locked`
+  payload (`router$decisions`, not an input to the hash), and once locked every reader of "current" (choice,
+  decision table, hash part, gate, writer, shadow) reads that snapshot, so roles or a DQ re-run after the
+  lock cannot make a locked decision stale or move `sr_sap_hash`. A pre-P1d lock (no snapshot) keeps the
+  live view. A test that edits a locked fixture's decisions must edit `state$sap$lock$router$decisions`.
+- **`sr_ph_resolve(x, reg)` reads the registry before forcing `x`:** build the paragraph into a variable
+  first; `sr_ph_resolve(.sr_wr_m_design(p, reg), reg)` fails with "unknown placeholder {{L1}}".
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

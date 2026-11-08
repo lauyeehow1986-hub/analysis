@@ -77,6 +77,9 @@ Notes that follow from the code:
 - `primary_route` depends only on the purpose. The outcome type is read into its facts, so a change of
   outcome type makes the route decision stale, but the route is not blocked while the type is undecided.
 - A node waits (status `waiting`, section 7) while any dependency is undecided or stale.
+- The input hashes of `design` and `purpose` also include the PICO text (the node flag `pico = TRUE`), so
+  any PICO edit, the population alone included, makes both decisions stale. The other nodes do not hash
+  the PICO text.
 - `design`, `purpose` and `covariate_timing` carry cost-matrix danger cells
   (section 3.3). `design` and `guideline` cite the STROBE reference (`vonelm2007`).
 - A node with no question (`guideline`, `outcome_type`, `primary_route`) is decided by its rule or by the
@@ -178,8 +181,11 @@ A column line holds `name`, `label`, `type`, `role` and `distinct`. There is no 
   is built and the instance is left to the user.
 - **Masking.** With `sr.router_mask` (env `SR_ROUTER_MASK`) TRUE, every real column name in the payload is
   replaced by its key (`c001`, `c002`, ...) and labels are blanked, in the PICO text, the facts, the column
-  lines and the question. Masking matches whole tokens, case-sensitively. The input hash still uses the real
-  values.
+  lines and the question. Masking matches whole tokens, case-sensitively: a name is masked when it is not
+  preceded by a letter, digit, `_` or `.`, and not followed by a letter, digit, `_` or a `.` that continues
+  the token. So the name in "outcome is death." or "adults with sepsis. Then" is masked, while `death.rate`
+  stays one token (a different name). The `role=` value of a column line is the fixed role vocabulary and is
+  not masked. The input hash still uses the real values.
 - Free text typed by the user (PICO fields, column labels) is sent as written unless masked. Masking
   replaces column names found in it; it does not remove other words.
 
@@ -266,12 +272,18 @@ Gate 5 is checked when the request is made, so a request that was not approved i
 `sr_router_table(project)` has one row per applicable instance. The columns are `key`, `node`, `label`,
 `table`, `column`, `status`, `choice`, `resolver`, `override`, `reason`, `suggested`, `backend`,
 `model_choice`, `confidence`, `would_act` and `vetoes`. The model columns come from the latest successful
-prediction under the current input hash.
+prediction under the current input hash. A decision whose node is no longer registered, or whose instance
+has gone (a column that left the covariate role, a table without roles), has no row: it is not current,
+so a reader such as the gate or the SAP hash treats it as undecided, and never errors on it.
+
+Once the SAP is locked, the table shows the lock's snapshot (section 9): every snapshot key is `decided`
+with its stored choice (a snapshot key whose instance has gone since the lock keeps a `decided` row), and
+any other decision is `stale`.
 
 | Status | Meaning |
 |---|---|
 | `decided` | A decision exists and its input hash is current. |
-| `stale` | A decision exists but its input hash has changed (or its node is no longer registered). The stored choice is still shown. Decide it again. |
+| `stale` | A decision exists but its input hash has changed. The stored choice is still shown. Decide it again. |
 | `pending` | No decision, every dependency is decided, and fewer than `SR_ROUTER_MAX_VETOES` vetoes. |
 | `waiting` | No decision and a dependency is undecided or stale. |
 | `override_required` | No decision and `SR_ROUTER_MAX_VETOES` or more vetoes. |
@@ -282,13 +294,17 @@ In P1 the model is observed, not used. `sr_router_shadow(project)` joins the lat
 `(key, backend)` with the current decision:
 
 - columns `key`, `node`, `table`, `column`, `backend`, `model`, `model_choice`, `confidence`, `would_act`,
-  `error`, `final_choice`, `resolver`, `override`, `agree` and `latency_ms`;
-- `final_choice` is NA when the instance is undecided or stale, and `agree` is NA when either side is NA.
+  `error`, `final_choice`, `same_input`, `resolver`, `override`, `agree` and `latency_ms`;
+- `final_choice` is NA when the instance is undecided or stale;
+- `same_input` is TRUE when the prediction was made under the input hash of the current decision, FALSE
+  when the decision was made under other inputs, and NA when there is no current decision;
+- `agree` is scored only when `same_input` is TRUE: it is NA when either choice is NA or the model saw
+  other inputs than the decision was made under.
 
 `sr_router_shadow_summary(project)` gives, per node and backend: `n` predictions, `decided` (with a final
-choice), `agree_rate` (over decided rows without an error), `would_act_rate` (over n), `act_accuracy`
-(agreement among decided rows that would act, NA when none, the seed of a risk and coverage curve) and
-`error_rate` (over n).
+choice), `agree_rate` (over the rows with a scored `agree`, without an error), `would_act_rate` (over
+n), `act_accuracy` (agreement among the scored rows that would act, NA when none, the seed of a risk and
+coverage curve) and `error_rate` (over n).
 
 `sr_router_shadow_export(project, path)` writes the golden-set feed for P3 as JSON lines, one per
 `(key, backend)`:
@@ -296,7 +312,9 @@ choice), `agree_rate` (over decided rows without an error), `would_act_rate` (ov
 - it keeps the last `router.predicted` event of each pair, from the event log;
 - each line holds `key`, `node`, `table`, `column`, `backend`, `model`, `input_hash`, `payload_sha`,
   `payload`, `raw`, `choice`, `probabilities`, `confidence`, `would_act`, `error`, `final_choice`,
-  `resolver`, `override`, `agree` and `latency_ms`;
+  `decision_input_hash`, `same_input`, `resolver`, `override`, `agree` and `latency_ms`. `input_hash` is
+  the prediction's; `decision_input_hash` is the one the current decision was made under (NA without a
+  current decision);
 - it refuses to overwrite an existing file, and writes no key;
 - the payload holds metadata, including column names unless masking was on. Treat the file like the
   project's metadata.
@@ -311,13 +329,22 @@ choice), `agree_rate` (over decided rows without an error), `would_act_rate` (ov
 | `study purpose` | `block` while the purpose is undecided or stale; otherwise `ok`, with the choice. |
 | `purpose fits the analyses` | `warn` for each primary analysis whose route serves another purpose than the decided one; otherwise `ok`. Checked once the purpose is decided (while it is not, the row is `ok` and the `study purpose` row blocks). |
 | `primary route` | Only when a primary route is decided. `warn` for each decided route of a table that no primary analysis on that table uses; otherwise `ok`. |
-| `covariate timing` | `block` for a causal (explain-causal) primary analysis that adjusts for a column decided `mediator` or `post_outcome`. `warn` when adjusted covariates of a causal primary have no current timing decision. Otherwise `ok`. |
+| `covariate timing` | `block` for a causal (explain-causal) primary analysis that adjusts for a column decided `mediator` or `post_outcome`. `warn` when adjusted covariates of a causal primary have no current timing decision (each table and column counted once, however many primaries adjust for it). Otherwise `ok`. |
 
 The router also adds a part to `sr_sap_hash()`: the eight PICO fields and every current decision, ordered by
 key, with its choice, resolver, override, reason and input hash. The part is absent when there is no
 `pico.set` and no current decision, so a SAP that never used the router keeps its hash. After the lock
 the question and the decisions cannot change: `pico.set` and `router.decided` are refused, and a router run
 is a no-op.
+
+**The lock freezes the router's view.** `sr_sap_lock()` writes a snapshot of every decision current at the
+lock into the `sap.locked` payload (`router$decisions`: key, choice, resolver, override, reason, input
+hash). The snapshot is not an input to the hash. Once the SAP is locked, every reader of "current" uses the
+snapshot instead of recomputing input hashes: `sr_router_choice()`, `sr_router_table()`, the router part
+of `sr_sap_hash()`, the gate rows, the writer and the shadow report. A snapshot key is decided with its
+stored choice, and any other key is not current. So edits still allowed after the lock (roles re-confirmed,
+a DQ re-run) do not make a locked decision stale and leave `sr_sap_hash()` equal to the locked hash. A lock
+made before P1d has no snapshot and keeps the live view.
 
 ## 10. In the manuscript
 
@@ -326,7 +353,9 @@ setting, the guideline and a pointer to the decision log) and a supplementary ta
 which holds each decided instance, its choice, who decided it, any override and the reason. No probability
 appears in either. STROBE items 3 (objective), 4 (design) and 5 (setting and dates) are scored from the PICO
 and the decisions. A CONSORT (`rct`) project gets a CONSORT citation and a note that the checklist is not
-produced; `sr_export` then writes no `checklist_strobe.csv`. See [writer.md](writer.md).
+produced; `sr_export` then writes no `checklist_strobe.csv`. The software sentence names the reporting
+guideline only when it is decided `strobe` or `consort`; for `none` or an undecided guideline it names none.
+See [writer.md](writer.md).
 
 ## 11. What P3 adds
 

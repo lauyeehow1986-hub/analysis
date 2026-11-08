@@ -60,8 +60,9 @@ sr_router_columns <- function(project, table, mask = sr_opt("router_mask", FALSE
 }
 
 # Replace whole-token occurrences of the real column names in `x` by their keys: case-sensitive, longest
-# name first, a token boundary being any character outside [A-Za-z0-9_.] (or the string's ends). One pass,
-# so a key that equals another column's name is never replaced twice.
+# name first. A token may not follow [A-Za-z0-9_.] nor be followed by [A-Za-z0-9_] or by a dot that
+# continues the token, so "death." or "sepsis. Then" is masked while "death.rate" stays one token. One
+# pass, so a key that equals another column's name is never replaced twice.
 .sr_router_mask_text <- function(x, raw) {
   x <- as.character(x)
   if (!length(x) || !nrow(raw)) return(x)
@@ -70,7 +71,7 @@ sr_router_columns <- function(project, table, mask = sr_opt("router_mask", FALSE
   nm <- nm[!duplicated(nm)]
   if (!length(nm)) return(x)
   esc <- gsub("([][{}()*+?.^$|\\\\])", "\\\\\\1", nm)
-  re <- paste0("(?<![A-Za-z0-9_.])(?:", paste(esc, collapse = "|"), ")(?![A-Za-z0-9_.])")
+  re <- paste0("(?<![A-Za-z0-9_.])(?:", paste(esc, collapse = "|"), ")(?![A-Za-z0-9_]|\\.[A-Za-z0-9_])")
   vapply(x, function(s) {
     if (is.na(s)) return(s)
     m <- gregexpr(re, s, perl = TRUE)
@@ -108,7 +109,7 @@ sr_router_columns <- function(project, table, mask = sr_opt("router_mask", FALSE
   paste0("fact.", .sr_router_oneline(names(facts)), ": ", .sr_router_oneline(vals))
 }
 
-# One `column.<key>: ...` line per column.
+# One `column.<key>: ...` line per column. The role= value is the fixed role vocabulary, never masked.
 .sr_router_column_lines <- function(cols) {
   if (!nrow(cols)) return(character())
   sprintf("column.%s: name=%s; label=%s; type=%s; role=%s; distinct=%s", cols$key,

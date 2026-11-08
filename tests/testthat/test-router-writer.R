@@ -94,7 +94,10 @@ test_that("a CONSORT design swaps the checklist for a note", {
 
 test_that("an undecided design leaves the Methods without the design paragraph", {
   p <- .fx_writer_project(environment())
+  # the project is locked, so the router reads the snapshot of the lock: drop the design there too
   p$state$router$decisions[[sr_router_key("design")]] <- NULL
+  expect_false(is.null(.sr_wr_m_design(p, sr_ph_registry())))
+  p$state$sap$lock$router$decisions[[sr_router_key("design")]] <- NULL
   expect_null(.sr_wr_m_design(p, sr_ph_registry()))
 })
 
@@ -124,3 +127,32 @@ test_that("the objective item has no red state", {
   expect_match(ck$detail[ck$item == "3"], "set the PICO population and outcome", fixed = TRUE)
 })
 
+test_that("the design sentence takes the article of its first letter", {
+  expect_identical(.sr_wr_article("observational"), "an")
+  expect_identical(.sr_wr_article("retrospective cohort"), "a")
+  expect_identical(.sr_wr_article("Observational"), "an")
+  expect_identical(.sr_wr_article("case-control"), "a")
+  p <- .fx_writer_project(environment())
+  p$state$sap$lock$router$decisions$design$choice <- "other"
+  # the paragraph is built before sr_ph_resolve reads the registry (its argument is lazy)
+  say <- function(p) {
+    reg <- sr_ph_registry()
+    para <- .sr_wr_m_design(p, reg)
+    sr_ph_resolve(para, reg)
+  }
+  expect_match(say(p), "^This was an observational study[.]")
+  p$state$sap$lock$router$decisions$design$choice <- "cohort_retrospective"
+  expect_match(say(p), "^This was a retrospective cohort study[.]")
+})
+
+test_that("the software sentence names a reporting guideline only for STROBE or CONSORT", {
+  say <- function(g) .sr_wr_m_software(sr_ph_registry(), character(), g)
+  expect_match(say("strobe"), "Reporting follows the STROBE statement", fixed = TRUE)
+  expect_match(say("consort"), "Reporting follows the CONSORT statement", fixed = TRUE)
+  for (g in list("none", NA_character_, "other")) {
+    txt <- say(g)
+    expect_false(grepl("Reporting follows", txt, fixed = TRUE), info = g)
+    expect_false(grepl("checklist", txt, fixed = TRUE), info = g)
+    expect_match(txt, "the exact code is supplied as analysis.R.$", info = g)
+  }
+})

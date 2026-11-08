@@ -56,12 +56,12 @@ sr_sysone_confidence <- function(p) {
 
 .sr_sysone_parse_one <- function(ans, keys) {
   if (is.null(ans) || !is.list(ans)) return(.sr_sysone_fail("answer missing"))
-  if (!identical(ans$type, "choice")) return(.sr_sysone_fail("answer type is not 'choice'"))
-  ch <- ans$choice
+  if (!identical(ans[["type"]], "choice")) return(.sr_sysone_fail("answer type is not 'choice'"))
+  ch <- ans[["choice"]]
   if (!is.character(ch) || length(ch) != 1L || is.na(ch) || !ch %in% keys) {
     return(.sr_sysone_fail("choice is not one of the criteria keys"))
   }
-  pr <- ans$probabilities
+  pr <- ans[["probabilities"]]
   pv <- suppressWarnings(vapply(pr, function(v) as.numeric(v)[1L], numeric(1)))
   pn <- names(pr)
   if (length(pr) < 1L || is.null(pn) || anyNA(pv) || anyNA(pn) || !all(pn %in% keys) ||
@@ -78,7 +78,7 @@ sr_sysone_confidence <- function(p) {
 
 #' Validate a parsed response against its request: one result per question.
 sr_sysone_parse <- function(response, request) {
-  answers <- if (is.list(response)) response$answers else NULL
+  answers <- if (is.list(response)) response[["answers"]] else NULL
   out <- lapply(names(request$questions), function(q) {
     .sr_sysone_parse_one(answers[[q]], names(request$questions[[q]]$criteria))
   })

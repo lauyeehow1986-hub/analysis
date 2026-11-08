@@ -100,3 +100,22 @@ test_that("the backend registry", {
   expect_true(is.function(.sr_backend_get("fake")$ask))
   expect_error(.sr_backend_get("nope"), "unknown backend")
 })
+
+test_that("sr_sysone_parse matches the answer fields exactly (no partial matching)", {
+  one <- function(ans) sr_sysone_parse(list(answers = list(design = ans)), .so_req())$design
+  pr <- list(rct = 0.9, case_control = 0.1)
+  cases <- list(
+    typ = list(typ = "choice", choice = "rct", probabilities = pr),
+    typex = list(typeX = "choice", choice = "rct", probabilities = pr),
+    choices = list(type = "choice", choices = "rct", probabilities = pr),
+    probs = list(type = "choice", choice = "rct", probabilitiesX = pr)
+  )
+  for (nm in names(cases)) {
+    r <- one(cases[[nm]])
+    expect_false(r$ok, info = nm)
+    expect_true(is.character(r$error) && nzchar(r$error), info = nm)
+  }
+  expect_false(sr_sysone_parse(list(answersX = list(design = list(type = "choice", choice = "rct",
+                                                                  probabilities = pr))), .so_req())$design$ok)
+  expect_true(one(list(type = "choice", choice = "rct", probabilities = pr))$ok)
+})
