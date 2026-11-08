@@ -188,3 +188,35 @@ local({
   }
   p
 }
+
+# One 512-byte ustar header (raw) for hand-built tar fixtures; Task 5 reuses it.
+.fx_tar_header <- function(name, type = "0", size = 0, linkname = "") {
+  h <- raw(512)
+  oct <- function(x, w) {
+    s <- as.character(as.octmode(as.integer(x)))
+    paste0(strrep("0", w - nchar(s)), s)
+  }
+  put <- function(h, off, s, len) {
+    b <- charToRaw(s)
+    stopifnot(length(b) <= len)
+    h[off + seq_along(b)] <- b
+    h
+  }
+  h <- put(h, 0, name, 100)
+  h <- put(h, 100, "0000644", 7)
+  h <- put(h, 108, "0000000", 7)
+  h <- put(h, 116, "0000000", 7)
+  h <- put(h, 124, oct(size, 11), 11)
+  h <- put(h, 136, "00000000000", 11)
+  h <- put(h, 156, type, 1)
+  h <- put(h, 157, linkname, 100)
+  h <- put(h, 257, "ustar", 5)
+  h <- put(h, 263, "00", 2)
+  h[149:156] <- as.raw(32L)
+  h[157] <- charToRaw(type)
+  ck <- sum(as.integer(h))
+  h <- put(h, 148, oct(ck, 6), 6)
+  h[148 + 7] <- as.raw(0L)
+  h[148 + 8] <- as.raw(32L)
+  h
+}
