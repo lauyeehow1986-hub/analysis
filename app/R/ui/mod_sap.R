@@ -82,13 +82,16 @@
 # from names(input)): a field the user never saw keeps its prefill.
 .sr_sap_entry_value <- function(e, input, present) {
   has <- function(k) k %in% present
+  # a row editor is present when any of its inputs is live (an unchanged count is never re-sent)
+  any_row <- function(prefix) any(startsWith(present, prefix))
   rd <- function(k) shiny::isolate(input[[k]])
   switch(e$kind,
     terms = {
-      if (!has("f_terms_n")) return(NULL)
+      if (!any_row("f_terms_")) return(NULL)
       vals <- e$value %||% list()
       pick <- function(k, fb) if (has(k)) rd(k) %||% "" else fb
-      lapply(seq_len(.sr_sap_n(rd("f_terms_n"))), function(i) {
+      n <- if (has("f_terms_n")) .sr_sap_n(rd("f_terms_n")) else min(length(vals), SR_FORM_MAX_ROWS)
+      lapply(seq_len(n), function(i) {
         t <- if (i <= length(vals)) vals[[i]] else list()
         list(var = pick(paste0("f_terms_var_", i), .sr_ui_chr(t[["var"]])),
              type = pick(paste0("f_terms_type_", i), if (is.null(t[["type"]])) "linear" else t[["type"]]),
@@ -96,10 +99,11 @@
       })
     },
     interactions = {
-      if (!has("f_int_n")) return(NULL)
+      if (!any_row("f_int_")) return(NULL)
       vals <- e$value %||% list()
       pick <- function(k, fb) if (has(k)) rd(k) %||% "" else fb
-      lapply(seq_len(.sr_sap_n(rd("f_int_n"))), function(i) {
+      n <- if (has("f_int_n")) .sr_sap_n(rd("f_int_n")) else min(length(vals), SR_FORM_MAX_ROWS)
+      lapply(seq_len(n), function(i) {
         ia <- if (i <= length(vals)) as.character(unlist(vals[[i]])) else c("", "")
         c(pick(paste0("f_int_a_", i), .sr_ui_chr(ia[1L])), pick(paste0("f_int_b_", i), .sr_ui_chr(ia[2L])))
       })
