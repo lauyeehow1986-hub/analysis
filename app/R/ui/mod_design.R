@@ -80,9 +80,7 @@
 }
 
 # Add attributes to the form control(s) inside a shiny input tag (not to its outer div).
-.sr_design_on_control <- function(tag, selector, ...) {
-  htmltools::tagQuery(tag)$find(selector)$addAttrs(...)$allTags()
-}
+.sr_design_on_control <- function(tag, selector, ...) .sr_ui_on_control(tag, selector, ...)
 
 # ---- UI --------------------------------------------------------------------------------------------
 

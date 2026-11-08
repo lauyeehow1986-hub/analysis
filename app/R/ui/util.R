@@ -103,3 +103,9 @@
 .sr_ui_open_folder <- function(dir) {
   if (.Platform$OS.type == "windows") shell.exec(dir) else utils::browseURL(dir)
 }
+
+# Add attributes to the form control(s) inside a shiny input tag (not to its outer div): maxlength, disabled
+# and the like belong on the <input> / <select> / <textarea> itself.
+.sr_ui_on_control <- function(tag, selector, ...) {
+  htmltools::tagQuery(tag)$find(selector)$addAttrs(...)$allTags()
+}

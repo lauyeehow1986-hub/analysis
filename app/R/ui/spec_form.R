@@ -335,3 +335,131 @@ sr_spec_form_route <- function(project, table) {
   ch <- .sr_form_router(project, "primary_route", table)
   if (is.null(ch)) NA_character_ else ch
 }
+
+# ---- the renderer (Shiny input tags for a form description) -------------------------------------------
+
+SR_FORM_MAX_ROWS <- 30L
+.SR_FORM_TEXT_MAX <- 200L
+
+.sr_ui_source_text <- function(source) {
+  if (is.null(source) || length(source) != 1L || is.na(source)) return(NULL)
+  switch(as.character(source), router = "from router", roles = "from roles", default = "default",
+         saved = "saved", NULL)
+}
+
+# The label of a field: its text, a required mark, and the small source badge.
+.sr_ui_field_label <- function(e) {
+  src <- .sr_ui_source_text(e$source)
+  shiny::tagList(e$label, if (isTRUE(e$required)) " *",
+                 if (!is.null(src)) shiny::span(class = "badge text-bg-light border ms-1 fw-normal", src))
+}
+
+.sr_ui_off <- function(tag, selector, disabled) {
+  if (isTRUE(disabled)) .sr_ui_on_control(tag, selector, disabled = NA) else tag
+}
+
+# A plain <select> whose options may be disabled (a disabled option carries its reason in its text).
+.sr_ui_select <- function(id, label, choices, selected, disabled_choices = character(), disabled = FALSE,
+                          texts = NULL) {
+  texts <- texts %||% stats::setNames(choices, choices)
+  opts <- lapply(choices, function(ch) {
+    off <- ch %in% names(disabled_choices)
+    txt <- if (nzchar(ch) && ch %in% names(texts)) texts[[ch]] else ch
+    shiny::tags$option(value = ch, if (off) paste0(txt, " (", disabled_choices[[ch]], ")") else txt,
+                       disabled = if (off) NA, selected = if (identical(ch, selected)) NA)
+  })
+  shiny::div(class = "form-group shiny-input-container mb-2", style = "width:100%;",
+             shiny::tags$label(class = "control-label", `for` = id, label),
+             shiny::tags$select(id = id, class = "form-select", disabled = if (isTRUE(disabled)) NA, opts))
+}
+
+.sr_ui_chr <- function(x) if (is.null(x) || !length(x) || all(is.na(x))) "" else as.character(x)[1L]
+
+.sr_ui_terms_inputs <- function(e, ns, disabled) {
+  vals <- e$value %||% list()
+  n0 <- min(length(vals), SR_FORM_MAX_ROWS)
+  cols <- c("", e$choices)
+  rows <- lapply(seq_len(SR_FORM_MAX_ROWS), function(i) {
+    t <- if (i <= length(vals)) vals[[i]] else list()
+    kn <- t[["knots"]]
+    shiny::conditionalPanel(
+      condition = sprintf("input.f_terms_n >= %d", i), ns = ns,
+      shiny::div(class = "d-flex gap-2 align-items-end",
+        .sr_ui_select(ns(paste0("f_terms_var_", i)), paste("Term", i), cols, .sr_ui_chr(t[["var"]]),
+                      disabled = disabled),
+        .sr_ui_select(ns(paste0("f_terms_type_", i)), "Type", .sr_term_types,
+                      if (is.null(t[["type"]])) "linear" else as.character(t[["type"]]), disabled = disabled),
+        .sr_ui_off(shiny::textInput(ns(paste0("f_terms_knots_", i)), "Knots (rcs)",
+                                    value = paste(as.character(kn), collapse = ","), width = "100%"),
+                   "input", disabled)))
+  })
+  shiny::tagList(
+    .sr_ui_off(shiny::numericInput(ns("f_terms_n"), .sr_ui_field_label(e), value = n0, min = 0L,
+                                   max = SR_FORM_MAX_ROWS, step = 1L, width = "100%"), "input", disabled),
+    rows)
+}
+
+# The variables an interaction may name: the exposure plus the linear and factor terms.
+.sr_ui_int_choices <- function(exposure, terms) {
+  tv <- vapply(terms, function(t) {
+    ty <- t[["type"]]
+    if (is.null(ty) || ty %in% c("linear", "factor")) .sr_ui_chr(t[["var"]]) else ""
+  }, "")
+  ch <- unique(c(.sr_ui_chr(exposure), tv))
+  ch[nzchar(ch)]
+}
+
+.sr_ui_interaction_inputs <- function(e, ns, disabled, choices) {
+  vals <- e$value %||% list()
+  n0 <- min(length(vals), SR_FORM_MAX_ROWS)
+  rows <- lapply(seq_len(SR_FORM_MAX_ROWS), function(i) {
+    ia <- if (i <= length(vals)) as.character(unlist(vals[[i]])) else c("", "")
+    shiny::conditionalPanel(
+      condition = sprintf("input.f_int_n >= %d", i), ns = ns,
+      shiny::div(class = "d-flex gap-2",
+        .sr_ui_select(ns(paste0("f_int_a_", i)), paste("Interaction", i, "- first"), c("", choices),
+                      .sr_ui_chr(ia[1L]), disabled = disabled),
+        .sr_ui_select(ns(paste0("f_int_b_", i)), "second", c("", choices), .sr_ui_chr(ia[2L]),
+                      disabled = disabled)))
+  })
+  shiny::tagList(
+    .sr_ui_off(shiny::numericInput(ns("f_int_n"), .sr_ui_field_label(e), value = n0, min = 0L,
+                                   max = SR_FORM_MAX_ROWS, step = 1L, width = "100%"), "input", disabled),
+    rows)
+}
+
+#' The input tags of a form description (sr_spec_form): one control per entry, its id `ns("f_<id>")`, a
+#' source badge next to the label, every control disabled when `disabled`. The terms editor and the
+#' interactions editor use the fixed ids f_terms_n / f_terms_var_<i> / f_terms_type_<i> / f_terms_knots_<i>
+#' and f_int_n / f_int_a_<i> / f_int_b_<i>. Layers are plain selects; a layer value that P1 cannot run is
+#' a disabled option that says why. matching and clustered take "FALSE" / "TRUE" choices.
+.sr_ui_spec_inputs <- function(form, ns, disabled = FALSE) {
+  exposure <- form[["exposure"]]$value
+  terms_val <- form[["terms"]]$value %||% list()
+  one <- function(e) {
+    id <- ns(paste0("f_", e$id))
+    lab <- .sr_ui_field_label(e)
+    v <- e$value
+    switch(e$kind,
+      column = .sr_ui_select(id, lab, c("", e$choices), .sr_ui_chr(v), disabled = disabled),
+      columns = .sr_ui_off(shiny::selectInput(id, lab, choices = e$choices, selected = as.character(unlist(v)),
+                                              multiple = TRUE, width = "100%"), "select", disabled),
+      enum = .sr_ui_select(id, lab, e$choices, .sr_ui_chr(if (is.null(v)) e$default else v), disabled = disabled),
+      logical = .sr_ui_off(shiny::checkboxInput(id, lab, value = isTRUE(as.logical(v)[1L])), "input", disabled),
+      number = .sr_ui_off(shiny::numericInput(id, lab, value = if (is.null(v)) NA_real_ else as.numeric(v)[1L],
+                                              width = "100%"), "input", disabled),
+      text = , event = .sr_ui_off(
+        .sr_ui_on_control(shiny::textInput(id, lab, value = .sr_ui_chr(v), width = "100%"), "input",
+                          maxlength = .SR_FORM_TEXT_MAX), "input", disabled),
+      layers = {
+        flag <- e$id %in% paste0("layers_", SR_LAYER_FLAGS)
+        sel <- if (is.null(v)) .sr_ui_chr(e$default) else as.character(v)[1L]
+        texts <- if (flag) c("FALSE" = "no", "TRUE" = "yes") else stats::setNames(e$choices, e$choices)
+        .sr_ui_select(id, lab, e$choices, sel, e$disabled, disabled, texts)
+      },
+      terms = .sr_ui_terms_inputs(e, ns, disabled),
+      interactions = .sr_ui_interaction_inputs(e, ns, disabled, .sr_ui_int_choices(exposure, terms_val)),
+      NULL)
+  }
+  shiny::tagList(lapply(unname(form), one))
+}
