@@ -493,7 +493,7 @@ test_that("exposure prevalence (R12): a factor exposure gives every level's shar
   p <- .ft_project(env = env)
   p <- sr_feasibility_assess(p, "p1", delta = .ft_delta())
   p <- sr_feasibility_decide(p, "p1", "proceed", reason = "adequate for the pre-specified contrast")
-  sr_sap_lock(p)
+  sr_sap_lock(.fx_routed(p))
 }
 
 test_that("after the lock the verdict is frozen: no assess, no decide, no engine call", {
@@ -509,7 +509,7 @@ test_that("after the lock the verdict is frozen: no assess, no decide, no engine
   p <- sr_feasibility_assess(p, "p1", delta = .ft_delta())
   expect_gt(seen$n, 0L)
   p <- sr_feasibility_decide(p, "p1", "proceed", reason = "adequate for the pre-specified contrast")
-  p <- sr_sap_lock(p)
+  p <- sr_sap_lock(.fx_routed(p))
   seen$n <- 0L
 
   expect_identical(sr_sap_hash(p), p$state$sap$lock$sap_hash)
@@ -543,6 +543,8 @@ test_that("the SAP hash covers the feasibility record, and only when there is on
   # a SAP locked before P1c.1 (no feasibility records) keeps the hash it had: the element is absent
   q <- p
   q$state$feasibility <- NULL
+  q$state$pico <- NULL                         # nor the router part (P1d): no question, no decisions
+  q$state$router <- NULL
   legacy <- .sr_sha256(sr_canonical_json(list(
     analyses = unname(lapply(.sr_sap_analyses(q), identity)),
     families = list(), rules = list())))
@@ -593,7 +595,7 @@ test_that("a stale secondary does not block the lock; a secondary decided stop d
                   label = "secondary")
   expect_identical(.sr_feas_stale(p, "s1"), "spec")
   expect_identical(.sr_feas_gate(p), character())
-  locked <- sr_sap_lock(p)
+  locked <- sr_sap_lock(.fx_routed(p))
   expect_true(isTRUE(locked$state$sap$locked))
 
   # a secondary decided stop, then made stale by a spec change: the stop still blocks the lock

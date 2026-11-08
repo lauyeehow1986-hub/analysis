@@ -380,7 +380,9 @@ sr_sap_rule <- function(project, id, analysis, check, action = c("add_sensitivit
 #' is taken over that label, so it still equals the lock's hash. The feasibility record (assessment and
 #' decision, sap/feasibility.R) of every pre-specified analysis is part of it, ordered by id, so the
 #' frozen verdict is tamper-evident; the element is absent when there is none, so a SAP locked before
-#' P1c.1 keeps its hash.
+#' P1c.1 keeps its hash. The router part (router/gate.R: the PICO and every current router decision,
+#' ordered by key) is part of it when there is one, so the question and the router's calls are frozen
+#' with the SAP; the element is absent for a project that never used the router.
 sr_sap_hash <- function(project) {
   by_id <- function(x) if (length(x)) unname(x[order(names(x), method = "radix")]) else list()
   as_locked <- function(a) {
@@ -398,6 +400,8 @@ sr_sap_hash <- function(project) {
   fe <- project$state$feasibility %||% list()
   fe <- fe[intersect(names(an), names(fe))]
   if (length(fe)) parts$feasibility <- by_id(fe)
+  rp <- .sr_router_hash_part(project)
+  if (!is.null(rp)) parts$router <- rp
   .sr_sha256(sr_canonical_json(parts))
 }
 
@@ -421,7 +425,9 @@ sr_sap_hash <- function(project) {
 #' logical in the data (item "event value"); a feasibility problem (item "feasibility", one row per
 #' .sr_feas_gate detail: a primary analysis without a current proceed / exploratory decision, or any
 #' pre-specified analysis decided stop). warn: a readiness warn row; an analysis naming a family it
-#' is not in.
+#' is not in. The router gate rows (router/gate.R: study design, study purpose, purpose fits the
+#' analyses, primary route, covariate timing) come just before the feasibility rows; design or purpose
+#' undecided or stale, or a causal primary adjusting for a mediator / post-outcome column, block.
 sr_sap_check <- function(project) {
   an <- .sr_sap_analyses(project)
   if (length(an)) an <- an[order(names(an), method = "radix")]
@@ -501,6 +507,8 @@ sr_sap_check <- function(project) {
           sprintf("%s names family %s but is not a member of one with that id", id, .sr_sap_q(fam)))
     }
   }
+  rg <- .sr_router_gate(project)
+  for (i in seq_len(nrow(rg))) add(rg$item[i], rg$status[i], rg$detail[i])
   gate <- .sr_feas_gate(project)
   for (g in gate) add("feasibility", "block", g)
   if (!length(gate)) add("feasibility", "ok", "every primary analysis has a current feasibility decision")
