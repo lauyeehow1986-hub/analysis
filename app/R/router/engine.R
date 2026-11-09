@@ -256,6 +256,16 @@ sr_router_choice <- function(project, node, table = NA, column = NA) {
   .sr_router_current(project, sr_router_key(nid, table, column))
 }
 
+#' What the UI needs to edit one instance: `options`, the node's options in this context
+#' (`.sr_node_options`), and `waiting_on`, the ids of the dependencies whose current choice is NA
+#' (undecided or stale); `character()` when none. `node` is a node id or an `sr_node`.
+sr_router_editor <- function(project, node, table = NA, column = NA) {
+  if (is.character(node)) node <- sr_node_get(node)
+  ctx <- .sr_router_ctx(project, node, table, column)
+  waiting <- names(ctx$dep)[vapply(ctx$dep, function(v) length(v) != 1L || is.na(v), logical(1))]
+  list(options = .sr_node_options(node, ctx), waiting_on = as.character(waiting))
+}
+
 # ---- the decision table ----------------------------------------------------------------------------
 
 #' The expert decision table, one row per applicable instance. `status`: "decided", "stale" (decided

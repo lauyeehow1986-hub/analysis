@@ -680,3 +680,10 @@ test_that("assumptions given as NULL are absent ones: r2_y = NULL warns and is n
   expect_false(w %in% g$warnings)
   expect_identical(g$assumptions$r2_y$value, 0.3)
 })
+
+test_that("sr_feasibility_measures lists what an analysis reports", {
+  p <- .fx_ui_project()
+  p <- sr_sap_add(p, "prim", "logistic", .ui_bin_spec(), "t", "primary")
+  expect_identical(sort(sr_feasibility_measures(p, "prim")), c("OR", "RD", "RR"))
+  expect_error(sr_feasibility_measures(p, "nope"), "unknown analysis")
+})

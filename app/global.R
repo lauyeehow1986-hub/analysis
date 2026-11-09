@@ -50,8 +50,12 @@ for (.f in file.path(sr_root, "R", paste0(.sr_core_files, ".R"))) {
 }
 rm(.f)
 
-# UI modules (Shiny): every file under R/ui, in sorted order, after the core.
-for (.f in sort(list.files(file.path(sr_root, "R", "ui"), pattern = "[.][Rr]$", full.names = TRUE))) {
+# UI modules (Shiny): util.R and spec_form.R first (when present), then every other file under R/ui in
+# sorted order, never twice, after the core.
+.sr_ui_dir <- file.path(sr_root, "R", "ui")
+.sr_ui_all <- sort(list.files(.sr_ui_dir, pattern = "[.][Rr]$", full.names = TRUE))
+.sr_ui_first <- file.path(.sr_ui_dir, c("util.R", "spec_form.R"))
+for (.f in unique(c(.sr_ui_first[file.exists(.sr_ui_first)], .sr_ui_all))) {
   source(.f, local = FALSE, encoding = "UTF-8")
 }
-rm(.f)
+rm(.f, .sr_ui_dir, .sr_ui_all, .sr_ui_first)

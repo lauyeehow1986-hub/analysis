@@ -285,3 +285,13 @@ test_that("would_act is FALSE when the abstain argmin differs from the model cho
   expect_identical(tb$status[tb$key == "toy_a"], "pending")
   expect_identical(tb$model_choice[tb$key == "toy_a"], "a1")
 })
+
+test_that("sr_router_editor lists a toy node's options and its undecided dependencies", {
+  .fx_toy_nodes()
+  p <- .re_project()
+  ed <- sr_router_editor(p, "toy_b")
+  expect_identical(ed$waiting_on, "toy_a")
+  expect_setequal(ed$options, c("b1", "b2"))
+  ed2 <- sr_router_editor(sr_router_decide(p, "toy_a", "a1"), "toy_b")
+  expect_identical(ed2$waiting_on, character())
+})

@@ -111,7 +111,7 @@ local({
   q <- utils::modifyList(list(population = "test population", outcome = "test outcome"), as.list(pico))
   p <- sr_pico_set(p, .list = q)
   an <- .sr_sap_analyses(p)
-  prim <- Filter(function(a) identical(a$label, "primary"), an[order(names(an), method = "radix")])
+  prim <- Filter(function(a) identical(a$label, "primary"), an[order(as.character(names(an)), method = "radix")])
   purpose <- if (length(prim)) {
     sr_routes()$purpose[match(prim[[1L]]$route, sr_routes()$id)]
   } else {

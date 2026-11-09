@@ -87,8 +87,16 @@
   tip <- sr_audit_tip(project$paths$audit)
   props <- list(audit_tip = tip, sap_hash = sap_hash, export_id = id, created = .sr_now(), title = title)
   if (!is.null(footer)) props$footer <- footer
-  sr_docx_render(.sr_sd_model(blocks), "main", path, file.path(dirname(path), paste0(".figures-", id)), props)
-  unlink(file.path(dirname(path), paste0(".figures-", id)), recursive = TRUE)
+  fig_dir <- file.path(dirname(path), paste0(".figures-", id))
+  # a render that fails after creating the file leaves no unrecorded file behind (it would block the retry)
+  tryCatch(
+    sr_docx_render(.sr_sd_model(blocks), "main", path, fig_dir, props),
+    error = function(e) {
+      if (made) unlink(path)
+      unlink(fig_dir, recursive = TRUE)
+      stop(e)
+    })
+  unlink(fig_dir, recursive = TRUE)
   files <- list(list(path = .sr_sd_rel(project, path), sha = .sr_sha256(.sr_read_bytes(path))))
   # a failed append leaves no unrecorded file behind (it would block the retry): remove it, re-raise the condition
   tryCatch(

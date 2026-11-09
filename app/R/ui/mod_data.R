@@ -21,9 +21,7 @@
 # ---- small pure helpers ------------------------------------------------------------------------------
 
 # A single trimmed string from an input value, "" when it is not one.
-.sr_data_text <- function(x) {
-  if (is.character(x) && length(x) == 1L && !is.na(x)) trimws(x) else ""
-}
+.sr_data_text <- function(x) .sr_ui_text(x)
 
 # The path as typed or pasted: trimmed, one pair of surrounding double quotes removed (Windows "Copy as
 # path" adds them), made absolute. "" when empty.
@@ -34,22 +32,8 @@
   normalizePath(path.expand(d), winslash = "/", mustWork = FALSE)
 }
 
-#' Run fn() for the user: an error becomes an error notification and NULL is returned; a warning becomes a
-#' warning notification and the result is kept. Never lets a condition escape into the session.
-.sr_data_try <- function(label, fn) {
-  say <- function(msg, type) {
-    try(shiny::showNotification(paste0(label, ": ", msg), type = type, duration = 10), silent = TRUE)
-  }
-  tryCatch(
-    withCallingHandlers(fn(), warning = function(w) {
-      say(conditionMessage(w), "warning")
-      invokeRestart("muffleWarning")
-    }),
-    error = function(e) {
-      say(conditionMessage(e), "error")
-      NULL
-    })
-}
+# Kept as a wrapper (a function, not an alias: the source order of R/ui is not guaranteed).
+.sr_data_try <- function(label, fn) .sr_ui_try(label, fn)
 
 # ---- sniff, preview, pre-flight --------------------------------------------------------------------
 
@@ -325,20 +309,6 @@
 
 # ---- rendering helpers --------------------------------------------------------------------------------
 
-# A severity (block, warn, info) or readiness status (block, warn, ok) as a badge. `data-status` carries
-# the plain status for tests and scripts.
-.sr_data_badge <- function(status) {
-  cls <- switch(status, block = "bg-danger", warn = "bg-warning text-dark", ok = "bg-success", "bg-secondary")
-  sprintf("<span class=\"badge %s\" data-status=\"%s\">%s</span>", cls, status, status)
-}
-
-# A data frame as a compact DT (server mode, no search box, no paging: the callers page themselves).
-.sr_data_dt <- function(df, escape = TRUE, page_length = 15L) {
-  DT::datatable(df, rownames = FALSE, selection = "none", escape = escape,
-                options = list(dom = "tip", pageLength = page_length, scrollX = TRUE, ordering = FALSE),
-                class = "compact stripe")
-}
-
 # The empty frame the findings table shows before a DQ run.
 .sr_data_no_findings <- function() {
   data.frame(severity = character(), check = character(), domain = character(), column = character(),
@@ -347,18 +317,12 @@
 
 # ---- UI ----------------------------------------------------------------------------------------------
 
-# One card of the Data tab. The tab is a normal scrolling page: a card is not a fill item (it would be
-# squeezed into the viewport height) and its body is not a fill container, so it sizes to its content.
-.sr_data_card <- function(header, ...) {
-  bslib::card(fill = FALSE, bslib::card_header(header), bslib::card_body(fillable = FALSE, fill = FALSE, ...))
-}
-
 mod_data_ui <- function(id) {
   ns <- shiny::NS(id)
   ov_choices <- function(...) c(auto = "auto", ...)
   shiny::div(
     class = "sr-data-stack",
-    .sr_data_card("1. Import a data file",
+    .sr_ui_card("1. Import a data file",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shinyFiles::shinyFilesButton(ns("pick"), "Choose file", "Pick a data file", multiple = FALSE,
@@ -390,11 +354,11 @@ mod_data_ui <- function(id) {
         shiny::uiOutput(ns("progress"), class = "flex-grow-1")
       )
     ),
-    .sr_data_card("2. Tables",
+    .sr_ui_card("2. Tables",
       shiny::uiOutput(ns("tables_list")),
       shiny::selectInput(ns("table"), "Working table", choices = character(0))
     ),
-    .sr_data_card("3. View the data",
+    .sr_ui_card("3. View the data",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shiny::uiOutput(ns("view_nav"), inline = TRUE),
@@ -406,7 +370,7 @@ mod_data_ui <- function(id) {
       shiny::uiOutput(ns("view_note")),
       DT::DTOutput(ns("viewer"), fill = FALSE)
     ),
-    .sr_data_card("4. Data dictionary",
+    .sr_ui_card("4. Data dictionary",
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap",
         shiny::radioButtons(ns("dict_kind"), "Format", c("CSV" = "csv", "REDCap data dictionary" = "redcap",
@@ -418,20 +382,20 @@ mod_data_ui <- function(id) {
       ),
       DT::DTOutput(ns("dict_table"), fill = FALSE)
     ),
-    .sr_data_card("5. Variable roles",
+    .sr_ui_card("5. Variable roles",
       shiny::uiOutput(ns("roles_ui")),
       shiny::actionButton(ns("roles_confirm"), "Confirm roles", class = "btn-primary")
     ),
-    .sr_data_card("6. Data-quality checks",
+    .sr_ui_card("6. Data-quality checks",
       shiny::actionButton(ns("dq_run"), "Run DQ checks", class = "btn-primary"),
       DT::DTOutput(ns("findings"), fill = FALSE)
     ),
-    .sr_data_card("7. Suggested actions",
+    .sr_ui_card("7. Suggested actions",
       shiny::numericInput(ns("sug_page"), "Findings page", value = 1, min = 1, step = 1, width = "120px"),
       shiny::uiOutput(ns("suggestions_ui")),
       shiny::actionButton(ns("export_query"), "Export query sheet", class = "btn-outline-primary")
     ),
-    .sr_data_card("8. Recipe",
+    .sr_ui_card("8. Recipe",
       DT::DTOutput(ns("recipe_steps"), fill = FALSE),
       shiny::div(
         class = "d-flex gap-2 align-items-end flex-wrap mt-2",
@@ -443,10 +407,10 @@ mod_data_ui <- function(id) {
         shiny::actionButton(ns("recipe_apply"), "Apply recipe", class = "btn-primary")
       )
     ),
-    .sr_data_card("9. Flow of records",
+    .sr_ui_card("9. Flow of records",
       shiny::imageOutput(ns("flow_png"), height = "auto")
     ),
-    .sr_data_card("10. Readiness",
+    .sr_ui_card("10. Readiness",
       shiny::uiOutput(ns("readiness"))
     )
   )
@@ -466,10 +430,6 @@ mod_data_server <- function(id, project) {
                                  cancel = NULL)
     task <- shiny::ExtendedTask$new(function(...) .sr_data_spawn(...))
 
-    notify <- function(msg, type = "message") {
-      try(shiny::showNotification(msg, type = type, duration = 8), silent = TRUE)
-    }
-
     tbl <- shiny::reactive({
       t <- .sr_data_text(input$table)
       p <- project()
@@ -477,30 +437,12 @@ mod_data_server <- function(id, project) {
       t
     })
 
-    # Run a project-changing step: refuses while an import runs or the project is read-only, reports core
-    # errors and warnings as notifications, and writes the new project back.
-    act <- function(label, fn) {
-      p <- shiny::isolate(project())
-      if (is.null(p)) {
-        notify(paste0(label, ": open a project first"), "error")
-        return(invisible(NULL))
-      }
-      if (isTRUE(shiny::isolate(job$busy))) {
-        notify(paste0(label, ": wait for the import to finish"), "error")
-        return(invisible(NULL))
-      }
-      if (isTRUE(p$readonly)) {
-        notify(paste0(label, ": the project is read-only (locked by another session)"), "error")
-        return(invisible(NULL))
-      }
-      res <- .sr_data_try(label, function() fn(p))
-      if (is.list(res) && !is.null(res$paths)) project(res)
-      invisible(res)
-    }
+    # Run a project-changing step (refuses while an import runs or the project is read-only).
+    act <- .sr_ui_actor(project, busy = function() isTRUE(shiny::isolate(job$busy)))
 
     need_table <- function(label) {
       t <- shiny::isolate(tbl())
-      if (is.null(t)) notify(paste0(label, ": choose a table first"), "error")
+      if (is.null(t)) .sr_ui_notify(paste0(label, ": choose a table first"), "error")
       t
     }
 
@@ -562,7 +504,7 @@ mod_data_server <- function(id, project) {
       s <- sniff_eff()
       shiny::req(s, is.null(attr(s, "error")))
       df <- .sr_data_preview_hide(.sr_data_preview(path_in(), s, 20L), preview_hidden(), s$header)
-      .sr_data_dt(df, page_length = 20L)
+      .sr_ui_dt(df, page_length = 20L)
     }, server = FALSE)
 
     output$preflight <- shiny::renderUI({
@@ -587,31 +529,31 @@ mod_data_server <- function(id, project) {
     # `where` is "" when the import ran in the project that is open, else " in <project name>".
     finish_import <- function(res, dir, table, where = "") {
       if (is.list(res$warnings) || is.character(res$warnings)) {
-        for (w in unlist(res$warnings)) notify(paste0("Import: ", w), "warning")
+        for (w in unlist(res$warnings)) .sr_ui_notify(paste0("Import: ", w), "warning")
       }
       if (isTRUE(res$ok)) {
-        notify(if (nzchar(where)) sprintf("Import finished%s: imported '%s'.", where, table)
+        .sr_ui_notify(if (nzchar(where)) sprintf("Import finished%s: imported '%s'.", where, table)
                else sprintf("Imported '%s'.", table), "message")
       } else if (isTRUE(res$cancelled)) {
-        notify(sprintf("Import cancelled%s; importing the same file again resumes it.", where), "warning")
+        .sr_ui_notify(sprintf("Import cancelled%s; importing the same file again resumes it.", where), "warning")
       } else {
-        notify(sprintf("Import failed%s: %s", where, res$error %||% "unknown error"), "error")
+        .sr_ui_notify(sprintf("Import failed%s: %s", where, res$error %||% "unknown error"), "error")
       }
     }
 
     shiny::observeEvent(input$import, {
       label <- "Import"
       p <- project()
-      if (is.null(p)) return(notify("Import: open a project first", "error"))
-      if (isTRUE(job$busy)) return(notify("Import: one import is already running", "error"))
-      if (isTRUE(p$readonly)) return(notify("Import: the project is read-only (locked by another session)", "error"))
+      if (is.null(p)) return(.sr_ui_notify("Import: open a project first", "error"))
+      if (isTRUE(job$busy)) return(.sr_ui_notify("Import: one import is already running", "error"))
+      if (isTRUE(p$readonly)) return(.sr_ui_notify("Import: the project is read-only (locked by another session)", "error"))
       path <- path_in()
-      if (!nzchar(path)) return(notify("Import: choose a file first", "error"))
+      if (!nzchar(path)) return(.sr_ui_notify("Import: choose a file first", "error"))
       s <- sniff_eff()
-      if (!is.null(attr(s, "error"))) return(notify(paste0("Import: ", attr(s, "error")), "error"))
+      if (!is.null(attr(s, "error"))) return(.sr_ui_notify(paste0("Import: ", attr(s, "error")), "error"))
       x <- pf()
       if (!.sr_data_can_import(x)) {
-        return(notify(paste0("Import refused: ", x$refuse_reason %||% "pre-flight failed"), "error"))
+        return(.sr_ui_notify(paste0("Import refused: ", x$refuse_reason %||% "pre-flight failed"), "error"))
       }
       name <- .sr_data_text(input$tname)
       if (!nzchar(name)) name <- sr_table_name(path, sr_store_tables(p))
@@ -683,9 +625,9 @@ mod_data_server <- function(id, project) {
     }, ignoreInit = TRUE)
 
     shiny::observeEvent(input$cancel, {
-      if (!isTRUE(job$busy)) return(notify("No import is running.", "message"))
+      if (!isTRUE(job$busy)) return(.sr_ui_notify("No import is running.", "message"))
       try(file.create(job$cancel), silent = TRUE)
-      notify("Cancelling after the current chunk...", "message")
+      .sr_ui_notify("Cancelling after the current chunk...", "message")
     })
 
     output$progress <- shiny::renderUI({
@@ -771,7 +713,7 @@ mod_data_server <- function(id, project) {
     })
 
     refuse_paging <- function() {
-      notify("View: paging is off until SAP lock (the row count is hidden)", "warning")
+      .sr_ui_notify("View: paging is off until SAP lock (the row count is hidden)", "warning")
       shiny::updateNumericInput(session, "view_page", value = 1)
     }
     shiny::observeEvent(input$view_prev, {
@@ -798,7 +740,7 @@ mod_data_server <- function(id, project) {
       shiny::req(p, t)
       hidden <- .sr_data_hidden_cols(p, t)
       if (.SR_DATA_ALL %in% hidden) {      # cannot tell the outcome columns: show none of the data
-        return(.sr_data_dt(data.frame(note = "columns hidden until SAP lock", stringsAsFactors = FALSE)))
+        return(.sr_ui_dt(data.frame(note = "columns hidden until SAP lock", stringsAsFactors = FALSE)))
       }
       cols <- view_cols()
       size <- suppressWarnings(as.integer(input$view_size %||% 25L))
@@ -823,7 +765,7 @@ mod_data_server <- function(id, project) {
       if (is.null(t)) return()
       kind <- .sr_data_text(input$dict_kind)
       path <- .sr_data_path(input$dict_path)
-      if (!nzchar(path)) return(notify("Dictionary: choose a dictionary file first", "error"))
+      if (!nzchar(path)) return(.sr_ui_notify("Dictionary: choose a dictionary file first", "error"))
       act("Dictionary", function(p) {
         d <- switch(kind, csv = sr_dict_read_csv(path), redcap = sr_dict_read_redcap(path),
                     odm = sr_dict_read_odm(path), stop("choose a dictionary format", call. = FALSE))
@@ -838,7 +780,7 @@ mod_data_server <- function(id, project) {
       d <- tryCatch(sr_dict_get(p, t), error = function(e) NULL)
       if (is.null(d)) d <- data.frame(note = "no dictionary attached", stringsAsFactors = FALSE)
       d[] <- lapply(d, function(x) if (is.list(x)) vapply(x, function(v) paste(format(v), collapse = "; "), "") else x)
-      .sr_data_dt(d)
+      .sr_ui_dt(d)
     }, server = FALSE)
 
     # ---- roles -----------------------------------------------------------------------------------------
@@ -900,12 +842,12 @@ mod_data_server <- function(id, project) {
 
     output$findings <- DT::renderDT({
       f <- findings()
-      if (is.null(f) || !nrow(f)) return(.sr_data_dt(.sr_data_no_findings()))
+      if (is.null(f) || !nrow(f)) return(.sr_ui_dt(.sr_data_no_findings()))
       esc <- function(x) htmltools::htmlEscape(as.character(x))
-      d <- data.frame(severity = vapply(as.character(f$severity), .sr_data_badge, ""), check = esc(f$check),
+      d <- data.frame(severity = vapply(as.character(f$severity), .sr_ui_badge, ""), check = esc(f$check),
                       domain = esc(f$domain), column = esc(f$column), n_affected = f$n_affected,
                       message = esc(f$message), stringsAsFactors = FALSE)
-      .sr_data_dt(d, escape = FALSE)
+      .sr_ui_dt(d, escape = FALSE)
     }, server = FALSE)
 
     suggestions <- shiny::reactive({
@@ -942,7 +884,7 @@ mod_data_server <- function(id, project) {
         click <- sprintf("Shiny.setInputValue(%s, {id: %s, nonce: Math.random()}, {priority: 'event'})",
                          jsonlite::toJSON(ns("decide"), auto_unbox = TRUE), jsonlite::toJSON(id, auto_unbox = TRUE))
         shiny::tags$tr(
-          shiny::tags$td(shiny::HTML(.sr_data_badge(if (nzchar(sev) && !is.na(sev)) sev else "info"))),
+          shiny::tags$td(shiny::HTML(.sr_ui_badge(if (nzchar(sev) && !is.na(sev)) sev else "info"))),
           shiny::tags$td(shiny::tags$code(shown$check[i]), " ", shown$column[i]),
           shiny::tags$td(class = "small", paste0("suggested: ", shown$action[i], " - ", shown$reason[i]),
                          if (!is.null(done)) shiny::tags$div(class = "text-success", paste0("decided: ", done$action))),
@@ -981,7 +923,7 @@ mod_data_server <- function(id, project) {
       t <- need_table("Query sheet")
       if (is.null(t)) return()
       res <- act("Query sheet", function(p) sr_query_sheet(p, t))
-      if (is.list(res) && !is.null(res$paths)) notify("Query sheet written under out/queries.", "message")
+      if (is.list(res) && !is.null(res$paths)) .sr_ui_notify("Query sheet written under out/queries.", "message")
     })
 
     # ---- recipe ----------------------------------------------------------------------------------------
@@ -1000,7 +942,7 @@ mod_data_server <- function(id, project) {
                    stringsAsFactors = FALSE)
       }
       d[] <- lapply(d, function(x) if (is.list(x)) vapply(x, function(v) paste(format(v), collapse = " "), "") else x)
-      .sr_data_dt(d)
+      .sr_ui_dt(d)
     }, server = FALSE)
 
     shiny::observe({
@@ -1050,12 +992,12 @@ mod_data_server <- function(id, project) {
       r <- tryCatch(sr_readiness(p, t), error = function(e) NULL)
       if (is.null(r)) return(shiny::p(class = "text-muted small", "Readiness is not available for this table."))
       rows <- lapply(seq_len(nrow(r)), function(i) {
-        shiny::tags$tr(shiny::tags$td(shiny::HTML(.sr_data_badge(as.character(r$status[i])))),
+        shiny::tags$tr(shiny::tags$td(shiny::HTML(.sr_ui_badge(as.character(r$status[i])))),
                        shiny::tags$td(r$item[i]), shiny::tags$td(class = "small text-muted", r$detail[i]))
       })
       shiny::tags$table(class = "table table-sm", shiny::tags$tbody(rows))
     })
 
-    invisible(NULL)
+    list(busy = shiny::reactive(job$busy))
   })
 }

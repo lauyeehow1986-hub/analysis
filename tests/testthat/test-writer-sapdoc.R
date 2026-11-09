@@ -214,6 +214,25 @@ test_that("minor 8/14: a failed doc.exported append removes the file just writte
   expect_false(file.exists(path))
 })
 
+test_that("a render that fails after creating the file removes it, and the retry succeeds", {
+  dir <- .sd_copy()
+  p <- .sd_open(dir, environment())
+  expect_true(isTRUE(p$state$sap$locked))  # the fixture is locked: the file is SAP_v1.docx, which blocks a retry
+  path <- file.path(p$paths$out, "sap", "SAP_v1.docx")
+  real <- get("sr_docx_render", envir = globalenv())
+  .sd_rebind("sr_docx_render", function(model, part, path, fig_dir, props) {
+    dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+    writeLines("partial", path)
+    stop("render boom")
+  }, environment())
+  expect_error(sr_sap_docx(p), "render boom")
+  expect_false(file.exists(path))
+  assign("sr_docx_render", real, envir = globalenv())
+  p1 <- sr_sap_docx(p)
+  expect_true(file.exists(path))
+  expect_true(length(p1$state$exports) >= 1L)
+})
+
 test_that("minor 16: the draft SAP of a project with results holds none of its numbers", {
   dir <- .sd_copy()
   p <- .sd_open(dir, environment())
