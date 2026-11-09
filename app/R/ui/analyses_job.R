@@ -19,7 +19,8 @@
 #
 # Cancel. .sr_an_kill() suspends the worker first (so it can neither record a run.completed for a fit whose
 # callr child is being killed nor start another child), then kills its descendants and the worker, and
-# waits for them to exit. It raises an error when a process survives the wait. Waiting for the job file is
+# waits for them to exit. It raises an error when a process survives the wait, after resuming the survivors
+# (a suspended worker would keep holding the project lock). Waiting for the job file is
 # pointless once the mirai has resolved: the panel checks mirai::unresolved(m) before calling it.
 #
 # The session never writes to a project it released: it re-opens the project after the worker ends (or
@@ -149,12 +150,16 @@
   for (x in kids) tryCatch(ps::ps_kill(x), error = note)
   tryCatch(ps::ps_kill(h), error = note)
 
+  procs <- c(kids, list(h))
   pids <- c(vapply(kids, function(x) as.integer(ps::ps_pid(x)), 0L), rec$pid)
   alive <- function() pids[vapply(pids, .sr_pid_running, NA)]
   t1 <- Sys.time()
   while (length(alive()) && elapsed(t1) < wait) Sys.sleep(0.1)
   left <- alive()
+  try(unlink(paste0(job_file, ".part")), silent = TRUE)
   if (length(left)) {
+    # never leave a suspended worker behind: it would keep holding the project lock
+    for (x in procs[pids %in% left]) tryCatch(ps::ps_resume(x), error = function(e) NULL)
     stop("could not stop the analysis worker (process ", paste(left, collapse = ", "), " still running",
          if (length(errs)) paste0("; ", paste(unique(errs), collapse = "; ")), ")", call. = FALSE)
   }

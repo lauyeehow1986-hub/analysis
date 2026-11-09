@@ -216,6 +216,29 @@ test_that("kill: a recorded PID whose start time differs is not killed", {
   expect_true(.sr_pid_running(Sys.getpid()))
 })
 
+test_that("kill: a kill that fails resumes the suspended worker and raises", {
+  skip_on_cran()
+  bg <- callr::r_bg(function() Sys.sleep(120))
+  withr::defer(try(bg$kill_tree(), silent = TRUE))        # processx, not the mocked ps_kill
+  h <- ps::ps_handle(bg$get_pid())
+  jf <- withr::local_tempfile()
+  writeLines(sprintf("%d %.6f", bg$get_pid(), as.numeric(ps::ps_create_time(h))), jf)
+  file.create(paste0(jf, ".part")); withr::defer(unlink(paste0(jf, ".part")))
+  resumed <- integer()
+  real_resume <- ps::ps_resume
+  testthat::local_mocked_bindings(
+    ps_kill = function(p, ...) stop("access denied"),
+    ps_resume = function(p) {
+      resumed <<- c(resumed, as.integer(ps::ps_pid(p)))
+      real_resume(p)
+    },
+    .package = "ps")
+  expect_error(.sr_an_kill(jf, wait = 1), "could not stop the analysis worker.*access denied")
+  expect_true(bg$get_pid() %in% resumed)                  # the worker (and any child of it) resumed
+  expect_true(bg$is_alive())
+  expect_false(file.exists(paste0(jf, ".part")))
+})
+
 test_that("kill: no job file, or an unreadable one, kills nothing", {
   jf <- withr::local_tempfile()
   expect_false(.sr_an_kill(jf, wait = 0.2))
