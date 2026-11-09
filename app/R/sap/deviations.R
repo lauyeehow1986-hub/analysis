@@ -306,14 +306,12 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
 
 # ---- acting on the diagnostics ---------------------------------------------------------------------
 
-#' Act on every `fail` verdict in state$diag[[analysis_id]] (see the header): fire the matching SAP
-#' rules, else add the check's sensitivity analysis as "<analysis>_<check>", else record a
-#' limitation. Never changes the primary analysis without a rule. Refused (nothing written) for a
-#' read-only project, an unknown analysis, an unlocked SAP, an analysis without diagnostics, or an id
-#' "<analysis>_<check>" that another analysis already holds.
-#' @return the project
-sr_diag_apply <- function(project, analysis_id) {
-  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+#' The steps sr_diag_apply would take for analysis_id (see its header), in order, without writing
+#' anything: a list of list(type = "rule", check, rule, why), list(type = "limitation", check,
+#' reason) or list(type = "add", check, id, route, spec, reason). Raises every refusal sr_diag_apply
+#' does except read-only (a plan can be previewed on a read-only copy). A limitation identical to the
+#' one already recorded for its check is not a step.
+.sr_diag_apply_steps <- function(project, analysis_id) {
   .sr_sap_id(analysis_id, "analysis_id")
   a <- project$state$analyses[[analysis_id]]
   if (is.null(a)) stop("unknown analysis ", .sr_sap_q(analysis_id), call. = FALSE)
@@ -342,7 +340,8 @@ sr_diag_apply <- function(project, analysis_id) {
     }
     m <- .sr_diag_sensitivity(ck, a, rec, project$state$analyses)
     if (!is.null(m$limitation)) {
-      step(type = "limitation", check = ck, reason = paste0(why, "; ", m$limitation))
+      reason <- paste0(why, "; ", m$limitation)
+      if (!identical(dg[[ck]]$limitation, reason)) step(type = "limitation", check = ck, reason = reason)
       next
     }
     sid <- .sr_diag_sensitivity_id(analysis_id, ck)
@@ -356,6 +355,34 @@ sr_diag_apply <- function(project, analysis_id) {
          reason = paste(c(why, m$note), collapse = "; "))
   }
 
+  plan
+}
+
+#' The plan of sr_diag_apply as a table, one row per step: data.frame(type, check, target, route,
+#' reason); target = the rule id / the new analysis id / NA, route = the new analysis's route or NA,
+#' reason = the why of a rule. Zero rows when nothing is to be done. Writes nothing.
+sr_diag_apply_plan <- function(project, analysis_id) {
+  steps <- .sr_diag_apply_steps(project, analysis_id)
+  col <- function(f) vapply(steps, f, "", USE.NAMES = FALSE)
+  data.frame(
+    type = col(function(s) s$type),
+    check = col(function(s) s$check),
+    target = col(function(s) switch(s$type, rule = s$rule$id, add = s$id, NA_character_)),
+    route = col(function(s) if (identical(s$type, "add")) s$route else NA_character_),
+    reason = col(function(s) switch(s$type, rule = s$why, s$reason)),
+    stringsAsFactors = FALSE)
+}
+
+#' Act on every `fail` verdict in state$diag[[analysis_id]] (see .sr_diag_apply_steps and the header):
+#' fire the matching SAP rules, else add the check's sensitivity analysis as "<analysis>_<check>",
+#' else record a limitation. Never changes the primary analysis without a rule. Refused (nothing
+#' written) for a read-only project, an unknown analysis, an unlocked SAP, an analysis without
+#' diagnostics, or an id "<analysis>_<check>" that another analysis already holds.
+#' @return the project
+sr_diag_apply <- function(project, analysis_id) {
+  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  plan <- .sr_diag_apply_steps(project, analysis_id)
+  a <- project$state$analyses[[analysis_id]]
   limit <- function(project, ck, reason) {
     if (identical(project$state$diag[[analysis_id]][[ck]]$limitation, reason)) return(project)
     sr_project_append(project, "diag.limitation", list(analysis = analysis_id, check = ck, reason = reason))
@@ -431,6 +458,19 @@ sr_deviations <- function(project) {
 
 # ---- multiplicity ----------------------------------------------------------------------------------
 
+#' The member ids of a family after replace_primary substitution (what sr_family_adjust adjusts).
+.sr_family_used <- function(project, family_id) {
+  .sr_sap_id(family_id, "family_id")
+  f <- project$state$sap$families[[family_id]]
+  if (is.null(f)) stop("unknown family ", .sr_sap_q(family_id), call. = FALSE)
+  members <- .sr_sap_chrv(f$members)
+  fired <- project$state$sap$fired %||% list()
+  vapply(members, function(m) {
+    for (r in fired) if (identical(r$action, "replace_primary") && identical(r$analysis, m)) return(r$alternative)
+    m
+  }, "", USE.NAMES = FALSE)
+}
+
 #' The multiplicity adjustment of a family: data.frame(analysis, term, p, p_adj, method). Each member
 #' contributes the primary-role effects rows of its latest ok run (sr_result) that share the first
 #' primary row's measure, so the model's exposure effect counts once (one row per non-reference
@@ -439,16 +479,8 @@ sr_deviations <- function(project) {
 #' by a fired replace_primary rule is represented by its alternative. Refused for an unknown family,
 #' or when a member has not run successfully (the error names every such member).
 sr_family_adjust <- function(project, family_id) {
-  .sr_sap_id(family_id, "family_id")
-  f <- project$state$sap$families[[family_id]]
-  if (is.null(f)) stop("unknown family ", .sr_sap_q(family_id), call. = FALSE)
-  members <- .sr_sap_chrv(f$members)
-  method <- as.character(f$method)
-  fired <- project$state$sap$fired %||% list()
-  use <- vapply(members, function(m) {
-    for (r in fired) if (identical(r$action, "replace_primary") && identical(r$analysis, m)) return(r$alternative)
-    m
-  }, "", USE.NAMES = FALSE)
+  use <- .sr_family_used(project, family_id)
+  method <- as.character(project$state$sap$families[[family_id]]$method)
   runs <- project$state$runs %||% list()
   not_run <- use[vapply(use, function(m) {
     r <- runs[[m]]
