@@ -1,74 +1,8 @@
 # Tests for routes/run.R: the hashed column extract and the locked, cached run engine. Synthetic data
 # only (survival::lung reshaped); everything lives under withr::local_tempdir().
 
-.run_frame <- function() {
-  lung <- survival::lung
-  data.frame(id = seq_len(nrow(lung)), time = lung$time, died = as.integer(lung$status == 2L),
-             age = lung$age, sex = ifelse(lung$sex == 1L, "M", "F"), ecog = lung$ph.ecog,
-             wt_loss = lung$wt.loss, stringsAsFactors = FALSE)
-}
-
-.run_roles <- c(id = "id", time = "time", died = "outcome", sex = "exposure")
-
-.run_drive <- function(path) list(free_bytes = 1e13, remote = FALSE, warnings = character())
-
-# Register a stub route whose compile returns `body_fn(spec)`; removed when the calling test ends.
-.run_route <- function(id = "stub_run", body_fn = NULL, env = parent.frame()) {
-  if (is.null(body_fn)) {
-    body_fn <- function(spec) {
-      sprintf("list(n = nrow(sr_data), m = mean(sr_data[[%s]]))", .sr_lit(spec$outcome))
-    }
-  }
-  est <- sr_estimand(population = "adults", variables = "died", intercurrent = "none",
-                     summary = "stub", level = "marginal")
-  present <- function(value, spec) {
-    eff <- data.frame(term = "m", measure = "MD", est = value$m, lo = NA_real_, hi = NA_real_,
-                      p = NA_real_, scale = NA_character_, level = NA_character_, mcse = NA_real_,
-                      role = "descriptive", conditional = FALSE, ci_method = NA_character_,
-                      n = value$n, events = NA_real_, stringsAsFactors = FALSE)
-    list(tables = list(), figures = list(), fragments = list(), effects = eff)
-  }
-  r <- sr_route(id = id, version = 1L, family = "stub", purpose = "explain-causal", estimand = est,
-                spec_schema = list(outcome = list(type = "chr", required = TRUE),
-                                   seed = list(type = "num", required = FALSE)),
-                compile = body_fn, present = present)
-  sr_route_register(r)
-  withr::defer(rm(list = .sr_route_key(id, 1L), envir = .sr_routes), envir = env)
-  invisible(r)
-}
-
-.run_spec <- function(outcome = "died", ...) {
-  layers <- list(missing = "cc", weights = "none", matching = FALSE, resampling = "none",
-                 framework = "frequentist", clustered = FALSE)
-  c(list(purpose = "explain-causal", outcome = outcome, layers = layers, seed = 42L), list(...))
-}
-
-# A ready project with analysis a1 (route `id`) drafted, SAP not yet locked.
-.run_drafted <- function(id = "stub_run", body_fn = NULL, env = parent.frame()) {
-  .run_route(id, body_fn, env = env)
-  p <- .fx_ready_project(.run_frame(), "t", .run_roles, env = env)
-  sr_sap_add(p, "a1", id, .run_spec(), "t", label = "primary")
-}
-
-.run_locked <- function(id = "stub_run", body_fn = NULL, env = parent.frame()) {
-  sr_sap_lock(.fx_feasible(.run_drafted(id, body_fn, env = env)))
-}
-
-# Re-open the project in `dir` (the old handle is closed first).
-.run_reopen <- function(p, env = parent.frame()) {
-  dir <- p$paths$dir
-  sr_duck_close(p)
-  sr_project_close(p)
-  q <- sr_project_open(dir)
-  withr::defer(sr_duck_close(q), envir = env)
-  withr::defer(sr_project_close(q), envir = env)
-  q
-}
-
 extracts <- function(p) list.files(file.path(p$paths$dir, "data", "extracts"))
 fit_files <- function(p) list.files(p$paths$fits, pattern = "[.]rds$")
-n_events <- function(p) length(sr_events_read(p$paths$events))
-types_of <- function(p) vapply(sr_events_read(p$paths$events), function(e) e$type, "")
 
 # ---- the state normaliser (ruling R14) ----------------------------------------------------------------
 
@@ -352,4 +286,91 @@ test_that("the error scrub replaces the project, temporary and home folders, in 
   odd <- file.path(tmp, "a+b (1)[x]")
   expect_identical(.sr_run_scrub(paste0(odd, "/f"), odd), "<project>/f")
   expect_identical(.sr_run_scrub("no paths here", proj), "no paths here")
+})
+
+# ---- run.started, run.cancelled, status and history ---------------------------------------------------
+
+test_that("sr_run writes run.started with the job just before run.completed, and only after every refusal", {
+  p <- .run_locked()
+  n0 <- n_events(p)
+  expect_error(sr_run(p, "nope", job = "j1"), "unknown analysis")
+  expect_error(sr_run(p, "a1", job = "bad job!"), "job must be one string")
+  expect_identical(n_events(p), n0)
+  p <- sr_run(p, "a1", job = "j1")
+  ty <- types_of(p)
+  expect_identical(tail(ty, 2L), c("run.started", "run.completed"))
+  ev <- tail(sr_events_read(p$paths$events), 2L)
+  expect_identical(ev[[1]]$payload$job, "j1")
+  expect_identical(ev[[2]]$payload$job, "j1")
+  expect_identical(ev[[1]]$payload$key, ev[[2]]$payload$key)
+  r <- p$state$runs$a1
+  expect_identical(r$status, "ok")
+  expect_identical(r$job, "j1")
+  expect_length(r$history, 1L)
+  expect_identical(r$history[[1]]$outcome, "ok")
+  expect_false(is.na(r$history[[1]]$started))
+})
+
+test_that("a NULL job gets a generated id; the generator leaves the RNG alone", {
+  set.seed(1); before <- .Random.seed
+  j <- .sr_run_job_id()
+  expect_identical(.Random.seed, before)
+  expect_match(j, "^j[0-9]{14}[0-9a-f]+$")
+  p <- sr_run(.run_locked(), "a1")
+  expect_match(p$state$runs$a1$job, "^j[0-9]{14}[0-9a-f]+$")
+})
+
+test_that("a dangling run.started replays as running; a new run closes it as interrupted", {
+  p <- .run_locked()
+  p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k0", extract_sha = "s0", job = "jdead"))
+  q <- .run_reopen(p)
+  expect_identical(q$state$runs$a1$status, "running")
+  expect_identical(q$state$runs$a1$job, "jdead")
+  q <- sr_run(q, "a1", job = "j2")
+  h <- q$state$runs$a1$history
+  expect_identical(vapply(h, `[[`, "", "outcome"), c("interrupted", "ok"))
+  expect_identical(q$state$runs$a1$status, "ok")
+})
+
+test_that("sr_run_cancel records run.cancelled and keeps the earlier good result", {
+  p <- sr_run(.run_locked(), "a1", job = "j1")
+  good <- p$state$runs$a1$ok_key
+  p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k2", extract_sha = "s2", job = "j2"))
+  p <- sr_run_cancel(p, "a1", "j2")
+  r <- p$state$runs$a1
+  expect_identical(r$status, "cancelled")
+  expect_identical(r$ok_key, good)
+  expect_identical(tail(r$history, 1L)[[1]]$outcome, "cancelled")
+  expect_identical(tail(r$history, 1L)[[1]]$reason, "cancelled by the user")
+  expect_s3_class(sr_result(p, "a1")$effects, "data.frame")
+  expect_identical(.run_reopen(p)$state$runs, p$state$runs)
+})
+
+test_that("sr_run_cancel refuses a read-only project, an unknown analysis and a stale job, writing nothing", {
+  p <- sr_run(.run_locked(), "a1", job = "j1")
+  n0 <- n_events(p)
+  expect_error(sr_run_cancel(p, "nope", "j1"), "unknown analysis")
+  ro <- p; ro$readonly <- TRUE
+  expect_error(sr_run_cancel(ro, "a1", "j1"), "read-only")
+  expect_identical(n_events(p), n0)
+})
+
+test_that("sr_run_cancel refuses a completed run with class sr_run_stale", {
+  p <- sr_run(.run_locked(), "a1", job = "j1")
+  e <- tryCatch(sr_run_cancel(p, "a1", "j1"), error = function(e) e)
+  expect_s3_class(e, "sr_run_stale")
+  expect_match(conditionMessage(e), "no running job 'j1'")
+  p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k", extract_sha = "s", job = "j2"))
+  expect_s3_class(tryCatch(sr_run_cancel(p, "a1", "j1"), error = function(e) e), "sr_run_stale")
+})
+
+test_that("a project with run.completed only (no job, no run.started) replays to ok / failed", {
+  p <- .run_locked()
+  p <- sr_project_append(p, "run.completed", list(analysis = "a1", key = "k", extract_sha = "s", ok = FALSE,
+                                                  cached = FALSE, error = "boom", elapsed = 1))
+  r <- .run_reopen(p)$state$runs$a1
+  expect_identical(r$status, "failed")
+  expect_true(is.na(r$job))
+  expect_identical(r$history[[1]]$outcome, "failed")
+  expect_true(is.na(r$history[[1]]$started))
 })

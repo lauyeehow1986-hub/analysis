@@ -12,8 +12,14 @@
 # drive reruns from its cache. No event holds an absolute path.
 #
 # State: state$runs[[analysis]] = list(analysis, key, extract_sha, ok, cached, error, elapsed,
-#        lib_changed, ok_key, ok_extract_sha); run.completed replaces it. ok_key and ok_extract_sha are the
-#        key and the extract of the latest ok run (kept across a later failed run); sr_result() shows that run.
+#        lib_changed, ok_key, ok_extract_sha, ok_lib_hash, ok_hw_fp, status, job, history).
+#        run.started (written just before the worker starts), run.completed and run.cancelled all update
+#        it. ok_key and ok_extract_sha are the key and the extract of the latest ok run (kept across a
+#        later failed or cancelled run); sr_result() shows that run. status is "running", "ok",
+#        "failed" or "cancelled"; job is the latest attempt's job id (NA for a project that predates
+#        run.started); history is a list of list(job, started, ended, outcome, reason), one per attempt
+#        (outcome "running", "ok", "failed", "cancelled" or "interrupted": a run.started with no
+#        run.completed before the next run.started).
 
 # ---- the spec as the state holds it (ruling R14) ----------------------------------------------------
 
@@ -39,23 +45,86 @@
 
 # ---- the reducer -----------------------------------------------------------------------------------
 
-sr_reducer_register("run.completed", function(state, event) {
-  p <- event$payload
+.sr_run_hist_entry <- function(job, started, ended, outcome, reason = NA_character_) {
+  list(job = job, started = started, ended = ended, outcome = outcome, reason = reason)
+}
+
+# Close the last history entry when it is a running one for `job`; returns the history, or NULL when
+# there is no such entry.
+.sr_run_hist_close <- function(h, job, ts, outcome, reason = NA_character_) {
+  n <- length(h)
+  if (!n || !identical(h[[n]]$outcome, "running") || !identical(h[[n]]$job, job)) return(NULL)
+  h[[n]]$ended <- ts
+  h[[n]]$outcome <- outcome
+  h[[n]]$reason <- reason
+  h
+}
+
+.sr_run_event_id <- function(p, type) {
   id <- p$analysis
   if (!is.character(id) || length(id) != 1L || is.na(id) || !nzchar(id)) {
-    stop("run.completed needs an analysis id", call. = FALSE)
+    stop(type, " needs an analysis id", call. = FALSE)
   }
+  id
+}
+
+sr_reducer_register("run.started", function(state, event) {
+  p <- event$payload
+  id <- .sr_run_event_id(p, "run.started")
+  runs <- state$runs %||% list()
+  prev <- runs[[id]] %||% list()
+  job <- .sr_sap_chr1(p$job)
+  h <- prev$history %||% list()
+  n <- length(h)
+  if (n && identical(h[[n]]$outcome, "running")) h[[n]]$outcome <- "interrupted"
+  h[[n + 1L]] <- .sr_run_hist_entry(job, .sr_sap_chr1(event$ts), NA_character_, "running")
+  prev$analysis <- id
+  prev$status <- "running"
+  prev$job <- job
+  prev$history <- h
+  runs[[id]] <- prev
+  state$runs <- runs
+  state
+})
+
+sr_reducer_register("run.completed", function(state, event) {
+  p <- event$payload
+  id <- .sr_run_event_id(p, "run.completed")
   runs <- state$runs %||% list()
   ok <- isTRUE(p$ok)
   key <- .sr_sap_chr1(p$key)
   elapsed <- if (is.null(p$elapsed) || is.na(p$elapsed[[1L]])) NA_real_ else as.numeric(p$elapsed[[1L]])
+  job <- .sr_sap_chr1(p$job)
+  outcome <- if (ok) "ok" else "failed"
+  ts <- .sr_sap_chr1(event$ts)
+  h <- runs[[id]]$history %||% list()
+  closed <- .sr_run_hist_close(h, job, ts, outcome)
+  if (is.null(closed)) {
+    closed <- c(h, list(.sr_run_hist_entry(job, NA_character_, ts, outcome)))
+  }
   runs[[id]] <- list(analysis = id, key = key, extract_sha = .sr_sap_chr1(p$extract_sha), ok = ok,
                      cached = isTRUE(p$cached), error = .sr_sap_chr1(p$error), elapsed = elapsed,
                      lib_changed = isTRUE(p$lib_changed),
                      ok_key = if (ok) key else (runs[[id]]$ok_key %||% NA_character_),
                      ok_extract_sha = if (ok) .sr_sap_chr1(p$extract_sha) else (runs[[id]]$ok_extract_sha %||% NA_character_),
                      ok_lib_hash = if (ok) .sr_sap_chr1(p$lib_hash) else (runs[[id]]$ok_lib_hash %||% NA_character_),
-                     ok_hw_fp = if (ok) .sr_sap_chr1(p$hw_fp) else (runs[[id]]$ok_hw_fp %||% NA_character_))
+                     ok_hw_fp = if (ok) .sr_sap_chr1(p$hw_fp) else (runs[[id]]$ok_hw_fp %||% NA_character_),
+                     status = outcome, job = job, history = closed)
+  state$runs <- runs
+  state
+})
+
+sr_reducer_register("run.cancelled", function(state, event) {
+  p <- event$payload
+  id <- .sr_run_event_id(p, "run.cancelled")
+  runs <- state$runs %||% list()
+  prev <- runs[[id]] %||% list(analysis = id)
+  job <- .sr_sap_chr1(p$job)
+  closed <- .sr_run_hist_close(prev$history %||% list(), job, .sr_sap_chr1(event$ts), "cancelled",
+                               .sr_sap_chr1(p$reason))
+  if (!is.null(closed)) prev$history <- closed
+  prev$status <- "cancelled"
+  runs[[id]] <- prev
   state$runs <- runs
   state
 })
@@ -168,10 +237,15 @@ sr_extract <- function(project, table, cols) {
 #' data, a presentation that breaks the result contract) is recorded with ok = FALSE and the project
 #' returned. `lib_changed` says that the library snapshot differs from the one recorded at the lock.
 #' @param timeout seconds the worker may run
+#' @param job NULL (a new id) or one string of letters, digits, '.', '_' or '-' (at most 64) naming this attempt
 #' @return the project (run.completed).
-sr_run <- function(project, analysis_id, timeout = 3600) {
+sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
   .sr_sap_id(analysis_id, "analysis_id")
+  if (is.null(job)) job <- .sr_run_job_id()
+  if (!is.character(job) || length(job) != 1L || is.na(job) || !grepl("^[A-Za-z0-9_.-]{1,64}$", job)) {
+    stop("job must be one string of letters, digits, '.', '_' or '-' (at most 64)", call. = FALSE)
+  }
   a <- project$state$analyses[[analysis_id]]
   if (is.null(a)) stop("unknown analysis ", .sr_sap_q(analysis_id), call. = FALSE)
   if (sr_blind(project)) stop("the SAP is not locked", call. = FALSE)
@@ -221,6 +295,8 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   hw_fp <- sr_hw_fingerprint()
   key <- sr_content_hash(ex$sha, list(route = route_key, spec = spec), spec$seed, lib_hash, hw_fp)
 
+  project <- sr_project_append(project, "run.started", list(analysis = analysis_id, key = key,
+                                                            extract_sha = ex$sha, job = job))
   res <- sr_exec_cached(project, key, paste(.sr_run_prologue(ex), body, sep = "\n"),
                         inputs = list(sr_project_dir = project$paths$dir), seed = spec$seed,
                         cache_inputs = list(extract = ex$sha), timeout = timeout)
@@ -241,7 +317,31 @@ sr_run <- function(project, analysis_id, timeout = 3600) {
   sr_project_append(project, "run.completed", list(
     analysis = analysis_id, key = key, extract_sha = ex$sha, ok = ok, cached = isTRUE(res$cached),
     error = err, elapsed = res$elapsed, lib_changed = !identical(lib_hash, lock$libsnap_hash),
-    lib_hash = lib_hash, hw_fp = hw_fp))
+    lib_hash = lib_hash, hw_fp = hw_fp, job = job))
+}
+
+#' A fresh job id: "j", the time to the second, and the random tail of a temp file name. It draws from
+#' the file system, not from R's RNG, so a seeded session is not disturbed.
+.sr_run_job_id <- function() {
+  paste0("j", format(Sys.time(), "%Y%m%d%H%M%S"), substring(basename(tempfile("")), 5L))
+}
+
+#' Record that a running job was cancelled (run.cancelled). Refuses a read-only project, a bad id, an
+#' unknown analysis, and a job that is not the analysis's running one (class sr_run_stale: it finished
+#' or was cancelled already). Nothing is written on a refusal. The earlier good result is kept.
+sr_run_cancel <- function(project, analysis_id, job, reason = "cancelled by the user") {
+  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  .sr_sap_id(analysis_id, "analysis_id")
+  if (is.null(project$state$analyses[[analysis_id]])) {
+    stop("unknown analysis ", .sr_sap_q(analysis_id), call. = FALSE)
+  }
+  r <- project$state$runs[[analysis_id]]
+  if (!identical(r$status, "running") || !identical(r$job, job)) {
+    stop(structure(class = c("sr_run_stale", "error", "condition"),
+                   list(message = paste0("analysis '", analysis_id, "' has no running job '", job,
+                                         "' (it finished or was cancelled already)"), call = NULL)))
+  }
+  sr_project_append(project, "run.cancelled", list(analysis = analysis_id, job = job, reason = reason))
 }
 
 #' The presented result (checked against the result contract) of the latest ok run of an analysis,
