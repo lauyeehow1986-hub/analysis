@@ -1,0 +1,175 @@
+# The Analyses panel worker layer: .sr_an_job, .sr_an_spawn, .sr_an_kill and .sr_an_settle.
+
+test_that("job: a fast analysis runs, records the job and reports ok", {
+  p <- .fx_an_project()
+  pf <- withr::local_tempfile(); jf <- withr::local_tempfile()
+  res <- .sr_an_job(p, "a1", "j1", progress_file = pf, job_file = jf)
+  expect_identical(res$status, "ok")
+  expect_identical(res$project$state$runs$a1$job, "j1")
+  expect_identical(readLines(pf), "diagnostics")
+  expect_match(readLines(jf), sprintf("^%d [0-9.]+$", Sys.getpid()))
+})
+
+test_that("job: a failed fit is 'failed' with the run's error; a refusal is 'refused' verbatim", {
+  p <- .fx_an_project(body_fn = function(spec) "stop('boom')")
+  res <- .sr_an_job(p, "a1", "j1")
+  expect_identical(res$status, "failed")
+  expect_match(res$message, "boom")
+  res <- .sr_an_job(p, "nope", "j2")
+  expect_identical(res$status, "refused")
+  expect_identical(res$message, "unknown analysis 'nope'")
+})
+
+test_that("job: a cancel file present before the fit skips the run", {
+  p <- .fx_an_project()
+  cf <- withr::local_tempfile(); file.create(cf)
+  res <- .sr_an_job(p, "a1", "j1", cancel_file = cf)
+  expect_identical(res$status, "skipped")
+  expect_null(p$state$runs$a1)
+})
+
+test_that("settle: ok continues; failed warns and continues; refused stops with the text verbatim", {
+  p <- .fx_an_project()
+  n0 <- n_events(p)
+  out <- .sr_an_settle(p, "a1", "j1", list(status = "ok"), cancelling = FALSE)
+  expect_null(out$notice)
+  expect_false(out$stop)
+  expect_identical(out$project, p)
+  out <- .sr_an_settle(p, "a1", "j1", list(status = "failed", message = "boom"), cancelling = FALSE)
+  expect_identical(out$notice, "a1 failed: boom")
+  expect_identical(out$type, "warning")
+  expect_false(out$stop)
+  msg <- .sr_an_job(p, "nope", "j1")$message
+  out <- .sr_an_settle(p, "nope", "j1", list(status = "refused", message = msg), cancelling = FALSE)
+  expect_true(out$notice == "Run stopped at nope: unknown analysis 'nope'")
+  expect_identical(out$type, "error")
+  expect_true(out$stop)
+  out <- .sr_an_settle(p, "a1", "j1", list(status = "skipped"), cancelling = FALSE)
+  expect_null(out$notice)
+  expect_true(out$stop)
+  expect_identical(n_events(p), n0)                       # settle writes nothing unless cancelling
+})
+
+test_that("settle: cancel of a running job records run.cancelled and stops", {
+  p <- .fx_an_project()
+  p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k", extract_sha = "s", job = "j2"))
+  out <- .sr_an_settle(p, "a1", "j2", list(status = "refused", message = "killed"), cancelling = TRUE)
+  expect_identical(tail(types_of(out$project), 1L), "run.cancelled")
+  expect_identical(out$project$state$runs$a1$status, "cancelled")
+  expect_identical(out$notice, "Cancelled a1.")
+  expect_identical(out$type, "message")
+  expect_true(out$stop)
+})
+
+test_that("settle: a cancel before the start says so; a refused cancel is an error; both stop", {
+  p <- .fx_an_project()
+  n0 <- n_events(p)
+  out <- .sr_an_settle(p, "a1", "j1", list(status = "skipped"), cancelling = TRUE)
+  expect_identical(out$notice, "Cancelled before a1 started.")
+  expect_identical(out$type, "message")
+  expect_true(out$stop)
+  expect_identical(n_events(out$project), n0)
+  ro <- p; ro$readonly <- TRUE
+  out <- .sr_an_settle(ro, "a1", "j1", list(status = "ok"), cancelling = TRUE)
+  expect_identical(out$notice, "Cancel a1: project is read-only")
+  expect_identical(out$type, "error")
+  expect_true(out$stop)
+  expect_identical(n_events(p), n0)
+})
+
+test_that("settle: cancel that lost the race keeps the result and says so", {
+  p <- sr_run(.fx_an_project(), "a1", job = "j1")
+  n0 <- length(sr_events_read(p$paths$events))
+  out <- .sr_an_settle(p, "a1", "j1", list(status = "ok"), cancelling = TRUE)
+  expect_identical(length(sr_events_read(out$project$paths$events)), n0)
+  expect_identical(out$project$state$runs$a1$status, "ok")
+  expect_match(out$notice, "finished before it could be cancelled")
+  expect_identical(out$type, "warning")
+  expect_true(out$stop)
+})
+
+test_that("spawn: the worker opens the project itself, runs an lm analysis and releases the lock", {
+  skip_on_cran(); skip_if_not_installed("mirai")
+  # a locked project with a real lm analysis (.dv_project data, .dv_lm spec with outcome = "time")
+  p <- .dv_project()
+  p <- sr_sap_add(p, "l1", "lm", .dv_lm(outcome = "time"), "t", label = "primary")
+  p <- sr_sap_lock(.fx_feasible(p))
+  dir <- p$paths$dir
+  pf <- withr::local_tempfile(); jf <- withr::local_tempfile(); cf <- withr::local_tempfile()
+  sr_duck_close(p)
+  sr_project_close(p)                                     # the panel releases the lock before the worker opens
+  m <- .sr_an_spawn(sr_root, dir, "l1", "jw1", pf, jf, cf)
+  withr::defer(try(mirai::stop_mirai(m), silent = TRUE))
+  res <- mirai::call_mirai(m)$data
+  expect_false(mirai::is_error_value(res), info = paste(format(res), collapse = " "))
+  expect_identical(res$status, "ok")
+  expect_null(res$project)
+  q <- sr_project_open(dir); withr::defer(sr_project_close(q)); withr::defer(sr_duck_close(q))
+  expect_false(q$readonly)
+  expect_identical(q$state$runs$l1$job, "jw1")
+  expect_identical(q$state$runs$l1$status, "ok")
+  expect_false(any(file.exists(c(pf, jf, cf))))
+})
+
+test_that("spawn: a project locked by another session is refused", {
+  skip_on_cran(); skip_if_not_installed("mirai")
+  p <- .fx_an_project()                                   # this session keeps the lock
+  m <- .sr_an_spawn(sr_root, p$paths$dir, "a1", "jw2", NULL, NULL, NULL)
+  withr::defer(try(mirai::stop_mirai(m), silent = TRUE))
+  res <- mirai::call_mirai(m)$data
+  expect_false(mirai::is_error_value(res), info = paste(format(res), collapse = " "))
+  expect_identical(res$status, "refused")
+  expect_identical(res$message, "the project is locked by another session")
+  expect_null(p$state$runs$a1)
+})
+
+test_that("kill: the worker and its callr child are both gone", {
+  skip_on_cran(); skip_if_not_installed("mirai")
+  jf <- withr::local_tempfile()
+  m <- mirai::mirai({
+    h <- ps::ps_handle()
+    writeLines(paste(Sys.getpid(), format(as.numeric(ps::ps_create_time(h)), digits = 15)), jf)
+    callr::r(function() Sys.sleep(120))
+  }, jf = jf, .timeout = 180000)
+  handles <- list()
+  withr::defer(.fx_an_kill_handles(handles))              # never leave a process behind
+  # wait (up to 60 s) for the job file and one child process of the worker
+  worker <- NA_integer_
+  child <- integer()
+  t0 <- Sys.time()
+  while (as.numeric(difftime(Sys.time(), t0, units = "secs")) < 60) {
+    l <- if (file.exists(jf)) tryCatch(readLines(jf, warn = FALSE), error = function(e) character()) else character()
+    if (length(l) == 1L && grepl("^[0-9]+ [0-9.]+$", l)) {
+      worker <- as.integer(strsplit(l, " ", fixed = TRUE)[[1L]][1L])
+      wh <- tryCatch(ps::ps_handle(worker), error = function(e) NULL)
+      kids <- if (is.null(wh)) list() else tryCatch(ps::ps_children(wh, recursive = TRUE), error = function(e) list())
+      handles <- c(list(wh), kids)
+      if (length(kids)) {
+        child <- vapply(kids, ps::ps_pid, 0L)
+        break
+      }
+    }
+    Sys.sleep(0.25)
+  }
+  expect_false(is.na(worker))
+  expect_true(length(child) >= 1L)
+  pids <- c(worker, child)
+  expect_true(.sr_an_kill(jf))
+  expect_false(any(vapply(pids, .sr_pid_running, NA)))
+  expect_true(mirai::is_error_value(mirai::call_mirai(m)$data))
+})
+
+test_that("kill: a recorded PID whose start time differs is not killed", {
+  jf <- withr::local_tempfile()
+  writeLines(paste(Sys.getpid(), "1"), jf)        # this very process, with a wrong start time
+  expect_false(.sr_an_kill(jf, wait = 1))
+  expect_true(.sr_pid_running(Sys.getpid()))
+})
+
+test_that("kill: no job file, or an unreadable one, kills nothing", {
+  jf <- withr::local_tempfile()
+  expect_false(.sr_an_kill(jf, wait = 0.2))
+  writeLines("not a pid", jf)
+  expect_false(.sr_an_kill(jf, wait = 0.2))
+  expect_true(.sr_pid_running(Sys.getpid()))
+})
