@@ -53,11 +53,40 @@ test_that("settle: ok continues; failed warns and continues; refused stops with 
 test_that("settle: cancel of a running job records run.cancelled and stops", {
   p <- .fx_an_project()
   p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k", extract_sha = "s", job = "j2"))
-  out <- .sr_an_settle(p, "a1", "j2", list(status = "refused", message = "killed"), cancelling = TRUE)
+  killed <- structure(19L, class = "errorValue")          # the mirai value of a killed worker
+  out <- .sr_an_settle(p, "a1", "j2", killed, cancelling = TRUE)
   expect_identical(tail(types_of(out$project), 1L), "run.cancelled")
   expect_identical(out$project$state$runs$a1$status, "cancelled")
   expect_identical(out$notice, "Cancelled a1.")
   expect_identical(out$type, "message")
+  expect_true(out$stop)
+})
+
+test_that("settle: a refusal reported while cancelling is kept in the notice", {
+  p <- .fx_an_project()
+  p <- sr_project_append(p, "run.started", list(analysis = "a1", key = "k", extract_sha = "s", job = "j2"))
+  out <- .sr_an_settle(p, "a1", "j2", list(status = "refused", message = "diagnostics: boom"),
+                       cancelling = TRUE)
+  expect_identical(out$notice, "Cancelled a1. The worker reported: diagnostics: boom")
+  expect_identical(out$type, "message")
+  expect_true(out$stop)
+})
+
+test_that("settle: a killed worker that never started the job is 'Cancelled before'", {
+  p <- .fx_an_project()
+  n0 <- n_events(p)
+  out <- .sr_an_settle(p, "a1", "j9", structure(19L, class = "errorValue"), cancelling = TRUE)
+  expect_identical(out$notice, "Cancelled before a1 started.")
+  expect_identical(out$type, "message")
+  expect_true(out$stop)
+  expect_identical(n_events(out$project), n0)
+})
+
+test_that("settle: a worker that died without a status stops the queue with a readable message", {
+  p <- .fx_an_project()
+  out <- .sr_an_settle(p, "a1", "j1", structure(19L, class = "errorValue"), cancelling = FALSE)
+  expect_identical(out$notice, "Run stopped at a1: worker stopped unexpectedly (mirai error 19)")
+  expect_identical(out$type, "error")
   expect_true(out$stop)
 })
 
@@ -131,32 +160,53 @@ test_that("kill: the worker and its callr child are both gone", {
     writeLines(paste(Sys.getpid(), format(as.numeric(ps::ps_create_time(h)), digits = 15)), jf)
     callr::r(function() Sys.sleep(120))
   }, jf = jf, .timeout = 180000)
-  handles <- list()
-  withr::defer(.fx_an_kill_handles(handles))              # never leave a process behind
+  w <- list(handles = list())
+  withr::defer(.fx_an_cleanup(m, jf, w$handles))         # never leave a process behind, whatever happens
   # wait (up to 60 s) for the job file and one child process of the worker
-  worker <- NA_integer_
-  child <- integer()
-  t0 <- Sys.time()
-  while (as.numeric(difftime(Sys.time(), t0, units = "secs")) < 60) {
-    l <- if (file.exists(jf)) tryCatch(readLines(jf, warn = FALSE), error = function(e) character()) else character()
-    if (length(l) == 1L && grepl("^[0-9]+ [0-9.]+$", l)) {
-      worker <- as.integer(strsplit(l, " ", fixed = TRUE)[[1L]][1L])
-      wh <- tryCatch(ps::ps_handle(worker), error = function(e) NULL)
-      kids <- if (is.null(wh)) list() else tryCatch(ps::ps_children(wh, recursive = TRUE), error = function(e) list())
-      handles <- c(list(wh), kids)
-      if (length(kids)) {
-        child <- vapply(kids, ps::ps_pid, 0L)
-        break
-      }
-    }
-    Sys.sleep(0.25)
-  }
-  expect_false(is.na(worker))
-  expect_true(length(child) >= 1L)
-  pids <- c(worker, child)
+  w <- .fx_an_wait_child(jf, function() TRUE)
+  expect_false(is.na(w$worker))
+  expect_true(length(w$child) >= 1L)
+  pids <- c(w$worker, w$child)
   expect_true(.sr_an_kill(jf))
   expect_false(any(vapply(pids, .sr_pid_running, NA)))
   expect_true(mirai::is_error_value(mirai::call_mirai(m)$data))
+})
+
+test_that("kill: a cancelled long fit records no run.completed, leaves no process and settles as cancelled", {
+  skip_on_cran(); skip_if_not_installed("mirai")
+  slow <- function(spec) "Sys.sleep(120)\nlist(n = nrow(sr_data), m = 1)"
+  environment(slow) <- globalenv()
+  p <- .fx_an_project(body_fn = slow)
+  # the stub route exists only in this session: hand the worker a copy with no test environment attached
+  r <- sr_route_get("stub_run", 1L)
+  environment(r$compile) <- globalenv()
+  environment(r$present) <- globalenv()
+  dir <- p$paths$dir
+  pf <- withr::local_tempfile(); jf <- withr::local_tempfile()
+  sr_duck_close(p)
+  sr_project_close(p)
+  m <- mirai::mirai({
+    source(file.path(app_dir, "global.R"), local = FALSE, encoding = "UTF-8")
+    sr_route_register(r)
+    .sr_an_job(sr_project_open(dir), "a1", "jk", pf, jf, NULL)[c("status", "message")]
+  }, app_dir = sr_root, r = r, dir = dir, pf = pf, jf = jf, .timeout = 180000)
+  w <- list(handles = list())
+  withr::defer(.fx_an_cleanup(m, jf, w$handles))
+  # wait (up to 60 s) until the fit runs in its callr child
+  w <- .fx_an_wait_child(jf, function() identical(suppressWarnings(tryCatch(readLines(pf), error = function(e) "")), "fitting"))
+  expect_true(length(w$child) >= 1L)
+  pids <- c(w$worker, w$child)
+  expect_true(.sr_an_kill(jf))
+  expect_false(any(vapply(pids, .sr_pid_running, NA)))
+  expect_true(mirai::is_error_value(res <- mirai::call_mirai(m)$data))
+  q <- sr_project_open(dir); withr::defer(sr_project_close(q)); withr::defer(sr_duck_close(q))
+  expect_false(q$readonly)                                # the dead worker's lock is taken over
+  expect_false("run.completed" %in% types_of(q))
+  expect_identical(q$state$runs$a1$status, "running")
+  out <- .sr_an_settle(q, "a1", "jk", res, cancelling = TRUE)
+  expect_identical(out$notice, "Cancelled a1.")
+  expect_identical(out$project$state$runs$a1$status, "cancelled")
+  expect_identical(tail(types_of(out$project), 1L), "run.cancelled")
 })
 
 test_that("kill: a recorded PID whose start time differs is not killed", {
