@@ -57,7 +57,16 @@ mod_analyses_ui <- function(id) {
       shiny::uiOutput(ns("progress")),
       DT::DTOutput(ns("runs"), fill = FALSE)
     ),
-    .sr_ui_card("Result"),
+    .sr_ui_card("Result",
+      shiny::uiOutput(ns("result_head")),
+      DT::DTOutput(ns("effects"), fill = FALSE),
+      shiny::uiOutput(ns("tables")),
+      shiny::uiOutput(ns("figs")),
+      shiny::uiOutput(ns("fragments")),
+      DT::DTOutput(ns("diag"), fill = FALSE),
+      shiny::uiOutput(ns("diag_figs")),
+      shiny::uiOutput(ns("apply_preview"))
+    ),
     .sr_ui_card("Primary vs sensitivity"),
     .sr_ui_card("Multiplicity"),
     .sr_ui_card("Deviations and run history")
@@ -168,6 +177,193 @@ mod_analyses_server <- function(id, project, busy) {
       shiny::div(class = "small mb-2",
                  sprintf("Running %d of %d: %s, %s (%s)", as.integer(run$index), as.integer(run$total), run$id,
                          .sr_an_step(run$progress), .sr_an_elapsed(el)))
+    })
+
+    # ---- card 2: the result of the selected analysis ----------------------------------------------------
+    # `card` holds only what the card reads of the replayed project (the run record, the diagnostics, the
+    # live flag), compared by value, so an unrelated project change does not redraw the plots.
+    card <- shiny::reactiveVal(NULL)
+    shiny::observe({
+      p <- project()
+      id <- sel_id()
+      v <- if (is.null(p) || is.null(id)) NULL else {
+        list(id = id, dir = p$paths$dir, run = p$state$runs[[id]], diag = p$state$diag[[id]],
+             live = id %in% names(live()))
+      }
+      if (!identical(shiny::isolate(card()), v)) card(v)
+    })
+    shown <- shiny::reactive({
+      k <- card()
+      if (is.null(k)) return(NULL)
+      ok_key <- k$run$ok_key
+      out <- list(id = k$id, run = k$run, live = isTRUE(k$live),
+                  has_ok = !is.null(ok_key) && length(ok_key) == 1L && !is.na(ok_key))
+      if (out$has_ok) {
+        res <- tryCatch(sr_result(shiny::isolate(project()), k$id), error = function(e) e)
+        if (inherits(res, "error")) out$err <- conditionMessage(res) else out$pres <- res
+      }
+      out
+    })
+
+    output$result_head <- shiny::renderUI({
+      s <- shown()
+      if (is.null(s)) return(shiny::div(class = "text-muted", "Select an analysis in the Runs table."))
+      r <- s$run
+      st <- if (s$live) "running" else .sr_an_s(r$status)
+      if (!nzchar(st)) st <- if (is.null(r)) "not run" else if (isTRUE(r$ok)) "ok" else "failed"
+      cls <- switch(st, ok = "bg-success", failed = "bg-danger", "bg-warning text-dark")
+      head <- if (!is.null(r)) {
+        el <- suppressWarnings(as.numeric(r$elapsed))
+        shiny::div(
+          class = "d-flex gap-2 align-items-center mb-2",
+          shiny::span(class = paste("badge", cls), `data-status` = st, st),
+          if (length(el) == 1L && is.finite(el)) shiny::span(class = "small", .sr_an_elapsed(el)),
+          if (!is.null(r$cached)) shiny::span(class = "small text-muted", if (isTRUE(r$cached)) "cached" else "fresh")
+        )
+      }
+      bits <- list(head)
+      if (isTRUE(r$lib_changed)) {
+        bits <- c(bits, list(shiny::div(class = "alert alert-warning py-1",
+          "The library snapshot of this run differs from the one recorded at the SAP lock.")))
+      }
+      if (identical(st, "failed") && nzchar(.sr_an_s(r$error))) {
+        bits <- c(bits, list(shiny::tags$pre(.sr_an_s(r$error))))
+      }
+      if (!s$has_ok) {
+        bits <- c(bits, list(shiny::div(class = "text-muted", "No successful run yet.")))
+      } else {
+        if (!identical(st, "ok")) {
+          h <- Filter(function(e) identical(.sr_an_s(e$outcome), "ok"), r$history %||% list())
+          when <- if (length(h)) .sr_an_s(h[[length(h)]]$ended) else ""
+          bits <- c(bits, list(shiny::div(class = "small fw-semibold",
+            sprintf("Showing the last good run (%s).", when))))
+        }
+        if (!is.null(s$err)) bits <- c(bits, list(shiny::tags$pre(s$err)))
+      }
+      do.call(shiny::tagList, bits)
+    })
+
+    output$effects <- DT::renderDT({
+      s <- shown()
+      shiny::req(!is.null(s$pres))
+      DT::datatable(.sr_an_effects(s$pres), rownames = FALSE, selection = "none", escape = TRUE,
+                    caption = "Effects", options = list(dom = "t", pageLength = 100L, scrollX = TRUE, ordering = FALSE),
+                    class = "compact stripe")
+    }, server = FALSE)
+
+    output$tables <- shiny::renderUI({
+      s <- shown()
+      tb <- s$pres$tables
+      if (!length(tb)) return(NULL)
+      do.call(shiny::tagList, lapply(names(tb), function(nm) {
+        shiny::tagList(shiny::h6(class = "mt-3", nm),
+                       DT::datatable(as.data.frame(tb[[nm]]), rownames = FALSE, selection = "none", escape = TRUE,
+                                     options = list(dom = "t", pageLength = 50L, scrollX = TRUE, ordering = FALSE),
+                                     class = "compact stripe"))
+      }))
+    })
+
+    output$fragments <- shiny::renderUI({
+      s <- shown()
+      fr <- s$pres$fragments
+      if (!length(fr)) return(NULL)
+      do.call(shiny::tagList, lapply(names(fr), function(nm) {
+        shiny::tagList(shiny::h6(class = "mt-3", nm),
+                       shiny::tags$pre(class = "small", paste(as.character(fr[[nm]]), collapse = "\n")))
+      }))
+    })
+
+    # figures: one plotOutput per figure, drawn by sr_plot (the id is the name made safe)
+    fig_id <- function(prefix, nm) paste0(prefix, gsub("[^A-Za-z0-9_]", "_", nm))
+    plot_ui <- function(items, prefix) {
+      if (!length(items)) return(NULL)
+      do.call(shiny::tagList, lapply(names(items), function(nm) {
+        shiny::tagList(shiny::h6(class = "mt-3", nm),
+                       shiny::plotOutput(ns(fig_id(prefix, nm)), height = "360px"))
+      }))
+    }
+    bind_plots <- function(items, prefix) {
+      for (nm in names(items)) local({
+        f <- items[[nm]]
+        output[[fig_id(prefix, nm)]] <- shiny::renderPlot(sr_plot(f$data, f$kind))
+      })
+    }
+    figs_v <- shiny::reactive({
+      s <- shown()
+      if (is.null(s$pres)) list() else .sr_an_figures(s$pres)
+    })
+    dfigs_v <- shiny::reactive({
+      s <- shown()
+      if (is.null(s) || !s$has_ok) return(list())
+      p <- shiny::isolate(project())
+      ck <- .sr_an_diag_rows(p, s$id)$check
+      out <- lapply(ck, function(k) .sr_an_diag_plot(p, s$id, k))
+      names(out) <- ck
+      out[!vapply(out, is.null, NA)]
+    })
+    shiny::observe(bind_plots(figs_v(), "fig_"))
+    shiny::observe(bind_plots(dfigs_v(), "dfig_"))
+    output$figs <- shiny::renderUI(plot_ui(figs_v(), "fig_"))
+    output$diag_figs <- shiny::renderUI(plot_ui(dfigs_v(), "dfig_"))
+
+    output$diag <- DT::renderDT({
+      s <- shown()
+      shiny::req(!is.null(s), isTRUE(s$has_ok))
+      d <- .sr_an_diag_rows(shiny::isolate(project()), s$id)
+      for (k in c("value", "warn", "fail")) d[[k]] <- round(d[[k]], 3L)
+      DT::datatable(d, rownames = FALSE, selection = "none", escape = TRUE, caption = "Diagnostics",
+                    options = list(dom = "t", pageLength = 50L, scrollX = TRUE, ordering = FALSE),
+                    class = "compact stripe")
+    }, server = FALSE)
+
+    # ---- Apply diagnostics: the preview (value-compared) and the gated action ------------------------
+    plan_v <- shiny::reactiveVal(NULL)
+    shiny::observe({
+      p <- project()
+      id <- sel_id()
+      rk <- if (is.null(p) || is.null(id)) NULL else p$state$runs[[id]]$ok_key
+      v <- NULL
+      if (!is.null(rk) && length(rk) == 1L && !is.na(rk)) {
+        pl <- tryCatch(sr_diag_apply_plan(p, id), error = function(e) e)
+        v <- if (inherits(pl, "error")) list(id = id, error = conditionMessage(pl)) else {
+          list(id = id, n = nrow(pl), words = .sr_an_plan_words(p, pl))
+        }
+      }
+      if (!identical(shiny::isolate(plan_v()), v)) plan_v(v)
+    })
+    output$apply_preview <- shiny::renderUI({
+      v <- plan_v()
+      if (is.null(v)) return(NULL)
+      g <- gate()
+      off <- is.null(g) || !is.null(g$reason) || !is.null(v$error) || !isTRUE(v$n > 0L)
+      shiny::tagList(
+        shiny::h6(class = "mt-3", "Apply diagnostics"),
+        if (!is.null(v$error)) {
+          shiny::div(class = "text-danger", v$error)
+        } else if (!isTRUE(v$n > 0L)) {
+          shiny::div(class = "text-muted", "Nothing to apply.")
+        } else {
+          shiny::tags$ul(lapply(v$words, shiny::tags$li))
+        },
+        shiny::div(
+          class = "d-flex gap-2 align-items-center",
+          shiny::actionButton(ns("apply"), "Apply", class = "btn-outline-primary", disabled = off),
+          if (!is.null(g$reason)) shiny::span(class = "text-muted small", paste0("Apply is off: ", g$reason))
+        )
+      )
+    })
+
+    act <- .sr_ui_actor(project, busy = function() busy_now() || isTRUE(shiny::isolate(running())))
+    shiny::observeEvent(input$apply, {
+      id <- shiny::isolate(sel_id())
+      p <- shiny::isolate(project())
+      if (is.null(id)) return(.sr_ui_notify("Apply diagnostics: select an analysis first", "error"))
+      why <- if (isTRUE(shiny::isolate(running()))) .sr_an_can_run(list(), TRUE) else .sr_an_can_run(p, busy_now())
+      if (!is.null(why)) return(.sr_ui_notify(paste0("Apply diagnostics: ", why), "error"))
+      pl <- tryCatch(sr_diag_apply_plan(p, id), error = function(e) e)
+      if (inherits(pl, "error")) return(.sr_ui_notify(paste0("Apply diagnostics: ", conditionMessage(pl)), "error"))
+      if (!nrow(pl)) return(.sr_ui_notify("Apply diagnostics: nothing to apply", "message"))
+      act("Apply diagnostics", function(p) sr_diag_apply(p, id))
     })
 
     # ---- the queue ----------------------------------------------------------------------------------

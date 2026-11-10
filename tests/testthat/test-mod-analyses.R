@@ -497,3 +497,136 @@ test_that("the Analyses tab is a stack of five cards, Runs first", {
                             "Deviations and run history"))
   for (id in c("x-runs", "x-run_btns", "x-progress")) expect_match(html, sprintf("id=\"%s\"", id), fixed = TRUE)
 })
+
+# ---- card 2: the result, its diagnostics and Apply -----------------------------------------------------
+
+# A locked project with the cox analysis m1 (it fails the proportional-hazards check on this data).
+.ma_cox_project <- function(env = parent.frame()) {
+  p <- .dv_project(env = env)
+  p <- sr_sap_add(p, "m1", "cox", .dv_cox(terms = list(list(var = "z"))), "t", label = "primary")
+  sr_sap_lock(.fx_feasible(p))
+}
+
+test_that("the result card shows effects, tables, figures, fragments and diagnostics of a cox run", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  rv <- shiny::reactiveVal(.ma_cox_project())
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    expect_match(paste(output$result_head$html), "Select an analysis in the Runs table.", fixed = TRUE)
+    session$setInputs(runs_rows_selected = 1)
+    expect_match(paste(output$result_head$html), "No successful run yet.", fixed = TRUE)
+    expect_null(output$apply_preview)
+    session$setInputs(run_sel = 1)
+    expect_identical(rv()$state$runs$m1$status, "ok", info = rv()$state$runs$m1$error)
+    head <- paste(output$result_head$html)
+    expect_match(head, "ok", fixed = TRUE)
+    expect_match(head, "fresh", fixed = TRUE)
+    expect_match(output$effects, "HR", fixed = TRUE)
+    expect_match(paste(output$figs$html), "fig_km", fixed = TRUE)
+    expect_match(output$diag, "ph", fixed = TRUE)
+    expect_match(output$diag, "fail", fixed = TRUE)
+    pres <- sr_result(rv(), "m1")
+    if (length(pres$tables)) expect_match(paste(output$tables$html), names(pres$tables)[1L], fixed = TRUE)
+    if (length(pres$fragments)) expect_match(paste(output$fragments$html), "<pre", fixed = TRUE)
+    html <- paste(output$apply_preview$html)
+    expect_match(html, "`m1_ph`", fixed = TRUE)
+    expect_false(grepl("disabled", .ma_btn(html, "apply"), fixed = TRUE))
+  })
+})
+
+test_that("a failed run shows its error verbatim and the last good result labelled", {
+  withr::local_options(sr.run_sync = TRUE)
+  p <- sr_run(.fx_an_project(), "a1", job = "j0")
+  p <- sr_project_append(p, "run.completed", list(analysis = "a1", key = "k2", ok = FALSE, job = "jx",
+                                                  error = "boom <b>& more", elapsed = 2))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    head <- paste(output$result_head$html)
+    expect_match(head, "<pre>boom &lt;b&gt;&amp; more</pre>", fixed = TRUE)
+    expect_match(head, "failed", fixed = TRUE)
+    expect_match(head, "Showing the last good run (", fixed = TRUE)
+    expect_match(output$effects, "descriptive", fixed = TRUE)
+  })
+})
+
+test_that("a failed run with no earlier ok run shows the error and nothing below", {
+  withr::local_options(sr.run_sync = TRUE)
+  q <- sr_project_append(.fx_an_project(), "run.completed",
+                         list(analysis = "a1", key = "k3", ok = FALSE, job = "jy", error = "no fit", elapsed = 1))
+  rv2 <- shiny::reactiveVal(q)
+  shiny::testServer(mod_analyses_server, args = list(project = rv2, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    head <- paste(output$result_head$html)
+    expect_match(head, "no fit", fixed = TRUE)
+    expect_match(head, "No successful run yet.", fixed = TRUE)
+    expect_false(grepl("Showing the last good run", head, fixed = TRUE))
+    expect_null(output$apply_preview)
+  })
+})
+
+test_that("a missing stored result is shown instead of the result, verbatim", {
+  withr::local_options(sr.run_sync = TRUE)
+  p <- sr_run(.fx_an_project(), "a1", job = "j0")
+  unlink(file.path(p$paths$fits, paste0(p$state$runs$a1$ok_key, ".rds")))
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    expect_match(paste(output$result_head$html), "is missing; run it again", fixed = TRUE)
+  })
+})
+
+test_that("Apply adds m1_ph, the Runs table lists it as not run, and Run all runs it", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  rv <- shiny::reactiveVal(.ma_cox_project())
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1, run_sel = 1)
+    expect_null(rv()$state$analyses$m1_ph)
+    session$setInputs(apply = 1)
+    expect_false(is.null(rv()$state$analyses$m1_ph))
+    expect_match(output$runs, "m1_ph", fixed = TRUE)
+    expect_match(output$runs, "not run", fixed = TRUE)
+    session$setInputs(run_all = 1)
+    expect_identical(rv()$state$runs$m1_ph$status, "ok", info = rv()$state$runs$m1_ph$error)
+    expect_match(paste(output$apply_preview$html), "Nothing to apply.", fixed = TRUE)
+    expect_match(.ma_btn(paste(output$apply_preview$html), "apply"), "disabled")
+  })
+})
+
+test_that("Apply is refused on a read-only project and writes nothing", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  seen <- .ui_spy_notify()
+  p <- sr_run(.ma_cox_project(), "m1")
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    ro <- rv()
+    ro$readonly <- TRUE
+    rv(ro)
+    session$flushReact()
+    expect_match(.ma_btn(paste(output$apply_preview$html), "apply"), "disabled")
+    n0 <- n_events(ro)
+    session$setInputs(apply = 1)
+    expect_true(any(seen$msg == "Apply diagnostics: the project is read-only (locked by another session)"))
+    expect_identical(n_events(ro), n0)
+    expect_null(rv()$state$analyses$m1_ph)
+  })
+})
+
+test_that("Apply is refused while a queue runs", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.run_sync = FALSE)
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ma_stub(".sr_an_spawn", .ma_pending_spawner(ctl))
+  rv <- shiny::reactiveVal(sr_run(.fx_an_project(), "a1", job = "j0"))
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    session$setInputs(run_all = 1)
+    session$setInputs(apply = 1)
+    expect_true(any(seen$msg == "Apply diagnostics: wait for the running import or analysis to finish"))
+    ctl$resolve(list(status = "ok", message = NULL))
+  })
+})
