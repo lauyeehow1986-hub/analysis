@@ -93,7 +93,9 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
     if (is.null(r) || is.null(r$cached)) "" else if (isTRUE(r$cached)) "yes" else "no"
   }
   data.frame(
-    id = ifelse(o$depth > 0L, paste0(vapply(o$depth, function(d) strrep("  ", d), ""), "- ", o$id), o$id),
+    id = vapply(seq_len(nrow(o)), function(i) {
+      if (o$depth[i] > 0L) paste0(strrep("  ", o$depth[i]), "- ", o$id[i]) else o$id[i]
+    }, ""),
     label = vapply(o$id, function(i) .sr_an_s(an[[i]]$label), ""),
     route = vapply(o$id, function(i) .sr_an_s(an[[i]]$route), ""),
     status = unname(st[o$id]),
@@ -201,8 +203,9 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 #' The plot of a check, list(kind, data), or NULL: ph -> schoenfeld, linearity -> linearity; the data is
 #' plot_data of the cached check value (NULL on any read error or an empty frame).
 .sr_an_diag_plot <- function(p, id, check) {
+  if (length(check) != 1L || is.na(check)) return(NULL)
   kind <- c(ph = "schoenfeld", linearity = "linearity")[check]
-  if (is.na(kind)) return(NULL)
+  if (length(check) != 1L || is.na(check) || is.na(kind)) return(NULL)
   key <- p$state$diag[[id]][[check]]$key
   if (is.null(key) || length(key) != 1L || is.na(key)) return(NULL)
   pd <- tryCatch(suppressWarnings(readRDS(file.path(p$paths$fits, paste0(key, ".rds"))))$value$plot_data,
@@ -279,6 +282,16 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
   fired <- Filter(function(f) identical(f$action, "replace_primary"), p$state$sap$fired %||% list())
   rows <- list()
   top <- which(o$depth == 0L & lab %in% c("primary", "secondary"))
+  # the rows below row i that are its descendants and have no block of their own
+  desc <- function(i) {
+    j <- i + 1L
+    out <- integer()
+    while (j <= nrow(o) && o$depth[j] > o$depth[i]) {
+      if (!(lab[j] %in% c("primary", "secondary"))) out <- c(out, j)
+      j <- j + 1L
+    }
+    out
+  }
   for (i in top) {
     id <- o$id[i]
     replaces <- vapply(Filter(function(f) identical(f$alternative, id), fired), function(f) .sr_an_s(f$analysis), "")
@@ -286,16 +299,18 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
     main <- .sr_an_cmp_rows(p, id, id, "main", st, if (now_primary) "now primary" else "ok")
     m <- attr(main, "measure")
     rows[[length(rows) + 1L]] <- main
-    j <- i + 1L
-    while (j <= nrow(o) && o$depth[j] > 0L) {
-      if (!(lab[j] %in% c("primary", "secondary"))) {
-        rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, o$id[j], "sensitivity", st, "ok", m)
-      }
-      j <- j + 1L
-    }
+    for (j in desc(i)) rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, o$id[j], "sensitivity", st, "ok", m)
+    # the "replaced" label overrides the replaced analysis' own status; its descendants stay in this block
     for (r in setdiff(replaces, "")) {
-      if (r %in% names(an)) rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, r, "sensitivity", st, "replaced", m)
+      if (!(r %in% o$id)) next
+      rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, r, "sensitivity", st, "replaced", m)
+      for (j in desc(match(r, o$id))) rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, o$id[j], "sensitivity", st, "ok", m)
     }
+  }
+  # a sensitivity analysis in no block (a missing parent, say) gets a block of its own: never blank
+  seen <- unlist(lapply(rows, function(r) r$analysis))
+  for (id in setdiff(o$id[!(lab %in% c("primary", "secondary"))], seen)) {
+    rows[[length(rows) + 1L]] <- .sr_an_cmp_rows(p, id, id, "sensitivity", st, "ok")
   }
   if (!length(rows)) return(.sr_an_compare_empty())
   out <- do.call(rbind, lapply(rows, function(r) {

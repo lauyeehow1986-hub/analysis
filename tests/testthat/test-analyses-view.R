@@ -239,3 +239,37 @@ test_that("history: cancelled and interrupted attempts only", {
   expect_identical(x$ended, c("t4", "interrupted", "interrupted"))
   expect_identical(.sr_an_history(p, c(a1 = "j4"))$job, c("j2", "j3"))
 })
+
+test_that("compare: the replaced analysis keeps its other children; a stray is never dropped", {
+  p <- .an_fake(runs = list(a1 = list(status = "ok", ok_key = "k1"), s1 = list(status = "ok", ok_key = "k2")),
+                sap = list(fired = list(r1 = list(rule = "r1", analysis = "a1", check = "ph",
+                                                  action = "replace_primary", alternative = "s1"))))
+  p$state$analyses$s1$label <- "primary"
+  p$state$analyses$a1$label <- "sensitivity"
+  p$state$analyses$orph <- list(id = "orph", route = "r", label = "sensitivity", parent = "gone",
+                                prespecified = FALSE)
+  .an_mock_result(function(id) .an_eff(1.5))
+  cp <- .sr_an_compare(p)
+  b <- cp[cp$block == "s1", ]
+  expect_true(all(c("s1", "a1", "u1") %in% b$analysis))
+  expect_identical(b$status[b$analysis == "u1"], "not run")
+  o <- cp[cp$block == "orph", ]
+  expect_identical(o$analysis, "orph")
+  expect_identical(o$status, "not run")
+  expect_identical(sum(cp$analysis == "orph"), 1L)
+})
+
+test_that("an empty project gives typed, zero-row results", {
+  p <- list(state = list(analyses = list()))
+  t <- .sr_an_runs_table(p)
+  expect_identical(nrow(t), 0L)
+  expect_type(t$id, "character")
+  expect_type(t$elapsed, "double")
+  expect_identical(nrow(.sr_an_compare(p)), 0L)
+  expect_identical(.sr_an_queue(p, "all"), character())
+  s <- .sr_an_status(p)
+  expect_type(s, "character")
+  expect_length(s, 0L)
+  expect_null(.sr_an_diag_plot(p, "a1", character()))
+  expect_null(.sr_an_diag_plot(p, "a1", NA_character_))
+})
