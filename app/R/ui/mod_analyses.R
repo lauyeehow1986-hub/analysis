@@ -10,7 +10,8 @@
 # The panel keeps no project state of its own: every card re-derives from the replayed project. The only
 # session state is the queue and the live job (`run`): the ids still to run, the current id and job, its
 # start time and its three temp files. Each queue item runs in a mirai worker (shiny::ExtendedTask,
-# spawner .sr_an_spawn): the session releases the project lock (closing DuckDB first) and holds a
+# spawner .sr_an_spawn): the session releases the project lock (its in-memory DuckDB connection is
+# closed too, just to be tidy) and holds a
 # read-only copy while the worker runs, re-opens the project when the worker is done and only then settles
 # the item (.sr_an_settle), which may write run.cancelled. option sr.run_sync = TRUE runs each item inline
 # through .sr_an_job instead (tests: their stub routes exist only in the session).
@@ -65,6 +66,9 @@ mod_analyses_ui <- function(id) {
 
 # ---- server ------------------------------------------------------------------------------------------
 
+# `busy` must be the IMPORT-ONLY flag and must EXCLUDE this module's own `running`: app.R passes the
+# import's busy reactive here, and the module combines it with its own running() where it gates. Passing
+# the app-wide flag (which includes running) would make every queue item refuse itself.
 mod_analyses_server <- function(id, project, busy) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
@@ -82,8 +86,12 @@ mod_analyses_server <- function(id, project, busy) {
     })
 
     running <- shiny::reactive(!is.null(run$id) || length(run$queue) > 0L)
+    # the live job, only for the folder it runs in (another open project shows no live row)
     live <- shiny::reactive({
-      if (is.null(run$id) || is.null(run$job)) character() else stats::setNames(run$job, run$id)
+      if (is.null(run$id) || is.null(run$job) || is.null(run$dir)) return(character())
+      p <- project()
+      if (is.null(p) || !.sr_data_same_dir(p$paths$dir, run$dir)) return(character())
+      stats::setNames(run$job, run$id)
     })
     busy_now <- function() isTRUE(shiny::isolate(busy()))
 
@@ -100,6 +108,7 @@ mod_analyses_server <- function(id, project, busy) {
     shiny::observeEvent(input$runs_rows_selected, {
       ids <- shiny::isolate(order_ids())
       i <- input$runs_rows_selected
+      if (!length(i)) return(sel(NULL))                     # the row was deselected
       if (length(i) != 1L || is.na(i) || i < 1L || i > length(ids)) return(invisible(NULL))
       sel(ids[i])
     }, ignoreNULL = FALSE, priority = 10)
@@ -222,7 +231,7 @@ mod_analyses_server <- function(id, project, busy) {
             try(sr_project_close(q), silent = TRUE)
           }, add = TRUE)
           o <- .sr_an_settle(q, id, job, res, cancelling)
-          if (!is.null(o$notice)) o$notice <- paste0(o$notice, " (in ", name, ")")
+          o$notice <- paste0(o$notice %||% sprintf("%s finished", id), " (in ", name, ")")
           o$stop <- TRUE
           o
         })
@@ -277,7 +286,7 @@ mod_analyses_server <- function(id, project, busy) {
         prog <- tempfile("sr-an-progress-")
         jf <- tempfile("sr-an-job-")
         cf <- tempfile("sr-an-cancel-")
-        try(sr_duck_close(p), silent = TRUE)
+        try(sr_duck_close(p), silent = TRUE)                # in-memory connection: tidy, holds no file
         try(sr_project_close(p), silent = TRUE)
         ro <- p
         ro$readonly <- TRUE
@@ -315,7 +324,11 @@ mod_analyses_server <- function(id, project, busy) {
 
     start_queue <- function(mode) {
       p <- shiny::isolate(project())
-      why <- .sr_an_can_run(p, busy_now() || isTRUE(shiny::isolate(running())))
+      # while a queue runs the project is the read-only copy: say what is really in the way
+      if (isTRUE(shiny::isolate(running()))) {
+        return(.sr_ui_notify(paste0("Run: ", .sr_an_can_run(list(), TRUE)), "error"))
+      }
+      why <- .sr_an_can_run(p, busy_now())
       if (!is.null(why)) return(.sr_ui_notify(paste0("Run: ", why), "error"))
       q <- tryCatch(.sr_an_queue(p, mode, if (identical(mode, "selected")) shiny::isolate(sel_id())),
                     error = function(e) e)
@@ -339,9 +352,17 @@ mod_analyses_server <- function(id, project, busy) {
       try(file.create(run$cancel_file), silent = TRUE)
       # a worker that is done has removed its job file already: nothing to kill, settle its result
       if (.sr_an_resolved(live_m$m)) return(invisible(NULL))
+      .sr_ui_notify(sprintf("Cancelling %s...", run$id), "message")
       k <- tryCatch(.sr_an_kill(jf), error = function(e) e)
       # a process survived: say so and wait for the worker's mirai before taking the project back
-      if (inherits(k, "error")) .sr_ui_notify(paste0("Cancel: ", conditionMessage(k)), "error")
+      if (inherits(k, "error")) {
+        .sr_ui_notify(paste0("Cancel: ", conditionMessage(k)), "error")
+      } else if (isFALSE(k)) {
+        # no job file, or its PID is no longer the worker: nothing was killed; the worker's own result
+        # is settled (as a cancel) when its mirai resolves
+        .sr_ui_notify(sprintf(paste0("Cancel: no running worker was found for %s; it will be settled ",
+                                     "when it ends"), run$id), "message")
+      }
     })
 
     # Nothing is cancelled when the session ends: the worker finishes and records (its files it removes

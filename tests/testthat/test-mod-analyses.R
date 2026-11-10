@@ -65,6 +65,40 @@ test_that("Run all runs every analysis not ok, in SAP order", {
   })
 })
 
+test_that("Run all on a partly run project runs only the analyses not ok", {
+  withr::local_options(sr.run_sync = TRUE)
+  order <- character()
+  old <- .sr_an_job
+  .ma_stub(".sr_an_job", function(p, id, job, ...) {
+    order <<- c(order, id)
+    old(p, id, job, ...)
+  })
+  rv <- shiny::reactiveVal(sr_run(.fx_an_project(), "a2", job = "j0"))
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(run_all = 1)
+    expect_identical(order, c("a1", "s1"))
+    expect_identical(rv()$state$runs$a2$job, "j0")         # the ok one was not re-run
+    expect_true(all(vapply(c("a1", "s1", "a2"), function(i) rv()$state$runs[[i]]$status, "") == "ok"))
+  })
+})
+
+test_that("deselecting the row makes Run selected refuse", {
+  withr::local_options(sr.run_sync = TRUE)
+  seen <- .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_an_project())
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    expect_identical(sel(), "a1")
+    session$setInputs(runs_rows_selected = NULL)
+    expect_null(sel())
+    n0 <- n_events(rv())
+    session$setInputs(run_sel = 1)
+    expect_true(any(seen$msg == "Run: select an analysis first"))
+    expect_identical(n_events(rv()), n0)
+    expect_null(rv()$state$runs$a1)
+  })
+})
+
 test_that("Run selected re-runs an ok analysis and records new events", {
   withr::local_options(sr.run_sync = TRUE)
   seen <- .ui_spy_notify()
@@ -203,6 +237,11 @@ test_that("the badge shows while a queue runs and Cancel when idle says nothing 
     html <- paste(output$run_btns$html)
     expect_match(.ma_btn(html, "run_all"), "disabled")
     expect_false(grepl("disabled", .ma_btn(html, "cancel"), fixed = TRUE))
+    # a second Run while the queue runs names the real reason, not the read-only copy
+    session$setInputs(run_all = 2)
+    expect_true(any(seen$msg == "Run: wait for the running import or analysis to finish"))
+    expect_false(any(grepl("read-only", seen$msg, fixed = TRUE)))
+    expect_length(ctl$calls, 1L)
     writeLines("fitting", ctl$calls[[1L]]$progress_file)
     session$elapse(1000)
     expect_match(paste(output$progress$html), "Running 1 of 3: a1, fitting", fixed = TRUE)
@@ -239,6 +278,7 @@ test_that("Cancel kills the worker by its job file, drops the queue and cleans u
     file.create(paste0(jf, ".part"))
     session$setInputs(cancel = 1)
     expect_identical(killed, jf)
+    expect_true(any(seen$msg == "Cancelling a1..."))
     expect_length(run$queue, 0L)
     .ma_wait(function() !running(), session, secs = 10)
     expect_false(running())
@@ -276,6 +316,114 @@ test_that("a kill that cannot stop the worker is shown and the project is not re
     expect_false(isTRUE(rv()$readonly))
     expect_length(ctl$calls, 1L)
   })
+})
+
+test_that("a kill that finds no worker says so and the result is settled when it ends", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.run_sync = FALSE)
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ma_stub(".sr_an_spawn", .ma_pending_spawner(ctl))
+  .ma_stub(".sr_an_kill", function(job_file, wait = 10) FALSE)
+  rv <- shiny::reactiveVal(.fx_an_project())
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(run_all = 1)
+    session$setInputs(cancel = 1)
+    expect_true(any(seen$msg == "Cancelling a1..."))
+    expect_true(any(seen$msg == "Cancel: no running worker was found for a1; it will be settled when it ends"))
+    expect_true(running())
+    ctl$resolve(list(status = "skipped", message = NULL))
+    .ma_wait(function() !running(), session, secs = 10)
+    expect_false(running())
+    expect_false(isTRUE(rv()$readonly))
+    expect_length(ctl$calls, 1L)
+  })
+})
+
+# A spawner stub for the "another project is open" tests: it records the job in the run's folder (only
+# run.started when `full` is FALSE, the whole run when TRUE), then stays pending like .ma_pending_spawner.
+.ma_recording_spawner <- function(ctl, full) {
+  pend <- .ma_pending_spawner(ctl)
+  function(app_dir, project_dir, id, job, progress_file, job_file, cancel_file) {
+    q <- sr_project_open(project_dir)
+    q <- if (full) sr_run(q, id, job = job) else
+      sr_project_append(q, "run.started", list(analysis = id, key = "k", extract_sha = "s", job = job))
+    sr_duck_close(q)
+    sr_project_close(q)
+    pend(app_dir, project_dir, id, job, progress_file, job_file, cancel_file)
+  }
+}
+
+# Run all on project A, open project B meanwhile, then end the job by `finish(ctl)`; returns what the
+# checks need. B must stay untouched; the job settles on A.
+.ma_other_project <- function(full, finish, env = parent.frame()) {
+  seen <- .ui_spy_notify(env = env)
+  ctl <- new.env()
+  .ma_stub(".sr_an_spawn", .ma_recording_spawner(ctl, full), env = env)
+  .ma_stub(".sr_an_kill", function(job_file, wait = 10) {
+    ctl$reject(simpleError("19 | Connection reset"))
+    TRUE
+  }, env = env)
+  a <- .fx_an_project(env = env)
+  # a second project (the stub route is registered already)
+  b <- sr_sap_add(.fx_ready_project(.run_frame(), "t", .run_roles), "a1", "stub_run", .run_spec(), "t",
+                  label = "primary")
+  withr::defer({
+    try(sr_duck_close(b), silent = TRUE)
+    try(sr_project_close(b), silent = TRUE)
+  }, envir = env)
+  rv <- shiny::reactiveVal(a)
+  r <- list(a = a, b = b, seen = seen, name = as.character(a$meta$name %||% basename(a$paths$dir))[1L])
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(run_all = 1)
+    rv(b)                                                    # the user opens another project
+    session$flushReact()
+    expect_length(live(), 0L)                                # the live row belongs to A only
+    n0 <- n_events(b)
+    finish(ctl, session)
+    .ma_wait(function() !running(), session, secs = 10)
+    r$running <<- running()
+    r$queue <<- run$queue
+    r$calls <<- length(ctl$calls)
+    r$same_b <<- identical(rv(), b)
+    r$n_b <<- n_events(rv()) == n0
+  })
+  r$lock_gone <- !file.exists(a$paths$lock)
+  q <- sr_project_open(a$paths$dir)
+  r$a_types <- types_of(q)
+  r$a_runs <- q$state$runs
+  sr_duck_close(q)
+  sr_project_close(q)
+  r
+}
+
+test_that("Cancel while another project is open settles on the run's folder and leaves the open one alone", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.run_sync = FALSE)
+  r <- .ma_other_project(FALSE, function(ctl, session) session$setInputs(cancel = 1))
+  expect_false(r$running)
+  expect_length(r$queue, 0L)
+  expect_identical(r$calls, 1L)                              # s1 and a2 were not started
+  expect_true(r$same_b)
+  expect_true(r$n_b)
+  expect_true(r$lock_gone)
+  expect_true("run.cancelled" %in% r$a_types)
+  expect_true(any(r$seen$msg == paste0("Cancelled a1. (in ", r$name, ")")))
+})
+
+test_that("a run that ends ok while another project is open is recorded in its own folder and stops the queue", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.run_sync = FALSE)
+  r <- .ma_other_project(TRUE, function(ctl, session) ctl$resolve(list(status = "ok", message = NULL)))
+  expect_false(r$running)
+  expect_length(r$queue, 0L)
+  expect_identical(r$calls, 1L)                              # the queue stopped after a1
+  expect_true(r$same_b)
+  expect_true(r$n_b)
+  expect_true(r$lock_gone)
+  expect_false("run.cancelled" %in% r$a_types)
+  expect_identical(r$a_runs$a1$status, "ok")
+  expect_true(any(r$seen$msg == paste0("a1 finished (in ", r$name, ")")))
 })
 
 test_that("Cancel racing completion keeps the result, writes no run.cancelled and says so", {
