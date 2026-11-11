@@ -5,7 +5,7 @@ options(shiny.autoload.r = FALSE)  # app/global.R is the only loader; never auto
 # not source global.R for an app.R app, so load it here unless a caller already did.
 if (!exists("sr_root", inherits = TRUE)) source("global.R", local = FALSE, encoding = "UTF-8")
 
-.sr_panel_names <- c("Write", "Archive", "Reviewer", "Settings")
+.sr_panel_names <- c("Archive", "Reviewer", "Settings")
 
 .sr_placeholder_panel <- function(title) {
   bslib::nav_panel(title, bslib::card(bslib::card_body(shiny::p(class = "text-muted",
@@ -36,7 +36,8 @@ ui <- do.call(bslib::page_navbar, c(
     bslib::nav_panel("Design", mod_design_ui("design"), value = "Design"),
     bslib::nav_panel("SAP", mod_sap_ui("sap"), value = "SAP"),
     bslib::nav_panel(shiny::span("Analyses ", shiny::uiOutput("analyses-badge", inline = TRUE)),
-                     mod_analyses_ui("analyses"), value = "Analyses")
+                     mod_analyses_ui("analyses"), value = "Analyses"),
+    bslib::nav_panel("Write", mod_write_ui("write"), value = "Write")
   ),
   lapply(.sr_panel_names, .sr_placeholder_panel),
   list(bslib::nav_spacer(), .sr_badges())
@@ -57,9 +58,10 @@ server <- function(input, output, session) {
   shiny::observe(flags$analyses <- isTRUE(a$running()))
   mod_design_server("design", project, busy_for())
   mod_sap_server("sap", project, busy_for())
+  mod_write_server("write", project, busy_for(), settings = function() 0L)
   # The Data, Design, SAP and Analyses panels are hidden until a project is open.
   shiny::observe({
-    for (p in c("Data", "Design", "SAP", "Analyses")) {
+    for (p in c("Data", "Design", "SAP", "Analyses", "Write")) {
       if (is.null(project())) bslib::nav_hide("main_nav", p) else bslib::nav_show("main_nav", p)
     }
   })
