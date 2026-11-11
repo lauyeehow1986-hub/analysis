@@ -183,9 +183,13 @@ mod_analyses_server <- function(id, project, busy) {
       shiny::invalidateLater(1000)
       if (is.null(run$id)) return(NULL)
       el <- if (is.null(run$t0)) 0 else as.numeric(difftime(Sys.time(), run$t0, units = "secs"))
+      # a streaming job also writes its pass count to <project>/data/tmp/progress-<job>.json
+      pt <- if (is.null(run$dir) || is.null(run$job)) "" else {
+        .sr_an_progress_text(.sr_progress_path(list(paths = list(dir = run$dir)), run$job))
+      }
       shiny::div(class = "small mb-2",
-                 sprintf("Running %d of %d: %s, %s (%s)", as.integer(run$index), as.integer(run$total), run$id,
-                         .sr_an_step(run$progress), .sr_an_elapsed(el)))
+                 sprintf("Running %d of %d: %s, %s%s (%s)", as.integer(run$index), as.integer(run$total), run$id,
+                         .sr_an_step(run$progress), if (nzchar(pt)) paste0(", ", pt) else "", .sr_an_elapsed(el)))
     })
 
     # ---- card 2: the result of the selected analysis ----------------------------------------------------
@@ -223,6 +227,7 @@ mod_analyses_server <- function(id, project, busy) {
       if (!nzchar(st)) st <- if (is.null(r)) "not run" else if (isTRUE(r$ok)) "ok" else "failed"
       if (identical(st, "running") && !s$live) st <- "interrupted"
       cls <- switch(st, ok = "bg-success", failed = "bg-danger", "bg-warning text-dark")
+      eng <- .sr_an_engine_badge(shiny::isolate(project()), s$id)
       head <- if (!is.null(r)) {
         done <- st %in% c("ok", "failed")   # a run that is not finished has no elapsed time or cache flag
         el <- if (done) suppressWarnings(as.numeric(r$elapsed)) else NA_real_
@@ -230,7 +235,8 @@ mod_analyses_server <- function(id, project, busy) {
           class = "d-flex gap-2 align-items-center mb-2",
           shiny::span(class = paste("badge", cls), `data-status` = st, st),
           if (length(el) == 1L && is.finite(el)) shiny::span(class = "small", .sr_an_elapsed(el)),
-          if (done && !is.null(r$cached)) shiny::span(class = "small text-muted", if (isTRUE(r$cached)) "cached" else "fresh")
+          if (done && !is.null(r$cached)) shiny::span(class = "small text-muted", if (isTRUE(r$cached)) "cached" else "fresh"),
+          if (nzchar(eng)) shiny::span(class = "badge text-bg-info", `data-engine` = "stream", eng)
         )
       }
       bits <- list(head)
@@ -240,6 +246,13 @@ mod_analyses_server <- function(id, project, busy) {
       }
       if (identical(st, "failed") && nzchar(.sr_an_s(r$error))) {
         bits <- c(bits, list(shiny::tags$pre(.sr_an_s(r$error))))
+        # the memory engine refused the analysis: offer the engine switch (a computational deviation)
+        if (grepl("sr_engine_switch", .sr_an_s(r$error), fixed = TRUE)) {
+          g <- gate()
+          bits <- c(bits, list(shiny::actionButton(ns("switch_engine"), "Switch engine...",
+                                                   class = "btn-outline-primary mb-2",
+                                                   disabled = is.null(g) || !is.null(g$reason))))
+        }
       }
       if (!s$has_ok) {
         bits <- c(bits, list(shiny::div(class = "text-muted", "No successful run yet.")))
@@ -388,6 +401,51 @@ mod_analyses_server <- function(id, project, busy) {
       if (inherits(pl, "error")) return(.sr_ui_notify(paste0("Apply diagnostics: ", conditionMessage(pl)), "error"))
       if (!nrow(pl)) return(.sr_ui_notify("Apply diagnostics: nothing to apply", "message"))
       act("Apply diagnostics", function(p) sr_diag_apply(p, id))
+    })
+
+    # ---- the engine switch dialog ----------------------------------------------------------------------
+    # sr_engine_switch records a computational deviation (the estimator and the SAP hash are unchanged); a
+    # reason is required, and a core refusal is shown in the dialog with the inputs kept.
+    sw_msg <- shiny::reactiveVal("")
+    sw_id <- shiny::reactiveVal(NULL)
+    output$sw_err <- shiny::renderText(sw_msg())
+    shiny::observeEvent(input$switch_engine, {
+      id <- shiny::isolate(sel_id())
+      p <- shiny::isolate(project())
+      if (is.null(id) || is.null(p)) return(.sr_ui_notify("Switch engine: select an analysis first", "error"))
+      why <- if (isTRUE(shiny::isolate(running()))) .sr_an_can_run(list(), TRUE) else .sr_an_can_run(p, busy_now())
+      if (!is.null(why) && !identical(why, "lock the SAP first")) {
+        return(.sr_ui_notify(paste0("Switch engine: ", why), "error"))
+      }
+      cur <- tryCatch(.sr_engine_effective(p, id), error = function(e) "memory")
+      sw_id(id)
+      sw_msg("")
+      shiny::showModal(shiny::modalDialog(
+        title = paste0("Switch the engine of ", id), easyClose = FALSE,
+        shiny::p(sprintf("The analysis uses the %s engine now. A switch is recorded as a computational deviation; the estimator is unchanged.", cur)),
+        .sr_ui_select(ns("sw_engine"), "Engine", c("stream", "memory"), if (identical(cur, "stream")) "memory" else "stream",
+                      texts = c(stream = "Streaming", memory = "In memory")),
+        .sr_ui_on_control(shiny::textInput(ns("sw_reason"), "Reason (required)", value = "", width = "100%"),
+                          "input", maxlength = 500L),
+        shiny::div(class = "text-danger small mt-2", shiny::textOutput(ns("sw_err"))),
+        footer = shiny::tagList(shiny::actionButton(ns("sw_cancel"), "Cancel"),
+                                shiny::actionButton(ns("sw_ok"), "Switch", class = "btn-primary"))))
+    })
+    shiny::observeEvent(input$sw_cancel, shiny::removeModal())
+    shiny::observeEvent(input$sw_ok, {
+      id <- shiny::isolate(sw_id())
+      p <- shiny::isolate(project())
+      reason <- trimws(.sr_ui_chr(input$sw_reason))
+      if (!nzchar(reason)) return(sw_msg("A reason is required for an engine switch."))
+      eng <- .sr_ui_chr(input$sw_engine)
+      why <- .sr_ui_refusal(p, function() busy_now() || isTRUE(shiny::isolate(running())))
+      if (!is.null(why)) return(sw_msg(why))
+      q <- tryCatch(sr_engine_switch(p, id, eng, reason), error = function(e) e)
+      if (inherits(q, "error")) return(sw_msg(conditionMessage(q)))
+      sw_msg("")
+      project(q)
+      shiny::removeModal()
+      .sr_ui_notify(sprintf("%s now uses the %s engine; run it again.", id, eng), "message")
     })
 
     # ---- cards 3-5: comparison, multiplicity, deviations and run history ---------------------------------

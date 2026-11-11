@@ -50,13 +50,14 @@ test_that("every registered route builds, and a valid fill passes sr_spec_valida
     expect_true(sr_compose_check(spec)$ok, info = r)
     ids_f <- unname(vapply(f, `[[`, "", "id"))
     expect_identical(names(f), ids_f, info = r)
-    expect_false(any(c("exclude_rows", "engine", "stream_chunk") %in% ids_f), info = r)
+    expect_false(any(c("exclude_rows", "stream_chunk") %in% ids_f), info = r)
+    expect_true("engine" %in% ids_f, info = r)
     expect_false("purpose" %in% ids_f, info = r)
     expect_identical(spec$purpose, sr_routes()$purpose[match(r, sr_routes()$id)], info = r)
     expect_true(all(paste0("layers_", c("missing", "weights", "matching", "resampling", "framework",
                                         "clustered")) %in% ids_f), info = r)
     # schema order first, then the extras
-    sch <- setdiff(names(sr_route_get(r)$spec_schema), c("exclude_rows", "engine", "stream_chunk", "layers"))
+    sch <- setdiff(names(sr_route_get(r)$spec_schema), c("exclude_rows", "stream_chunk", "layers"))
     expect_identical(ids_f[ids_f %in% sch], sch, info = r)
     expect_identical("exposure_ref" %in% ids_f, "exposure" %in% sch, info = r)
   }
@@ -193,7 +194,7 @@ test_that("the primary route helper reads only a decided, current choice", {
 
 test_that("every SR_FORM_KINDS entry is a known kind and the extras are the eight of the plan", {
   expect_true(all(SR_FORM_KINDS %in% c("column", "columns", "terms", "interactions", "layers", "enum",
-                                       "logical", "number", "text", "event", "hidden")))
+                                       "logical", "number", "text", "event", "engine", "hidden")))
   expect_identical(vapply(SR_FORM_EXTRAS, `[[`, "", "id"),
                    c("exposure_ref", "mi_m", "mi_maxit", "mi_aux", "boot_B", "boot_type", "boot_cluster", "mi_x_boot"))
 })
