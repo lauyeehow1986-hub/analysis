@@ -626,7 +626,9 @@ sr_diag_run <- function(project, analysis_id, checks = NULL, timeout = 3600) {
     checks <- unique(checks)
   }
   if (!length(checks)) return(project)
-  bodies <- lapply(checks, function(ck) sr_diag_compile(ck, a))
+  a_run <- a
+  a_run$spec <- spec   # the memory run spec: the bodies compile the spec the key hashes
+  bodies <- lapply(checks, function(ck) sr_diag_compile(ck, a_run))
   names(bodies) <- checks
   ex <- sr_extract(project, a$table, sr_spec_cols(spec))
   prologue <- .sr_run_prologue(ex)

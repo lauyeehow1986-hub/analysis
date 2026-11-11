@@ -150,24 +150,46 @@ test_that("stream engine adds the Methods fragment", {
   p <- .sc_locked(.srr_spec(engine = "stream"), env = environment())
   p <- sr_run(p, "a1")
   res <- sr_result(p, "a1")
+  # engine = "stream" was asked for explicitly: the "as requested" sentence
   expect_match(res$fragments$engine, "fitted by streaming iteratively reweighted least squares", fixed = TRUE)
-  expect_match(res$fragments$engine, "over fixed chunks of 1000 rows", fixed = TRUE)
+  expect_match(res$fragments$engine, "as requested, reading the data in chunks of 1000 rows", fixed = TRUE)
+  expect_false(grepl("budget", res$fragments$engine, fixed = TRUE))
   # the memory result has no engine fragment
   pm <- sr_run(.sc_locked(.srr_spec(), env = environment()), "a1")
   expect_null(sr_result(pm, "a1")$fragments$engine)
 })
 
 test_that("the engine fragment texts", {
+  # auto (or unknown) request: the spec section 7 sentence, plain digits (no thousands mark: sr_ph_lift)
   glm <- .sr_engine_fragment(list(n = 1234567L, chunk = 250000L), "glm")
   expect_identical(glm, paste(
-    "The analysis dataset (1,234,567 rows) exceeded the in-memory budget, so the models were fitted by",
+    "The analysis dataset (1234567 rows) exceeded the in-memory budget, so the models were fitted by",
     "streaming iteratively reweighted least squares over fixed chunks of 250000 rows. This gives the same",
     "maximum-likelihood estimates and standard errors as standard software within numerical precision."))
+  expect_identical(.sr_engine_fragment(list(n = 1234567L, chunk = 250000L), "glm", "auto"), glm)
   lm <- .sr_engine_fragment(list(n = 5000L, chunk = 1000L), "lm")
   expect_match(lm, "fitted by streaming least squares over fixed chunks of 1000 rows.", fixed = TRUE)
-  expect_match(lm, "^The analysis dataset \\(5,000 rows\\)")
+  expect_true(startsWith(lm, "The analysis dataset (5000 rows)"))
+  # an explicit stream request does not claim the data exceeded the budget
+  glm_s <- .sr_engine_fragment(list(n = 1003L, chunk = 250000L), "glm", "stream")
+  expect_identical(glm_s, paste(
+    "The analysis was run with the streaming engine, as requested, reading the data in chunks of 250000 rows,",
+    "so that the models were fitted by streaming iteratively reweighted least squares over all 1003 rows.",
+    "This gives the same maximum-likelihood estimates and standard errors as standard software within",
+    "numerical precision."))
+  expect_false(grepl("budget", glm_s, fixed = TRUE))
+  lm_s <- .sr_engine_fragment(list(n = 1003L, chunk = 250000L), "lm", "stream")
+  expect_match(lm_s, "fitted by streaming least squares over all 1003 rows.", fixed = TRUE)
   t1 <- .sr_engine_fragment(list(n = c(10, 20, 30), n_excluded = 2L), "table1")
   expect_identical(t1, "Descriptive statistics were computed exactly by SQL aggregation over all 32 rows.")
+  expect_identical(.sr_engine_fragment(list(n = c(500, 503, 1003), n_excluded = 0L), "table1", "stream"),
+                   "Descriptive statistics were computed exactly by SQL aggregation over all 1003 rows.")
+  # the route -> kind lookup
+  expect_identical(.sr_engine_kind("lm"), "lm")
+  expect_identical(.sr_engine_kind("logistic_describe"), "glm")
+  expect_identical(.sr_engine_kind("modpois"), "glm")
+  expect_identical(.sr_engine_kind("table1"), "table1")
+  expect_null(.sr_engine_kind("lmx"))
   # sr_present appends it only for a stream value or a stream run spec
   est <- sr_estimand(population = "adults", variables = "y", intercurrent = "none", summary = "stub",
                      level = "marginal")
@@ -199,6 +221,49 @@ test_that("a stream Table 1 runs through sr_run on one thread with identical str
   rs <- sr_result(ps, "a1")
   expect_identical(rs$tables$table1, rm_$tables$table1)
   expect_identical(rs$fragments$engine,
-                   "Descriptive statistics were computed exactly by SQL aggregation over all 1,500 rows.")
+                   "Descriptive statistics were computed exactly by SQL aggregation over all 1500 rows.")
   expect_null(rm_$fragments$engine)
+})
+
+# Lift every fragment of `id` into a registry as the writer does, resolve it back and verify the registry
+# against the project; returns the resolved engine fragment.
+.srr_roundtrip <- function(p, id) {
+  res <- sr_result(p, id)
+  reg <- sr_ph_registry()
+  out <- sr_ph_lift(res$fragments$engine, reg, paste0("fragment:", id, ":engine"), id)
+  expect_identical(sr_ph_digits(out), character(0))
+  back <- sr_ph_resolve(out, reg)
+  expect_identical(back, res$fragments$engine)
+  vf <- sr_ph_verify(reg, p)
+  expect_true(all(vf$ok), info = paste(vf$expected, vf$got, collapse = "; "))
+  back
+}
+
+test_that("engine fragments survive the placeholder round trip (n = 1003, chunk 250000)", {
+  withr::local_options(sr.stream_chunk_rows = 250000)
+  df <- .sc_frame(1003L)
+  # auto resolved to stream at the lock: the budget sentence
+  withr::with_envvar(c(SR_RAM_BUDGET_GB = "0.0001"), {
+    pa <- .sc_locked(.srr_spec(), env = environment(), df = df)
+    expect_identical(pa$state$sap$lock$engines$a1$requested, "auto")
+    expect_identical(pa$state$sap$lock$engines$a1$engine, "stream")
+    pa <- sr_run(pa, "a1")
+  })
+  expect_true(isTRUE(pa$state$runs$a1$ok), info = pa$state$runs$a1$error)
+  ta <- .srr_roundtrip(pa, "a1")
+  expect_match(ta, "The analysis dataset (1003 rows) exceeded the in-memory budget", fixed = TRUE)
+  expect_match(ta, "fixed chunks of 250000 rows", fixed = TRUE)
+  # an explicit stream request: the "as requested" sentence
+  ps <- sr_run(.sc_locked(.srr_spec(engine = "stream"), env = environment(), df = df), "a1")
+  expect_true(isTRUE(ps$state$runs$a1$ok), info = ps$state$runs$a1$error)
+  ts <- .srr_roundtrip(ps, "a1")
+  expect_match(ts, "chunks of 250000 rows, so that", fixed = TRUE)
+  expect_match(ts, "over all 1003 rows.", fixed = TRUE)
+  # Table 1
+  t1 <- list(purpose = "describe", by = "sex", vars = c("x1", "grp"), nonnormal = "x1",
+             layers = .srr_layers(), seed = 42L, engine = "stream")
+  pt <- sr_run(.sc_locked(t1, route = "table1", env = environment(), df = df), "a1")
+  expect_true(isTRUE(pt$state$runs$a1$ok), info = pt$state$runs$a1$error)
+  expect_identical(.srr_roundtrip(pt, "a1"),
+                   "Descriptive statistics were computed exactly by SQL aggregation over all 1003 rows.")
 })

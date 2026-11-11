@@ -118,14 +118,15 @@ sr_result_check <- function(presented, route) {
 #' fragment `fragments$engine` (.sr_engine_fragment) when the value or the run spec is a streaming one
 #' (value$engine or spec$engine is "stream"; Table 1's value is the in-memory one, so its run spec says
 #' it). Every caller presents through this, not through route$present.
-sr_present <- function(route, value, spec) {
+#' @param requested the engine the analysis asked for (.sr_engine_requested): "stream" gives the
+#'   "as requested" sentence, anything else the spec section 7 budget sentence.
+sr_present <- function(route, value, spec, requested = "auto") {
   out <- route$present(value, spec)
   stream <- identical(value[["engine"]], "stream") || identical(spec[["engine"]], "stream")
-  if (stream && is.list(out)) {
-    id <- as.character(route$id)
-    kind <- if (identical(id, "table1")) "table1" else if (startsWith(id, "lm")) "lm" else "glm"
+  kind <- .sr_engine_kind(route$id)
+  if (stream && is.list(out) && !is.null(kind)) {
     if (identical(kind, "table1") || !is.null(value$n)) {
-      out$fragments[["engine"]] <- .sr_engine_fragment(value, kind)
+      out$fragments[["engine"]] <- .sr_engine_fragment(value, kind, requested)
     }
   }
   out

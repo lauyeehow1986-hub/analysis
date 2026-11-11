@@ -382,7 +382,7 @@ sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
   if (ok) {
     bad <- tryCatch({
       if (!.sr_value_plain(res$value)) stop("the result is not plain data", call. = FALSE)
-      sr_result_check(sr_present(route, res$value, spec), route)
+      sr_result_check(sr_present(route, res$value, spec, .sr_engine_requested(project, analysis_id)), route)
       NULL
     }, error = function(e) .sr_run_scrub(conditionMessage(e), project$paths$dir))
     if (!is.null(bad)) {
@@ -442,5 +442,5 @@ sr_result <- function(project, analysis_id) {
   route <- sr_route_get(a$route, a$route_version)
   # the spec the stored run ran with (its engine and chunk are event-sourced, ruling R5)
   spec <- .sr_run_spec(project, analysis_id, engine = r$ok_engine %||% "memory", chunk = r$ok_chunk)
-  sr_result_check(sr_present(route, stored$value, spec), route)
+  sr_result_check(sr_present(route, stored$value, spec, .sr_engine_requested(project, analysis_id)), route)
 }

@@ -191,20 +191,45 @@ sr_engine_switch <- function(project, analysis_id, engine, reason) {
   if (identical(as.character(route_id), "table1")) 1L else NULL
 }
 
-#' The engine Methods sentence of a streamed result (spec section 7), with the numbers as digits (the writer
-#' lifts them into placeholders). `kind` is "glm" (iteratively reweighted least squares), "lm" (least
-#' squares) or "table1" (over all rows: the overall n plus the rows excluded for a missing group).
-.sr_engine_fragment <- function(value, kind) {
+#' The kind of engine Methods sentence a route gets ("lm", "glm" or "table1"), or NULL for a route that
+#' has no streaming engine (the five routes whose schema carries `engine` and `stream_chunk`).
+.sr_engine_kind <- function(route_id) {
+  kinds <- c(lm = "lm", logistic = "glm", logistic_describe = "glm", modpois = "glm", table1 = "table1")
+  id <- as.character(route_id)[1L]
+  if (is.na(id) || !(id %in% names(kinds))) return(NULL)
+  kinds[[id]]
+}
+
+#' The engine requested for an analysis: the one frozen at the lock, else the one recorded when it was
+#' added, else "auto". An engine.switched does not change it.
+.sr_engine_requested <- function(project, id) {
+  st <- project$state
+  pick <- function(x) if (is.character(x) && length(x) == 1L && !is.na(x) && x %in% SR_ENGINES) x
+  pick(st$sap$lock$engines[[id]]$requested) %||% pick(st$analyses[[id]]$engine_resolved$requested) %||% "auto"
+}
+
+#' The engine Methods sentence of a streamed result (spec section 7). Numbers are plain digits with no
+#' thousands mark, because sr_ph_lift reads "1,003" as two numbers; the writer lifts them into
+#' placeholders. `kind` is "glm" (iteratively reweighted least squares), "lm" (least squares) or "table1"
+#' (over all rows: the overall n plus the rows excluded for a missing group). The spec sentence (the data
+#' exceeded the in-memory budget) is used when the engine was resolved from "auto". When the analysis asked
+#' for "stream" explicitly (`requested`), the sentence says so instead of claiming the budget was exceeded.
+.sr_engine_fragment <- function(value, kind, requested = "auto") {
+  num <- function(x) format(x, scientific = FALSE, trim = TRUE, big.mark = "")
   if (identical(kind, "table1")) {
     n <- value$n
     tot <- as.numeric(n[length(n)]) + as.numeric(value$n_excluded %||% 0)
-    return(paste0("Descriptive statistics were computed exactly by SQL aggregation over all ",
-                  format(tot, big.mark = ",", scientific = FALSE, trim = TRUE), " rows."))
+    return(paste0("Descriptive statistics were computed exactly by SQL aggregation over all ", num(tot),
+                  " rows."))
   }
   how <- if (identical(kind, "lm")) "least squares" else "iteratively reweighted least squares"
-  paste0("The analysis dataset (", format(value$n, big.mark = ",", scientific = FALSE, trim = TRUE),
-         " rows) exceeded the in-memory budget, so the models were fitted by streaming ", how,
-         " over fixed chunks of ", format(value$chunk, scientific = FALSE, trim = TRUE),
-         " rows. This gives the same maximum-likelihood estimates and standard errors as standard software ",
-         "within numerical precision.")
+  tail <- paste0("This gives the same maximum-likelihood estimates and standard errors as standard software ",
+                 "within numerical precision.")
+  if (identical(requested, "stream")) {
+    return(paste0("The analysis was run with the streaming engine, as requested, reading the data in chunks of ",
+                  num(value$chunk), " rows, so that the models were fitted by streaming ", how, " over all ",
+                  num(value$n), " rows. ", tail))
+  }
+  paste0("The analysis dataset (", num(value$n), " rows) exceeded the in-memory budget, so the models were ",
+         "fitted by streaming ", how, " over fixed chunks of ", num(value$chunk), " rows. ", tail)
 }
