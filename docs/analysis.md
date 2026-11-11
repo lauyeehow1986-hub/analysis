@@ -672,7 +672,7 @@ until a project is open. It holds five cards. Every card is derived from the rep
    estimate and the same-measure rows of each sensitivity analysis. After a fired `replace_primary` rule
    the alternative is marked "now primary" and the replaced analysis is listed as a sensitivity row with
    status `replaced`. A sensitivity analysis that has not run shows its status, never a blank.
-4. **Multiplicity**: one table per SAP family, equal to `sr_family_adjust` (p-values to four significant
+4. **Multiplicity**: one table per SAP family, equal to `sr_family_adjust` (p to three and p_adj to four significant
    digits). A family with a member that has not run successfully shows "Waiting for: a, b".
 5. **Deviations and run history**: the `sr_deviations` table, then every cancelled and interrupted attempt
    (analysis, job, started, ended or `interrupted`, reason). Cancelled and interrupted attempts are run
@@ -687,7 +687,7 @@ change does not redraw a card.
 | Condition | Behaviour |
 |---|---|
 | Cancel races completion | `run.completed` wins; `sr_run_cancel` is refused as stale; no `run.cancelled`; a notice says it finished. |
-| Cancel before the worker's run started | "Cancelled before <id> started."; `run.cancelled` is written. |
+| Cancel before the worker's run started | "Cancelled before <id> started."; `sr_run_cancel` is refused as stale, so nothing is written (no `run.cancelled`). |
 | Kill cannot stop a process | Survivors are resumed; the error is shown; the project is not re-taken until the mirai resolves. |
 | Browser closed mid-run | The worker finishes and records; reopening shows the result. |
 | R process or machine dies | Reopening shows `interrupted`; Run selected completes it. |
