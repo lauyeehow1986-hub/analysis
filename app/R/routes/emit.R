@@ -59,9 +59,11 @@
 
 # ---- the emitted-code checker ----------------------------------------------------------------
 
-# Namespaces emitted code may call into. openssl is added for the prologue only.
+# Namespaces emitted code may call into. openssl is added for the prologue only. DBI and duckdb are for the
+# streaming engine (P1e.1): its inlined .h_st_* helpers read the Parquet extract through a connection that
+# .h_st_open() has locked down (no extension can be installed or loaded, no network).
 .sr_emit_pkgs <- c("base", "stats", "utils", "methods", "parallel", "survival", "mice", "sandwich",
-                   "splines", "Hmisc", "logistf")
+                   "splines", "Hmisc", "logistf", "DBI", "duckdb")
 # Never callable, bare or namespaced, and never usable as a value (alias). The second block is
 # indirection (look a function up by name, reach into an environment), which would defeat the checks.
 .sr_emit_forbidden <- c(

@@ -203,6 +203,33 @@ sr_extract <- function(project, table, cols) {
   code
 }
 
+#' The fixed code that opens a streaming run (spec section 6.1): stop with "extract changed" unless the
+#' streaming SHA-256 of the Parquet extract at file.path(sr_project_dir, <rel>) is <sha>, open the locked-down
+#' connection `.sr_con` (inputs sr_duck_memory, sr_duck_threads and sr_duck_temp), close it when the code
+#' ends, and bind `sr_src`, the read_parquet() expression of the extract. It never binds `sr_data`. The
+#' text holds no absolute path.
+.sr_run_prologue_stream <- function(ex) {
+  sha <- ex$sha
+  if (!is.character(sha) || length(sha) != 1L || !grepl("^[0-9a-f]{64}$", sha)) {
+    stop("the extract needs a 64-character lowercase hex sha", call. = FALSE)
+  }
+  if (!identical(ex$rel, paste0("data/extracts/", sha, ".parquet"))) {
+    stop("the extract path must be data/extracts/<sha>.parquet", call. = FALSE)
+  }
+  code <- paste(c(
+    sprintf(".sr_xf <- file.path(sr_project_dir, %s)", .sr_lit(ex$rel)),
+    sprintf("if (paste(as.character(unclass(openssl::sha256(file(.sr_xf)))), collapse = \"\") != %s) stop(\"extract changed\")",
+            .sr_lit(sha)),
+    .sr_inline(.h_st_open, ".h_st_open"),
+    ".sr_con <- .h_st_open(.sr_xf, sr_duck_memory, sr_duck_threads, sr_duck_temp)",
+    "on.exit(DBI::dbDisconnect(.sr_con, shutdown = TRUE), add = TRUE)",
+    "sr_src <- paste0(\"read_parquet('\", gsub(\"'\", \"''\", normalizePath(.sr_xf, winslash = \"/\", mustWork = FALSE), fixed = TRUE), \"')\")",
+    "rm(.sr_xf)"), collapse = "
+")
+  .sr_emit_check(code, "analysis", prologue = TRUE)
+  code
+}
+
 # ---- the run ---------------------------------------------------------------------------------------
 
 # `s` with every regular-expression metacharacter escaped, for a literal match.

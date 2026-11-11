@@ -281,9 +281,13 @@ sr_coef_source <- function(coef_names, coef_map) {
 #' setup from `sr_data` when it runs).
 #' @param spec list with exposure, exposure_ref, terms, interactions (and the columns the passthrough
 #'   needs: outcome, time, status, cluster, strata)
+#' @param engine "memory" (the setup reads `sr_data`) or "stream" (the setup reads the extract through the
+#'   connection `.sr_con` and `sr_src` of .sr_run_prologue_stream(); design, rhs and coef_map are identical)
 #' @return list(setup, design, rhs, coef_map). Interactions are named by variable and refer to the
 #'   exposure or a linear / factor term. See .sr_coef_map() and sr_coef_source() for coef_map.
-sr_terms_code <- function(spec) {
+sr_terms_code <- function(spec, engine = c("memory", "stream")) {
+  engine <- match.arg(engine)
+  stream <- identical(engine, "stream")
   plan <- .sr_term_plan(spec)
   ia <- .sr_interaction_plan(spec, plan)
   types <- vapply(plan, function(i) i$type, character(1))
@@ -306,25 +310,43 @@ sr_terms_code <- function(spec) {
 
   # setup: the excluded rows (spec$exclude_rows) dropped, the column check, helpers, then .sr_fixed
   # (factor levels, RCS knots) from the observed table
+  # stream: the exclusion becomes a SQL predicate (.sr_where) over the extract instead of a row drop
+  stream_rcs <- any(vapply(plan, function(i) i$type == "rcs" && is.null(i$knots$explicit), logical(1)))
   setup <- c(
-    .sr_exclude_code(spec),
+    if (stream) {
+      c(if (length(.sr_exclude_rows(spec))) .sr_exclude_code(spec)[1L] else ".sr_excl <- integer()",
+        .sr_inline(.h_st_excl, ".h_st_excl"),
+        ".sr_where <- .h_st_excl(.sr_con, .sr_excl)")
+    } else .sr_exclude_code(spec),
     if (length(needed)) c(
-      sprintf(".miss <- setdiff(%s, names(sr_data))", .sr_lit(needed)),
+      if (stream) {
+        sprintf(".miss <- setdiff(%s, names(DBI::dbGetQuery(.sr_con, paste(\"SELECT * FROM\", sr_src, \"LIMIT 0\"))))",
+                .sr_lit(needed))
+      } else sprintf(".miss <- setdiff(%s, names(sr_data))", .sr_lit(needed)),
       "if (length(.miss)) stop(\"column(s) not in the data: \", paste(.miss, collapse = \", \"))"
     ),
     if (any(types == "factor")) .sr_inline(.h_levels, ".h_levels"),
     if (any(types != "factor")) .sr_inline(.h_num, ".h_num"),
     if (any(types == "rcs")) .sr_inline(.h_knots, ".h_knots"),
+    if (stream && any(types == "factor")) .sr_inline(.h_st_distinct, ".h_st_distinct"),
+    if (stream && stream_rcs) .sr_inline(.h_st_knots, ".h_st_knots"),
     ".sr_fixed <- list(levels = list(), knots = list())"
   )
+  knot_rows <- if (stream && stream_rcs) as.numeric(sr_opt("stream_knot_rows", 5e7)) else NULL
   for (it in plan) {
     col <- paste0("sr_data[[", .sr_lit(it$var), "]]")
     if (it$type == "factor") {
       ref <- if (is.null(it$ref)) "NULL" else .sr_lit(as.character(it$ref))
+      if (stream) col <- sprintf(".h_st_distinct(.sr_con, sr_src, %s, .sr_where)", .sr_lit(it$var))
       setup <- c(setup, sprintf(".sr_fixed$levels[[%s]] <- .h_levels(%s, %s)", .sr_lit(it$id), col, ref))
     } else if (it$type == "rcs") {
       kn <- if (is.null(it$knots$explicit)) {
-        sprintf(".h_knots(.h_num(%s, %s), %s)", col, .sr_lit(it$var), .sr_lit(it$knots$nk))
+        if (stream) {
+          sprintf(".h_st_knots(.sr_con, sr_src, %s, %s, .sr_where, %s)", .sr_lit(it$var), .sr_lit(it$knots$nk),
+                  .sr_lit(knot_rows))
+        } else {
+          sprintf(".h_knots(.h_num(%s, %s), %s)", col, .sr_lit(it$var), .sr_lit(it$knots$nk))
+        }
       } else {
         .sr_lit(it$knots$explicit)
       }

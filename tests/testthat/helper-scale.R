@@ -29,11 +29,11 @@
   sr_sap_lock(.fx_feasible(p))
 }
 
-# Write `df` plus a .sr_row column (1..n) to a temp parquet; returns the path.
+# Write `df` plus a .sr_row column (1..n, unless df has one) to a temp parquet; returns the path.
 .sc_parquet <- function(df, env = parent.frame()) {
   path <- tempfile(fileext = ".parquet")
   withr::defer(unlink(path), envir = env)
-  df$.sr_row <- seq_len(nrow(df))
+  if (is.null(df$.sr_row)) df$.sr_row <- seq_len(nrow(df))
   con <- DBI::dbConnect(duckdb::duckdb())
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
   duckdb::duckdb_register(con, "sc_df", df)
