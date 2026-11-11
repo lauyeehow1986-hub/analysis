@@ -288,6 +288,9 @@ sr_journal_preset <- function(name = "default") {
        created = .sr_dx_time(props$created), footer = opt("footer"), title = opt("title"))
 }
 
+# The citation function of a document model: key -> "[k]", numbered in order of first use.
+.sr_dx_cite <- function(model) sr_cite_fn(sr_cite_order(model))
+
 #' Render one part of the document model to a .docx.
 #'
 #' Headings use the Word heading styles; paragraphs are runs in the preset font; every first use of a number
@@ -313,10 +316,9 @@ sr_docx_render <- function(model, part = c("main", "supplement"), path, fig_dir,
   }
   pr <- .sr_dx_props(props)
   preset <- sr_journal_preset(model$meta$preset %||% "default")
-  keys <- sr_cite_order(model)
   # the text is as wide as the figures (the page is A4): the margins give way, never the figure
   text_w_in <- max(6.3, preset$fig_width_mm / 25.4)
-  ctx <- list(reg = model$reg, cite = sr_cite_fn(keys), preset = preset, supp = identical(part, "supplement"),
+  ctx <- list(reg = model$reg, cite = .sr_dx_cite(model), preset = preset, supp = identical(part, "supplement"),
               fig_dir = fig_dir, text_w_in = text_w_in, seen = new.env(parent = emptyenv()),
               fp = officer::fp_text_lite(font.family = preset$font, font.size = preset$size_pt))
   dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)

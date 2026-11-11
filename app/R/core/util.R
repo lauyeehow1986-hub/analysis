@@ -8,6 +8,13 @@ sr_opt <- function(name, default = NULL) {
   getOption(paste0("sr.", name), env)
 }
 
+#' Where sr_opt(name) gets its value: "option", "env" or "default" (the same precedence as sr_opt).
+sr_opt_source <- function(name, default = NULL) {
+  if (!is.null(getOption(paste0("sr.", name)))) return("option")
+  if (nzchar(Sys.getenv(toupper(paste0("SR_", name)), unset = ""))) return("env")
+  "default"
+}
+
 #' Run mode: "airgap" (default, no network anywhere) or "connected".
 sr_mode <- function() {
   m <- sr_opt("mode", "airgap")

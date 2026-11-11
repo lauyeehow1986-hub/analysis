@@ -137,7 +137,7 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 #' NULL when a run may start, else the reason it may not (checked in this order).
 .sr_an_can_run <- function(p, busy = FALSE) {
   if (is.null(p)) return("open a project first")
-  if (isTRUE(busy)) return("wait for the running import or analysis to finish")
+  if (isTRUE(busy)) return(.sr_ui_busy_text)
   if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
   if (sr_blind(p)) return("lock the SAP first")
   stp <- sr_project_stopped(p)

@@ -47,11 +47,20 @@
   bslib::card(fill = FALSE, bslib::card_header(header), bslib::card_body(fillable = FALSE, fill = FALSE, ...))
 }
 
+# Shared refusal text while any job (import, analysis, archive operation, project import) runs.
+.sr_ui_busy_text <- "wait for the running import, analysis, archive operation or project import to finish"
+
+# TRUE iff any flag in the named logical list `flags`, other than those named in `except`, is TRUE.
+.sr_ui_busy_any <- function(flags, except = character()) {
+  keep <- flags[setdiff(names(flags), except)]
+  any(vapply(keep, isTRUE, logical(1)))
+}
+
 # Why an edit is refused (no project, busy, read-only), or NULL when it may go ahead. Shared by act() and
 # the actions that do not return a project.
 .sr_ui_refusal <- function(p, busy = function() FALSE) {
   if (is.null(p)) return("open a project first")
-  if (isTRUE(busy())) return("wait for the running import or analysis to finish")
+  if (isTRUE(busy())) return(.sr_ui_busy_text)
   if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
   NULL
 }

@@ -84,21 +84,21 @@ test_that("the Analyses tab is wired and a run blocks Data, Design and SAP edits
   shiny::testServer(.aw_app(), {
     project(p)
     session$flushReact()
-    expect_false(isTRUE(any_busy()))
+    expect_false(isTRUE(shiny::isolate(busy_for()())))
     session$setInputs(`analyses-run_all` = 1)
     expect_true(a$running())
-    expect_true(any_busy())
+    expect_true(shiny::isolate(busy_for()()))
     expect_false(isTRUE(d$busy()))                          # the import flag is untouched
     expect_match(paste(output$`analyses-badge`$html), "running", fixed = TRUE)
     n_ev <- function() length(sr_events_read(project()$paths$events))
     n0 <- n_ev()
     session$setInputs(`data-path` = "x.csv", `data-import` = 1)
-    expect_true(any(grepl("Import: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+    expect_true(any(grepl(paste0("Import: ", .sr_ui_busy_text), seen$msg, fixed = TRUE)))
     session$setInputs(`design-pico_population` = "a", `design-pico_outcome` = "b", `design-pico_save` = 1)
-    expect_true(any(grepl("Save research question: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
-    n_sap <- sum(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE))
+    expect_true(any(grepl(paste0("Save research question: ", .sr_ui_busy_text), seen$msg, fixed = TRUE)))
+    n_sap <- sum(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE))
     session$setInputs(`sap-add` = 1)
-    expect_gt(sum(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE)), n_sap)
+    expect_gt(sum(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)), n_sap)
     expect_equal(n_ev(), n0)                                # the refused edits wrote nothing
     session$setInputs(`analyses-cancel` = 1)
     t0 <- Sys.time()
@@ -107,7 +107,72 @@ test_that("the Analyses tab is wired and a run blocks Data, Design and SAP edits
       session$flushReact()
     }
     expect_false(a$running())
-    expect_false(any_busy())
+    expect_false(shiny::isolate(busy_for()()))
     try(sr_project_close(project()), silent = TRUE)
+  })
+})
+
+test_that("the Archive tab is wired and an archive job blocks Data, Design, SAP and Analyses edits", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.mode = "airgap", sr.run_sync = FALSE)
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) TRUE)
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  out <- file.path(withr::local_tempdir(), "a.srproj")
+  shiny::testServer(.aw_app(), {
+    project(p)
+    session$flushReact()
+    expect_false(isTRUE(shiny::isolate(busy_for()())))
+    session$setInputs(`archive-ex_label` = "v1", `archive-ex_data` = "full", `archive-ex_path` = out,
+                      `archive-export` = 1)
+    session$flushReact()
+    expect_true(ar$running())
+    expect_true(shiny::isolate(busy_for()()))
+    expect_false(isTRUE(shiny::isolate(busy_for("archive")())))   # the archive module itself is not blocked
+    n_ev <- function() length(sr_events_read(project()$paths$events))
+    n0 <- n_ev()
+    refused <- function(label, ...) {
+      n <- length(seen$msg)
+      session$setInputs(...)
+      session$flushReact()
+      new <- seen$msg[seq_along(seen$msg) > n]
+      expect_true(any(startsWith(new, paste0(label, ": ")) & endsWith(new, .sr_ui_busy_text)),
+                  info = label)
+    }
+    refused("Import", `data-path` = "x.csv", `data-import` = 1)
+    refused("Save research question", `design-pico_population` = "a", `design-pico_outcome` = "b",
+            `design-pico_save` = 1)
+    n_sap <- sum(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE))
+    session$setInputs(`sap-add` = 1)
+    expect_gt(sum(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)), n_sap)
+    refused("Run", `analyses-run_all` = 1)
+    expect_equal(n_ev(), n0)                                # the refused edits wrote nothing
+    session$setInputs(`archive-ex_cancel` = 1)
+    session$flushReact()
+    expect_false(ar$running())
+    expect_false(shiny::isolate(busy_for()()))
+    expect_false(isTRUE(project()$readonly))
+    try(sr_project_close(project()), silent = TRUE)
+  })
+})
+
+test_that("badges re-render after a mode change", {
+  withr::local_options(sr.mode = "airgap", sr.jev_key = NULL)
+  withr::defer(options(sr.mode = NULL, sr.jev_key = NULL))
+  seen <- .ui_spy_notify()
+  shiny::testServer(.aw_app(), {
+    session$flushReact()
+    expect_match(paste(output$badges$html, collapse = " "), "no network", fixed = TRUE)
+    session$setInputs(`settings-val_mode` = "connected", `settings-set_mode` = 1)
+    session$setInputs(`settings-connect_word` = "CONNECT", `settings-connect_ok` = 1)
+    session$flushReact()
+    html <- paste(output$badges$html, collapse = " ")
+    expect_match(html, "connected", fixed = TRUE)
+    expect_false(grepl("no network", html, fixed = TRUE))
+    session$setInputs(`settings-val_mode` = "airgap", `settings-set_mode` = 2)
+    session$flushReact()
+    expect_match(paste(output$badges$html, collapse = " "), "no network", fixed = TRUE)
   })
 })

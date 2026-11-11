@@ -34,7 +34,9 @@ test_that("tools/run_app.R serves the StatRouter shell", {
   body <- rawToChar(res$content)
   expect_match(body, "StatRouter", fixed = TRUE)
   expect_match(body, "Reviewer", fixed = TRUE)
-  expect_match(body, "no network", fixed = TRUE)
+  # the badges are rendered by the server (a Settings edit updates them), so the static page holds only their slot
+  expect_match(body, 'id="badges"', fixed = TRUE)
+  expect_match(body, 'data-value="Settings"', fixed = TRUE)
   expect_match(body, "Coming in P1b-P1d", fixed = TRUE)
   # Design and SAP are real tabs after Data; Profile is gone (its content lives in Data).
   expect_match(body, 'data-value="Design"', fixed = TRUE)

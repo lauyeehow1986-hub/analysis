@@ -619,11 +619,11 @@ until a project is open. It holds five cards. Every card is derived from the rep
   finishes and records its events. A job that settles while a different project is open is settled on a
   temporary handle to its own folder (the notice ends " (in <project name>)") and the open project is
   never replaced.
-- While a queue is running the tab shows a `running` badge. The busy flag the Analyses module receives
-  from the app is **import only**; the module combines it with its own `running()`. Data gets import OR
-  run, and Design and SAP get import OR run (`any_busy` in `app/app.R`): an import, a Design save or an
-  SAP edit is refused during a run with "wait for the running import or analysis to finish", and the Data
-  Import button is disabled.
+- While a queue is running the tab shows a `running` badge. The app keeps one busy flag per job module (the busy hub in `app/app.R`). The Analyses module
+  receives `busy_for("analyses")`, which is every flag except its own, so its own `running()` never blocks
+  its Run buttons; every other panel receives `busy_for()` (any job). An import, a Design save or an
+  SAP edit is refused during a run with `.sr_ui_busy_text` ("wait for the running import, analysis, archive
+  operation or project import to finish"), and the Data Import button is disabled.
 
 ### Worker protocol, Cancel and interrupted
 
@@ -695,4 +695,4 @@ change does not redraw a card.
 | `sr_run` or `sr_diag_run` refusal | The queue stops; the core message is shown verbatim ("diagnostics: " prefixes a diagnostics refusal). |
 | Fit fails | Recorded `ok = FALSE`; the queue continues; the error is shown in Card 2. |
 | Worker error outside the core | A `refused` with "worker error: ..." or "worker stopped unexpectedly (mirai error <code>)"; the queue stops. |
-| Import, Design or SAP edit during a run | Refused with "wait for the running import or analysis to finish". |
+| Import, Design or SAP edit during a run | Refused with `.sr_ui_busy_text` ("wait for the running import, analysis, archive operation or project import to finish"). |

@@ -191,3 +191,65 @@ only.
   the authors to write.
 - **Method references need re-checking.** The method references were copied from the plan and must be
   checked against the publisher's records before release.
+
+## 10. The Write panel (P1d UI)
+
+The Write tab is hidden until a project is open. It puts the writer behind five cards. Every number it shows
+comes from the core; the panel only formats frames. A read-only project or a running job (the app-wide busy
+flag) disables Check, Preview and Export, and the server refuses as well.
+
+**Options and gates.** The fields go through `sr_writer_opts()`: "Journal preset" (each unverified preset is
+labelled "(not verified)"), "Suppress counts below k" (default `SR_SDC_K`), "Label small cells of Table 2
+(unticked: suppress them)" and "Alpha". An invalid value shows the core message under the card and disables
+the three buttons. The gates are read live from the project; each failing gate is listed in red with its
+reason:
+
+| Gate | Fails when |
+|---|---|
+| Project writable | "the project is read-only (locked by another session)" |
+| SAP locked | "lock the SAP first" |
+| Pre-specified analyses run | "no ok run: <analysis ids>" |
+| App not busy | "wait for the running import, analysis, archive operation or project import to finish" |
+
+A refusal shows "<Check manuscript, Preview or Export>: <first failing reason or the options error>". A
+refusal of `sr_doc_model` that the gates did not predict is shown verbatim.
+
+**Check.** "Check manuscript" builds `sr_doc_model()` and runs `sr_claim_guard()`; no file is written. The
+findings table lists block-severity rows first (columns severity, rule, block, analysis, detail). With nothing
+to report it says "The claim guard found nothing."
+
+**Preview.** "Preview" shows the main text, then a "Supplement" heading and the supplement, as read-only HTML:
+headings, paragraphs, tables with captions and footnotes, and figures as thumbnails. Every text goes through
+the same piece resolver as the docx, so a suppressed count reads `<k` (for example `<5`) exactly as in the
+document. The reference list and the checklist block are left out (the checklist has its own card).
+
+**Cache rule.** One model is kept per session, keyed on the options, the number of replayed events, the
+`digits` setting and the Settings version. Check, Preview and the Checklist share it, so a second button does
+not rebuild. Any project change, option change or settings change makes the cached views stale: the cards fall
+back to "Press Check to run the claim guard.", "Press Preview to see the manuscript as the document shows it."
+and "Press Check or Preview to build the checklist." Export always rebuilds inside `sr_export` and then drops
+the cache.
+
+**Checklist.** `sr_checklist_strobe` as a table (item, section, label, status, detail). A CONSORT project shows
+the core's note that the checklist is completed by hand.
+
+**Export and history.** "Export manuscript" calls `sr_export()` synchronously and reports "Export written:
+<id>". A refusal is shown verbatim and nothing is written. The history has one row per export in the project (manuscript, SAP or feasibility)
+(Kind, Id, Created, Preset, Files, Status) with these buttons:
+
+- **Download** (a manuscript row): a zip of the export folder from `sr_export_zip()`, named `<id>.zip`. A SAP or
+  feasibility row downloads its single `.docx`.
+- **Open folder**: opens the export folder in the OS file manager (a local call, not a network call).
+- **Verify**: `sr_export_verify()`. Two separate findings:
+  - File problems, in red, one line each as `changed: <path>`, `missing: <path>`, `extra: <path>` or
+    `manifest: <path>`. The first three mean the export on disk no longer matches the hash in its
+    `doc.exported` event (corruption, an edit or a stray file). `manifest:` means `manifest.json` lists that
+    file with another SHA than the event, or omits it. With none: "Every file matches its recorded hash."
+  - Numbers: "These numbers no longer re-derive from the project:" with the differing rows (to 4 significant
+    digits). This is not file damage by itself: when no file problem is listed, the files are intact and a re-run
+    moved the project's numbers since the export. With none: "Every number re-derives from the project." This line shows only when the numbers
+    were really checked. If `placeholders.json` or `manifest.json` is missing, unreadable or damaged, or the
+    export folder is gone, the panel shows "Numbers not checked: <reason>" instead (in the API,
+    `numbers_ok` is FALSE and `numbers_note` holds the reason), together with the file problems. Verify never
+    throws on a damaged file.
+- A row whose files are gone shows status "missing on disk" in red; its Download and Open folder are disabled.

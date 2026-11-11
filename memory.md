@@ -18,6 +18,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-11-08 | P1d.3 freeze done (branch `p1d-freeze`, Tasks 1-7): `sr_freeze` (gated, manifest with SHA-256 of store, sources, extracts, fits, exports and code; pinned events prefix and audit tip), the library baseline gate in `sr_run` with `sr_rebaseline_diff` / `sr_rebaseline`, the `.srproj` export (full / lean / auto, owner names scrubbed) and all-or-nothing import with a pure-R tar header scanner, `sr_freeze_diff` and `sr_freeze_results_diff`; `docs/archive.md`. P1 exit item 7 passes end to end (`test-archive-e2e.R`). Archives are not signed (out of scope). Full suite 13859 pass, 1 fail (the flaky 5 s timing assert in `test-archive-tar.R`, 10.9 s under load; see the gotcha), 4 skip (no fst, no sas7bdat fixture, NHEFS unset, one more textbook skip), `LINT OK (95 files)` |
 | 2026-11-09 | P1d UI sub-project 1 (Design + SAP panels) done (branch `p1d-ui-sap`, Tasks 1-9): the Design panel (`app/R/ui/mod_design.R`: PICO, run rules, decision table, shadow summary and feed export; the Ask Jev card only outside air-gap mode) and the SAP panel (`mod_sap.R`: analyses with the typed spec form, feasibility assess and decide, families and rules, the lock checklist, the typed-word lock, SAP_v1.docx and the feasibility report), wired into `app/app.R` after Data; the empty Profile tab is gone. Shared helpers `.sr_ui_*` in `app/R/ui/util.R`; the spec form is driven by `SR_FORM_KINDS` (`spec_form.R`). Tests run per file (lint, ui-util, ui-spec-form, mod-design, mod-sap, app-launch) all pass; the full suite was NOT run for this task (controller ruling). Browser walk on synthetic cardiac data (import, roles, PICO, rules, add/edit/add analyses, feasibility, DQ decisions, lock, SAP_v1.docx) found the stale-checklist issue below |
 | 2026-11-11 | P1d UI sub-project 2 (Analyses panel) done (branch `p1d-ui-analyses`, Tasks 1-9): `run.started` / `run.cancelled` events and the run history in the reducer, `sr_run_cancel`, `sr_diag_apply_plan`, the Analyses panel (`app/R/ui/mod_analyses.R`, `analyses_job.R`, `analyses_view.R`: Runs queue in a mirai worker with a process-tree Cancel, Result with diagnostics and Apply, Primary vs sensitivity, Multiplicity, Deviations and run history), wired after SAP with an app-wide busy flag; `docs/analysis.md` section 14. Suite counts and the acceptance walk: see the Task 9 commit message |
+| 2026-11-11 | P1d UI sub-project 3 (Write, Archive, Import, Settings) built on branch `p1d-ui-write-archive`, Tasks 1-11: `sr_export_verify` / `sr_export_zip` / `sr_opt_source`, the shared job layer `app/R/ui/job.R`, the busy hub in `app/app.R`, the Write panel (`mod_write.R`, `write_view.R`), the Archive panel (`mod_archive.R`, `archive_view.R`, `archive_job.R`), the Import card on the Project tab (`mod_import.R`) and the Settings panel (`mod_settings.R`, `settings_view.R`); guides `docs/writer.md` section 10, `docs/archive.md` sections 10-11, `docs/settings.md`. Acceptance walk (Task 12) passed, steps 1-5 (see the walk note below); **pending:** the final review; not yet merged |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -36,7 +37,7 @@ design; this file holds *what has happened* and *what we learned*.
    The freeze (P1d.3) is done (plan `docs/superpowers/plans/2026-11-08-p1d-freeze.md`, branch `p1d-freeze`,
    guide `docs/archive.md`).
    **P1d UI sub-project 1 (Design + SAP) is done 2026-11-09 (branch `p1d-ui-sap`). Next: sub-projects (2) and (3), each with its own spec, plan and branch:**
-   (2) Analyses (run, long jobs, post-lock analyses, results), done 2026-11-11 (branch `p1d-ui-analyses`); (3) Write + Archive + Settings.
+   (2) Analyses (run, long jobs, post-lock analyses, results), done 2026-11-11 (branch `p1d-ui-analyses`); (3) Write + Archive + Settings, built 2026-11-11 (branch `p1d-ui-write-archive`; pending the acceptance walk and final review).
    Together they own the payload preview, the consent dialog and the freeze, export and import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
      - The router has only the Design panel; the preview and consent dialogs come later. Only Jev is registered (the `local` and `clm` ids are reserved for P3), and
        the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
@@ -293,9 +294,10 @@ design; this file holds *what has happened* and *what we learned*.
   there is no event for it. Run selected appends a new `run.started`.
 - **`run.completed` now carries `job`** (and `run.started` carries `job` and `extract_sha`). Old projects
   without `run.started` replay unchanged.
-- **Busy flags.** The Analyses module receives the import-only flag (`d$busy`) and combines it with its own
-  `running()`; Data gets import OR run (`run_busy`, set one flush late), Design and SAP get import OR run
-  (`any_busy`). Passing import-OR-run to the Analyses module would block its own Run buttons.
+- **Busy flags.** The busy hub in `app/app.R` holds one flag per job module (data, analyses, archive, import).
+  `busy_for(except)` is TRUE when any flag other than `except` is set: Analyses gets `busy_for("analyses")` (so
+  its own running state never blocks its Run buttons), Data `busy_for("data")`, and Design, SAP, Write and
+  Project get `busy_for()`. The refusal text is `.sr_ui_busy_text`.
 - **Lock handover.** Before each job the session closes DuckDB, then the project, and keeps a read-only copy;
   after it settles it re-opens (only the same folder, only over the read-only copy). A job that settles while
   another project is open settles on a temporary handle and never replaces the open project. The worker
@@ -306,6 +308,24 @@ design; this file holds *what has happened* and *what we learned*.
 - **Observed in the acceptance walk (not changed).** The bootstrap with B = 2000 on 400 rows fits in about 4 s, so a Cancel walk needs a much larger B (60000 took 96 s). While a run is going the project is released to the worker, so the SAP panel shows its read-only banner and disabled controls (the busy text appears only on Data actions). Card 3 lists a sensitivity analysis of a different measure (an RMST difference under a Cox HR) as `ok` with no estimate, because it shows only same-measure rows.
 - **Known gap.** `.sr_data_spawn` still has the early-error gap `.sr_an_spawn` fixed (its temp files are not
   always unlinked when the worker fails before the job starts).
+
+### P1d UI (Write, Archive, Import, Settings) state, deviations and gotchas
+State: all four panels are built, documented and walked (Task 12 passed, one fix); the final review is still to do.
+
+Acceptance walk (2026-11-11, port 7790, synthetic writer-fixture sample built from `.fx_writer_template()`): (1) project opened with SAP locked and analyses run; (2) Write gates green, Check ran (claim guard found nothing), Preview showed `<5` cells, Export gave export-001, the zip served (PK, 609 KB), Verify ok, one changed byte turned Verify red (`changed: ...analysis.R`) and restoring it turned it green; (3) FREEZE dialog froze submission-v1, quick verify ok, Verify with data cancelled once then ok, diff showed no differences, `.srproj` exported on auto (full); (4) import into another folder: verify ok, the imported freeze files and manifest hash are identical to the original (the import adds only srproj.json); (5) digits 3 changed the preview (1.70 to 1.703), a dummy key showed as set and never appeared in the page HTML, a wrong word was refused and CONNECT switched to connected, one Set back to airgap cleared the key, and after a restart every setting was at its default. Fix: the Write Preview button and its output shared the id `preview` (Shiny warns), the output is now `preview_body`, with a test. Notes: the app started from `tools/run_app.R` by hand because `preview_start` reads the launch file of the primary worktree; the browser pane typing is slow, so wait before reading a table; parent folders of an export or import destination must already exist.
+
+Deviations from the spec (decided during the work):
+- **D1.** The Write helpers are `.sr_wp_*` (in `write_view.R`), not `.sr_wr_*`: the writer core already owns `.sr_wr_`.
+- **D2.** Import is its own module `mod_import_*` (`mod_import.R`) on the Project tab; `mod_project_server` still returns the project reactiveVal, not `list(project, busy)`.
+- **D3.** `mod_settings_server` returns `list(version)`, a counter that goes up after each successful set or reset (Write, Archive and the badges watch it).
+- **D4.** The options snapshot `.sr_job_opts()` (the `sr.<name>` options of the Settings catalogue that are set; always without `sr.jev_key` and the test-only options; the actor is `sr.user`) goes to every worker: the analyses worker, `.sr_data_spawn` and the Archive and Import jobs.
+
+Gotchas:
+- **A cancelled import after the worker wrote `srproj.imported` is kept.** `settle()` checks the last event of the target; it opens the project and says "Import already finished; kept". Only a killed or never-started worker gets the cleanup.
+- **Export cleanup uses a keep list.** `.sr_ar_export_cleanup(..., keep)` never deletes a path that existed before the job (the archive, `.partial`, the staging folder), so a pre-existing `archive/.partial` survives a cancel.
+- **Test option leaks.** An option set inside a `testServer` leaks into later test files; use `withr::local_options(..., .local_envir = <the test env>)` (a `test_that`-level frame), not a bare `options()` or a `defer` that clears the baseline (for example `sr.user`, `sr.cran_snapshot`).
+- **A killed real mirai job leaves a rejected-task warning** (a harmless "connection reset" style warning in the console); the panel still settles.
+- **`settle()` releases busy in `on.exit`.** Whatever fails while settling, the job env is emptied and `active(FALSE)` runs, so the app is never left blocked.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

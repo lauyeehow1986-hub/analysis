@@ -177,7 +177,7 @@ test_that("Run is refused while busy, read-only, unlocked or stopped, and the bu
     })
   }
   p <- .fx_an_project()
-  check(p, TRUE, "wait for the running import or analysis to finish")
+  check(p, TRUE, .sr_ui_busy_text)
   ro <- p
   ro$readonly <- TRUE
   check(ro, FALSE, "the project is read-only (locked by another session)")
@@ -239,7 +239,7 @@ test_that("the badge shows while a queue runs and Cancel when idle says nothing 
     expect_false(grepl("disabled", .ma_btn(html, "cancel"), fixed = TRUE))
     # a second Run while the queue runs names the real reason, not the read-only copy
     session$setInputs(run_all = 2)
-    expect_true(any(seen$msg == "Run: wait for the running import or analysis to finish"))
+    expect_true(any(seen$msg == paste0("Run: ", .sr_ui_busy_text)))
     expect_false(any(grepl("read-only", seen$msg, fixed = TRUE)))
     expect_length(ctl$calls, 1L)
     writeLines("fitting", ctl$calls[[1L]]$progress_file)
@@ -628,7 +628,7 @@ test_that("Apply is refused while a queue runs", {
     session$setInputs(runs_rows_selected = 1)
     session$setInputs(run_all = 1)
     session$setInputs(apply = 1)
-    expect_true(any(seen$msg == "Apply diagnostics: wait for the running import or analysis to finish"))
+    expect_true(any(seen$msg == paste0("Apply diagnostics: ", .sr_ui_busy_text)))
     ctl$resolve(list(status = "ok", message = NULL))
   })
 })
@@ -799,7 +799,7 @@ test_that("the read-only banner is not shown while the app is busy", {
   shiny::testServer(mod_analyses_server, args = list(project = shiny::reactiveVal(p), busy = shiny::reactive(TRUE)), {
     html <- paste(output$run_btns$html)
     expect_false(grepl("alert-warning", html, fixed = TRUE))
-    expect_match(html, "wait for the running import or analysis to finish", fixed = TRUE)
+    expect_match(html, .sr_ui_busy_text, fixed = TRUE)
   })
 })
 

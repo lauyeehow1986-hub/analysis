@@ -199,9 +199,10 @@
 #' the project folder `project_dir` (the caller has released its lock), runs .sr_data_ingest_job() and closes
 #' the project again. Nothing is read from the caller's session: every path is an argument.
 .sr_data_spawn <- function(app_dir, project_dir, path, table, sniff = NULL, external = NULL,
-                           progress_file = NULL, cancel_file = NULL) {
+                           progress_file = NULL, cancel_file = NULL, opts = .sr_job_opts()) {
   mirai::mirai({
     source(file.path(app_dir, "global.R"), local = FALSE, encoding = "UTF-8")
+    if (length(opts)) options(opts)    # after global.R, which must not overwrite the session's settings
     p <- sr_project_open(project_dir)
     out <- if (isTRUE(p$readonly)) {
       list(ok = FALSE, cancelled = FALSE, warnings = NULL,
@@ -219,7 +220,8 @@
     try(unlink(c(progress_file, cancel_file)), silent = TRUE)
     out
   }, .args = list(app_dir = app_dir, project_dir = project_dir, path = path, table = table, sniff = sniff,
-                  external = external, progress_file = progress_file, cancel_file = cancel_file))
+                  external = external, progress_file = progress_file, cancel_file = cancel_file,
+                  opts = opts))
 }
 
 # TRUE when two project folder paths are the same folder (case and slash style do not matter).
@@ -546,7 +548,7 @@ mod_data_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       p <- project()
       if (is.null(p)) return(.sr_ui_notify("Import: open a project first", "error"))
       if (isTRUE(job$busy)) return(.sr_ui_notify("Import: one import is already running", "error"))
-      if (isTRUE(busy())) return(.sr_ui_notify("Import: wait for the running import or analysis to finish", "error"))
+      if (isTRUE(busy())) return(.sr_ui_notify(paste0("Import: ", .sr_ui_busy_text), "error"))
       if (isTRUE(p$readonly)) return(.sr_ui_notify("Import: the project is read-only (locked by another session)", "error"))
       path <- path_in()
       if (!nzchar(path)) return(.sr_ui_notify("Import: choose a file first", "error"))

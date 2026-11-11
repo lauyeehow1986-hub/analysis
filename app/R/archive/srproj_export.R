@@ -12,6 +12,9 @@
 SR_SRPROJ_FORMAT <- "statrouter-srproj"
 SR_SRPROJ_VERSION <- 1L
 SR_SRPROJ_MAX_MEMBER <- 8589934592
+SR_SRPROJ_ACTOR_WARNING <- paste0("the exported events.jsonl and audit.log record the OS user name as the actor; set the ",
+                                  "sr.user option (or SR_USER) to a role or pseudonym before recording a project that ",
+                                  "will be shared")
 
 sr_reducer_register("srproj.exported", function(state, event) {
   ex <- state$srproj_exports %||% list()
@@ -60,9 +63,7 @@ sr_reducer_register("srproj.exported", function(state, event) {
     if (is.character(a) && length(a) == 1L && !is.na(a)) a else NA_character_
   }, "", USE.NAMES = FALSE))
   if (me %in% actors) {
-    warning("the exported events.jsonl and audit.log record the OS user name as the actor; set the sr.user ",
-            "option (or SR_USER) to a role or pseudonym before recording a project that will be shared",
-            call. = FALSE)
+    warning(SR_SRPROJ_ACTOR_WARNING, call. = FALSE)
     return(invisible(TRUE))
   }
   invisible(FALSE)
@@ -70,19 +71,32 @@ sr_reducer_register("srproj.exported", function(state, event) {
 
 # ---- data mode --------------------------------------------------------------------------------------
 
-#' "full" or "lean". Under "auto": full when the data files total at most sr_opt("freeze_full_max_bytes",
-#' 2 GiB) and none of them is absent from the project folder.
-.sr_srproj_data_mode <- function(project, label, data = "auto") {
-  if (!identical(data, "auto")) return(data)
-  lim <- suppressWarnings(as.numeric(sr_opt("freeze_full_max_bytes", 2147483648)))
-  if (length(lim) != 1L || !is.finite(lim) || lim < 0) {
-    stop("sr.freeze_full_max_bytes must be a finite number of bytes, zero or more", call. = FALSE)
-  }
+#' The data files of a freeze: list(bytes, absent), the total size of the manifest's data files and whether
+#' any of them is missing from the project folder.
+.sr_srproj_data_stats <- function(project, label) {
   m <- sr_freeze_manifest(project, label)
   dat <- Filter(function(f) f$kind %in% .SR_FREEZE_DATA_KINDS, m$files)
   total <- sum(vapply(dat, function(f) as.numeric(f$bytes), 0))
   gone <- any(!file.exists(file.path(project$paths$dir, vapply(dat, `[[`, "", "path"))))
-  if (total <= lim && !gone) "full" else "lean"
+  list(bytes = total, absent = gone)
+}
+
+#' The mode an export would use: list(mode, bytes, absent). "full" or "lean" is taken as given (bytes and
+#' absent are then NA). Under "auto": full when the data files total at most sr_opt("freeze_full_max_bytes",
+#' 2 GiB) and none of them is absent from the project folder.
+.sr_srproj_mode <- function(project, label, data = "auto") {
+  if (!identical(data, "auto")) return(list(mode = data, bytes = NA_real_, absent = NA))
+  lim <- suppressWarnings(as.numeric(sr_opt("freeze_full_max_bytes", 2147483648)))
+  if (length(lim) != 1L || !is.finite(lim) || lim < 0) {
+    stop("sr.freeze_full_max_bytes must be a finite number of bytes, zero or more", call. = FALSE)
+  }
+  st <- .sr_srproj_data_stats(project, label)
+  list(mode = if (st$bytes <= lim && !st$absent) "full" else "lean", bytes = st$bytes, absent = st$absent)
+}
+
+#' "full" or "lean"; see .sr_srproj_mode.
+.sr_srproj_data_mode <- function(project, label, data = "auto") {
+  .sr_srproj_mode(project, label, data)$mode
 }
 
 # ---- members ----------------------------------------------------------------------------------------

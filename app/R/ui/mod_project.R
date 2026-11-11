@@ -61,7 +61,7 @@ mod_project_ui <- function(id) {
   )
 }
 
-mod_project_server <- function(id) {
+mod_project_server <- function(id, busy = function() FALSE) {
   shiny::moduleServer(id, function(input, output, session) {
     current <- shiny::reactiveVal(NULL)
     status <- shiny::reactiveVal("No project open.")
@@ -102,7 +102,15 @@ mod_project_server <- function(id) {
       normalizePath(path.expand(d), winslash = "/", mustWork = FALSE)
     }
 
+    # Refuse (and tell the user) while any job runs; TRUE means the action must not go ahead.
+    refuse_busy <- function(action) {
+      if (!isTRUE(busy())) return(FALSE)
+      .sr_ui_notify(paste0(action, ": ", .sr_ui_busy_text), "error")
+      TRUE
+    }
+
     shiny::observeEvent(input$create, {
+      if (refuse_busy("New")) return(invisible(NULL))
       load_project(function() {
         d <- dir_in()
         nm <- text_in("name")
@@ -112,6 +120,7 @@ mod_project_server <- function(id) {
     })
 
     shiny::observeEvent(input$open, {
+      if (refuse_busy("Open")) return(invisible(NULL))
       load_project(function() sr_project_open(dir_in()), function(p) {
         msg <- if (isTRUE(p$readonly)) {
           sprintf("Opened project '%s' - read-only (locked by %s)", p$meta$name,
