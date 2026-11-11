@@ -85,3 +85,12 @@ test_that(".sr_truncate_tail cuts an unterminated tail atomically and returns it
   expect_identical(file.size(p), 0)
   expect_identical(.sr_truncate_tail(file.path(d, "missing")), raw(0))
 })
+
+test_that("sr_opt_source: option, env and default", {
+  expect_identical(sr_opt_source("zz_t"), "default")
+  withr::local_envvar(SR_ZZ_T = "x")
+  expect_identical(sr_opt_source("zz_t"), "env")
+  withr::local_options(sr.zz_t = 1)
+  expect_identical(sr_opt_source("zz_t"), "option")
+  expect_identical(sr_opt("zz_t"), 1)
+})

@@ -168,15 +168,7 @@ test_that("placeholders.json holds no value on a suppressed row, and its rows re
 
   # re-read into a registry and re-derive every row from the project
   man <- .ex_json(file.path(d, "manifest.json"))
-  reg <- sr_ph_registry(k = man$suppress_k)
-  num <- function(x) if (is.null(x)) NA_real_ else as.numeric(x)
-  chr <- function(x) if (is.null(x)) NA_character_ else as.character(x)
-  reg$rows <- data.frame(
-    id = vapply(rows, function(r) r$id, ""), kind = vapply(rows, function(r) r$kind, ""),
-    text = vapply(rows, function(r) r$text, ""), value = vapply(rows, function(r) num(r$value), 0),
-    analysis = vapply(rows, function(r) chr(r$analysis), ""), source = vapply(rows, function(r) r$source, ""),
-    scale = NA_character_, null = NA_real_, suppressed = vapply(rows, function(r) isTRUE(r$suppressed), NA),
-    stringsAsFactors = FALSE)
+  reg <- .sr_ex_registry(d, man$suppress_k)
   p <- .ex_open(two$dir)
   v <- sr_ph_verify(reg, p)
   expect_equal(nrow(v), length(rows))
@@ -355,3 +347,117 @@ test_that("a CONSORT (rct) project exports without a checklist file", {
   expect_true(any(grepl("CONSORT checklist", s$text, fixed = TRUE)))
 })
 
+# ---- sr_export_verify / sr_export_zip ----------------------------------------------------------------
+
+.ex_edit_manifest <- function(p, id, fn) {
+  mf <- file.path(p$paths$out, "exports", id, "manifest.json")
+  man <- .sr_parse_json(paste(readLines(mf, warn = FALSE, encoding = "UTF-8"), collapse = "
+"))
+  man <- fn(man)
+  .sr_ex_write_text(mf, paste0(.sr_json(man), "
+"))
+}
+
+test_that("sr_export_verify: a clean export is all ok", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  v <- sr_export_verify(p, "export-001")
+  expect_true(v$ok_files)
+  expect_true(v$numbers_ok)
+  expect_gt(nrow(v$files), 0L)
+  expect_true(all(v$files$status == "ok"))
+  expect_gt(nrow(v$numbers), 0L)
+  expect_identical(names(v$files), c("path", "expected", "got", "status"))
+})
+
+test_that("sr_export_verify: one changed byte is changed", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  f <- file.path(p$paths$out, "exports", "export-001", "manuscript.docx")
+  b <- readBin(f, "raw", file.size(f))
+  b[length(b)] <- as.raw(bitwXor(as.integer(b[length(b)]), 1L))
+  writeBin(b, f)
+  v <- sr_export_verify(p, "export-001")
+  expect_false(v$ok_files)
+  expect_identical(v$files$status[grepl("manuscript.docx$", v$files$path)], "changed")
+  expect_identical(sum(v$files$status != "ok"), 1L)
+})
+
+test_that("sr_export_verify: a deleted file is missing and an added file is extra", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  d <- file.path(p$paths$out, "exports", "export-001")
+  unlink(file.path(d, "references.ris"))
+  writeLines("stray", file.path(d, "stray.txt"))
+  v <- sr_export_verify(p, "export-001")
+  expect_false(v$ok_files)
+  bad <- v$files[v$files$status != "ok", ]
+  expect_identical(nrow(bad), 2L)
+  expect_identical(bad$status[grepl("references.ris$", bad$path)], "missing")
+  expect_true(is.na(bad$got[bad$status == "missing"]))
+  expect_identical(bad$status[grepl("stray.txt$", bad$path)], "extra")
+  expect_true(is.na(bad$expected[bad$status == "extra"]))
+})
+
+test_that("sr_export_verify: a manifest that disagrees with the event is a manifest problem", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  .ex_edit_manifest(p, "export-001", function(m) {
+    i <- which(vapply(m$files, function(f) f$path == "analysis.R", NA))
+    m$files[[i]]$sha <- strrep("0", 64L)
+    m
+  })
+  v <- sr_export_verify(p, "export-001")
+  expect_false(v$ok_files)
+  expect_identical(v$files$status[grepl("analysis.R$", v$files$path)], "manifest")
+  # the rewritten manifest.json itself differs from the event
+  expect_identical(v$files$status[grepl("manifest.json$", v$files$path)], "changed")
+})
+
+test_that("sr_export_verify: a re-run that moves a number is numbers_ok FALSE with ok_files TRUE", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  # the cached value the registry reads is shifted (every effect estimate), the export files are untouched
+  key <- p$state$runs$a_lr$ok_key
+  rds <- file.path(p$paths$fits, paste0(key, ".rds"))
+  st <- readRDS(rds)
+  shift <- function(x) {
+    if (is.data.frame(x)) {
+      if ("est" %in% names(x)) x$est <- x$est + 0.5
+      x[] <- lapply(x, shift)
+    } else if (is.list(x)) {
+      x[] <- lapply(x, shift)
+    }
+    x
+  }
+  st$value <- shift(st$value)
+  saveRDS(st, rds)
+  v <- sr_export_verify(p, "export-001")
+  expect_true(v$ok_files)
+  expect_false(v$numbers_ok)
+  expect_gt(sum(!v$numbers$ok), 0L)
+})
+
+test_that("sr_export_verify: unknown id is refused", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  expect_error(sr_export_verify(p, "export-999"), "unknown export 'export-999'")
+})
+
+test_that("sr_export_zip: entries are the event files plus the manifest under the id folder", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  dest <- withr::local_tempfile(fileext = ".zip")
+  expect_identical(sr_export_zip(p, "export-001", dest), normalizePath(dest, winslash = "/", mustWork = FALSE))
+  got <- zip::zip_list(dest)$filename
+  got <- sort(got[!endsWith(got, "/")])
+  ev <- vapply(p$state$exports[[1L]]$files, function(f) sub("^out/exports/", "", f$path), "")
+  want <- sort(unique(c(ev, "export-001/manifest.json")))
+  expect_identical(got, want)
+  expect_length(setdiff(want, got), 0L)
+  expect_length(setdiff(got, want), 0L)
+})
+
+test_that("sr_export_zip: refuses a sap export and a missing file", {
+  p <- .fx_writer_project(); p <- sr_export(p)
+  p <- sr_sap_docx(p)
+  dest <- withr::local_tempfile(fileext = ".zip")
+  expect_error(sr_export_zip(p, "SAP_v1", dest), "export 'SAP_v1' is a sap export; download its single file")
+  expect_error(sr_export_zip(p, "export-999", dest), "unknown export 'export-999'")
+  unlink(file.path(p$paths$out, "exports", "export-001", "references.json"))
+  expect_error(sr_export_zip(p, "export-001", dest), "export 'export-001' is missing file(s): ", fixed = TRUE)
+  expect_error(sr_export_zip(p, "export-001", dest), "references[.]json")
+})

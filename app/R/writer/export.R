@@ -2,6 +2,8 @@
 #
 #   sr_export(project, opts)   model -> claim guard -> out/exports/<id>/ -> a doc.exported event
 #   sr_exports(project)        data.frame(kind, id, n_files, audit_tip, sap_hash), one row per export
+#   sr_export_verify(project, id)   re-hash the files of an export and re-derive its numbers
+#   sr_export_zip(project, id, dest)   a manuscript export folder as one zip (<id>/<file>)
 #
 # The folder out/exports/<id>/ holds: manuscript.docx, supplement.docx, figures/*.png, analysis.R,
 # renv.lock, references.json (CSL-JSON), references.ris, placeholders.json, checklist_strobe.csv (only when
@@ -48,6 +50,111 @@ sr_exports <- function(project) {
   data.frame(kind = chr("kind"), id = chr("id"),
              n_files = vapply(ex, function(e) length(e$files), 0L),
              audit_tip = chr("audit_tip"), sap_hash = chr("sap_hash"), stringsAsFactors = FALSE)
+}
+
+#' The placeholder registry of an export folder, rebuilt from its placeholders.json: the small-cell threshold
+#' `k` is suppress_k of the manifest. A suppressed row carries no value (NA).
+#' @param dir the export folder.
+#' @param k the small-cell threshold.
+#' @return a registry for sr_ph_verify().
+.sr_ex_registry <- function(dir, k) {
+  rows <- .sr_parse_json(paste(readLines(file.path(dir, "placeholders.json"), warn = FALSE, encoding = "UTF-8"),
+                               collapse = "
+"))
+  reg <- sr_ph_registry(k = k)
+  num <- function(x) if (is.null(x)) NA_real_ else as.numeric(x)
+  chr <- function(x) if (is.null(x)) NA_character_ else as.character(x)
+  reg$rows <- data.frame(
+    id = vapply(rows, function(r) r$id, ""), kind = vapply(rows, function(r) r$kind, ""),
+    text = vapply(rows, function(r) r$text, ""), value = vapply(rows, function(r) num(r$value), 0),
+    analysis = vapply(rows, function(r) chr(r$analysis), ""), source = vapply(rows, function(r) r$source, ""),
+    scale = NA_character_, null = NA_real_, suppressed = vapply(rows, function(r) isTRUE(r$suppressed), NA),
+    stringsAsFactors = FALSE)
+  reg
+}
+
+.sr_ex_find <- function(project, id) {
+  ex <- project$state$exports %||% list()
+  hit <- Filter(function(e) identical(e$id, id), ex)
+  if (!length(hit)) stop("unknown export '", id, "'", call. = FALSE)
+  hit[[1L]]
+}
+
+#' Check an export against its event: every file's SHA-256 on disk, the manifest, and the numbers.
+#'
+#' Status per file: ok, changed (bytes differ from the event), missing, extra (in the export folder, not in the
+#' event) or manifest (manifest.json lists the file with another SHA than the event, or omits it). For a
+#' manuscript the placeholders of placeholders.json are re-derived from the project (sr_ph_verify).
+#' @param project an open project.
+#' @param id an export id of sr_exports().
+#' @return list(ok_files, files = data.frame(path, expected, got, status), numbers, numbers_ok).
+sr_export_verify <- function(project, id) {
+  e <- .sr_ex_find(project, id)
+  root <- project$paths$dir
+  paths <- vapply(e$files, function(f) f$path, "")
+  expected <- vapply(e$files, function(f) f$sha, "")
+  got <- vapply(paths, function(p) {
+    f <- file.path(root, p)
+    if (file.exists(f)) .sr_ex_sha(f) else NA_character_
+  }, "", USE.NAMES = FALSE)
+  status <- ifelse(is.na(got), "missing", ifelse(got == expected, "ok", "changed"))
+
+  manifest <- NULL
+  dir <- file.path(project$paths$out, "exports", id)
+  is_ms <- identical(e$kind, "manuscript")
+  if (is_ms) {
+    mf <- file.path(dir, "manifest.json")
+    manifest <- if (file.exists(mf)) tryCatch(.sr_parse_json(paste(readLines(mf, warn = FALSE, encoding = "UTF-8"),
+                                                                    collapse = "
+")), error = function(err) NULL)
+    listed <- list()
+    for (f in manifest$files %||% list()) listed[[as.character(f$path)]] <- as.character(f$sha)
+    pre <- paste("out", "exports", id, "", sep = "/")
+    for (i in seq_along(paths)) {
+      rel <- substring(paths[i], nchar(pre) + 1L)
+      if (status[i] == "ok" && rel != "manifest.json" && !identical(listed[[rel]], expected[i])) status[i] <- "manifest"
+    }
+  }
+  files <- data.frame(path = paths, expected = expected, got = got, status = status, stringsAsFactors = FALSE)
+
+  if (is_ms && dir.exists(dir)) {
+    on_disk <- paste("out", "exports", id, .sr_ex_files(dir), sep = "/")
+    extra <- setdiff(on_disk, paths)
+    if (length(extra)) {
+      files <- rbind(files, data.frame(path = extra, expected = NA_character_,
+                                       got = vapply(extra, function(p) .sr_ex_sha(file.path(root, p)), "", USE.NAMES = FALSE),
+                                       status = "extra", stringsAsFactors = FALSE))
+    }
+  }
+
+  numbers <- NULL
+  if (is_ms && file.exists(file.path(dir, "placeholders.json")) && !is.null(manifest)) {
+    reg <- .sr_ex_registry(dir, manifest$suppress_k)
+    numbers <- sr_ph_verify(reg, project)
+  }
+  list(ok_files = all(files$status == "ok"), files = files, numbers = numbers,
+       numbers_ok = is.null(numbers) || all(numbers$ok))
+}
+
+#' A manuscript export folder as one zip file with the entries <id>/<file> for every file of the event
+#' (manifest.json included).
+#' @param project an open project.
+#' @param id a manuscript export id.
+#' @param dest the zip file to write.
+#' @return invisible `dest`.
+sr_export_zip <- function(project, id, dest) {
+  e <- .sr_ex_find(project, id)
+  if (!identical(e$kind, "manuscript")) {
+    stop("export '", id, "' is a ", e$kind, " export; download its single file", call. = FALSE)
+  }
+  paths <- vapply(e$files, function(f) f$path, "")
+  gone <- paths[!file.exists(file.path(project$paths$dir, paths))]
+  if (length(gone)) stop("export '", id, "' is missing file(s): ", paste(gone, collapse = ", "), call. = FALSE)
+  root <- file.path(project$paths$out, "exports")
+  rel <- substring(paths, nchar("out/exports/") + 1L)
+  dest <- normalizePath(dest, winslash = "/", mustWork = FALSE)
+  zip::zip(dest, rel, root = root, mode = "mirror")
+  invisible(dest)
 }
 
 # ---- the pieces -----------------------------------------------------------------------------------
