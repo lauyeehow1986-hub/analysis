@@ -48,6 +48,23 @@
   all[vapply(all, .e3_file_has, NA, key = key)]
 }
 
+# After a Cancel killed a real worker the session is settled at once, but the worker's mirai resolves later
+# with an error ("Connection reset") and its ExtendedTask warns. Run the event loop here, in the test that
+# killed it, until `task` is no longer running, and consume that warning (only that one), so that it does not
+# surface in the next test, or as an unhandled promise error once this session is gone. Returns the warnings.
+.e3_drain <- function(task, session, secs = 60) {
+  seen <- character()
+  withCallingHandlers(
+    .e3_wait(function() !identical(shiny::isolate(task$status()), "running"), session, secs),
+    warning = function(w) {
+      if (grepl("ExtendedTask", conditionMessage(w), fixed = TRUE)) {
+        seen <<- c(seen, conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    })
+  seen
+}
+
 .e3_events <- function(dir) sr_events_read(sr_project_paths(dir)$events)
 
 # An archive of the frozen writer project (label v1), written to a fresh temp file.
@@ -85,7 +102,10 @@ test_that("key leak: the sentinel key is in no rendered HTML and no file under t
     expect_true(file.exists(out))
     expect_false(isTRUE(project()$readonly))
     # every output rendered by now, as text
-    nms <- names(session$.__enclos_env__$private$outs)   # the defined outputs, module ones prefixed
+    # the defined outputs, module ones prefixed. shiny 1.14 has no public way to list them: MockShinySession
+    # only offers getOutput(name), and names(output) gives the proxy's own fields. So this reads the mock
+    # session's private list (test-only; revisit if shiny adds a public accessor).
+    nms <- names(session$.__enclos_env__$private$outs)
     expect_gt(length(nms), 10L)
     txt <- vapply(nms, function(n) {
       v <- tryCatch(output[[n]], error = function(e) "")
@@ -139,10 +159,14 @@ test_that("real worker: a killed .srproj export leaves nothing behind and the pr
     expect_true(isTRUE(rv()$readonly))
     .e3_wait(function() file.exists(job$job_file), session, secs = 120)
     expect_true(file.exists(job$job_file))
+    task <- job$task
     session$setInputs(ex_cancel = 1)
     session$flushReact()
     .e3_wait(function() !running(), session, secs = 60)
     expect_false(running())
+    w <- .e3_drain(task, session)                          # the killed worker's mirai, settled here
+    expect_false(identical(shiny::isolate(task$status()), "running"))
+    expect_true(all(grepl("ExtendedTask", w, fixed = TRUE)))
     n1 <- .sr_ar_n_events(dir)
     # exactly two outcomes, never one in between
     kept <- file.exists(out) && n1 == n0 + 1L && identical(.sr_ar_last_type(dir), "srproj.exported")
@@ -255,10 +279,14 @@ test_that("real worker: a killed import leaves the chosen empty folder and no pa
     session$setInputs(archive = arch, target = dir, import = 1)
     expect_true(running())
     .e3_wait(function() file.exists(job$job_file), session, secs = 120)
+    task <- job$task
     session$setInputs(cancel = 1)
     session$flushReact()
     .e3_wait(function() !running(), session, secs = 60)
     expect_false(running())
+    w <- .e3_drain(task, session)                          # the killed worker's mirai, settled here
+    expect_false(identical(shiny::isolate(task$status()), "running"))
+    expect_true(all(grepl("ExtendedTask", w, fixed = TRUE)))
     expect_true(dir.exists(dir))
     expect_length(list.files(dir, all.files = TRUE, no.. = TRUE), 0L)
     expect_false(any(file.exists(paste0(dir, c(".partial", ".partial.src")))))
