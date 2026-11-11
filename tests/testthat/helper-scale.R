@@ -17,7 +17,7 @@
   late[max(1L, n - 4L):n] <- "z"
   data.frame(id = seq_len(n), pid = pid, y = y, yc = yc, x1 = x1, x2 = x2,
              xt = round(stats::runif(n) * 5),
-             grp = sample(c("A", "b", "C", "é"), n, replace = TRUE),
+             grp = sample(c("A", "b", "C", "\u00e9"), n, replace = TRUE),
              late = late, sex = sex, stringsAsFactors = FALSE)
 }
 
