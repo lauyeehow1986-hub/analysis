@@ -96,7 +96,7 @@ test_that("can_run: each reason in order", {
   ro$readonly <- TRUE
   expect_identical(.sr_an_can_run(ro), "the project is read-only (locked by another session)")
   expect_identical(.sr_an_can_run(NULL, busy = TRUE), "open a project first")
-  expect_identical(.sr_an_can_run(ro, busy = TRUE), "the project is read-only (locked by another session)")
+  expect_identical(.sr_an_can_run(ro, busy = TRUE), "wait for the running import or analysis to finish")
 })
 
 test_that("can_run: an unlocked SAP", {
@@ -272,4 +272,66 @@ test_that("an empty project gives typed, zero-row results", {
   expect_length(s, 0L)
   expect_null(.sr_an_diag_plot(p, "a1", character()))
   expect_null(.sr_an_diag_plot(p, "a1", NA_character_))
+})
+
+test_that("compare: a sensitivity of another measure shows its own measure, not the parent's with NA", {
+  p <- .an_fake(runs = list(a1 = list(status = "ok", ok_key = "k1"), s1 = list(status = "ok", ok_key = "k2")))
+  .an_mock_result(function(id) {
+    if (id == "a1") .an_eff(0.7, measure = "HR") else .an_eff(2.5, measure = "RMST_diff")
+  })
+  cp <- .sr_an_compare(p)
+  s <- cp[cp$analysis == "s1", ]
+  expect_identical(s$status, "ok")
+  expect_identical(s$measure, "RMST_diff")
+  expect_equal(s$est, 2.5)
+  expect_false(anyNA(s$est))
+  # the same measure still lines up with the parent's
+  .an_mock_result(function(id) .an_eff(if (id == "a1") 1.5 else 1.2))
+  cp2 <- .sr_an_compare(p)
+  expect_identical(cp2$measure[cp2$analysis == "s1"], "HR")
+})
+
+test_that("runs table: a status that is not ok / failed shows no stale elapsed or cached", {
+  old <- list(elapsed = 3.2, cached = TRUE, status = "cancelled")
+  p <- .an_fake(runs = list(a1 = old, s1 = utils::modifyList(old, list(status = "running")),
+                            a2 = utils::modifyList(old, list(status = "ok")),
+                            u1 = utils::modifyList(old, list(status = "failed"))))
+  t <- .sr_an_runs_table(p)
+  expect_true(is.na(t$elapsed[t$id == "a1"]))
+  expect_identical(t$cached[t$id == "a1"], "")
+  expect_true(is.na(t$elapsed[t$id == "  - s1"]))
+  expect_identical(t$cached[t$id == "  - s1"], "")
+  expect_equal(t$elapsed[t$id == "a2"], 3.2)
+  expect_identical(t$cached[t$id == "a2"], "yes")
+  expect_equal(t$elapsed[t$id == "  - u1"], 3.2)
+})
+
+test_that("can_run: busy is reported before read-only", {
+  p <- .fx_an_project()
+  ro <- p
+  ro$readonly <- TRUE
+  expect_identical(.sr_an_can_run(ro, busy = TRUE), "wait for the running import or analysis to finish")
+  expect_identical(.sr_an_can_run(ro), "the project is read-only (locked by another session)")
+})
+
+test_that("families: a sr_family_adjust error is kept and shown", {
+  fam <- list(f1 = list(id = "f1", members = c("a1", "a2"), method = "holm"))
+  p <- .an_fake(runs = list(a1 = list(status = "ok", ok_key = "k1"), a2 = list(status = "ok", ok_key = "k2")),
+                sap = list(families = fam))
+  old <- get("sr_family_adjust", envir = globalenv())
+  assign("sr_family_adjust", function(project, id) stop("members share no term", call. = FALSE), envir = globalenv())
+  withr::defer(assign("sr_family_adjust", old, envir = globalenv()))
+  f <- .sr_an_families(p)[[1]]
+  expect_null(f$table)
+  expect_identical(f$error, "members share no term")
+})
+
+test_that("a running entry is live only when the live job matches the entry's job", {
+  p <- .an_fake(runs = list(a1 = list(status = "running", job = "j1",
+                                      history = list(list(job = "j1", started = "t", ended = NA_character_,
+                                                          outcome = "running", reason = NA_character_)))))
+  expect_identical(.sr_an_status(p, c(a1 = "j1"))[["a1"]], "running")
+  expect_identical(.sr_an_status(p, c(a1 = "other"))[["a1"]], "interrupted")
+  expect_identical(nrow(.sr_an_history(p, c(a1 = "j1"))), 0L)
+  expect_identical(.sr_an_history(p, c(a1 = "other"))$outcome, "interrupted")
 })

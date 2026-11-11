@@ -13,6 +13,13 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 # The ids that are in the live job set.
 .sr_an_live_ids <- function(live) if (is.null(live)) character() else names(live)
 
+# TRUE when the analysis `id` is live with the job `job` (a stored "running" entry is live only for its own job).
+.sr_an_is_live <- function(live, id, job) {
+  if (is.null(live) || !length(live) || !(id %in% names(live))) return(FALSE)
+  j <- .sr_an_s(job)
+  !nzchar(j) || identical(as.character(live[[id]]), j)
+}
+
 .sr_an_analyses <- function(p) p$state$analyses %||% list()
 
 # ---- order and status ------------------------------------------------------------------------------
@@ -49,10 +56,13 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 .sr_an_status <- function(p, live = character()) {
   o <- .sr_an_order(p)
   runs <- p$state$runs %||% list()
-  lv <- .sr_an_live_ids(live)
   st <- vapply(o$id, function(id) {
-    if (id %in% lv) return("running")
     r <- runs[[id]]
+    # a live id with no stored run (its run.started is not replayed yet) is running; with a stored
+    # "running" entry it is running only for that entry's own job
+    if (id %in% .sr_an_live_ids(live) && (is.null(r) || !identical(r$status, "running") || .sr_an_is_live(live, id, r$job))) {
+      return("running")
+    }
     if (is.null(r)) return("not run")
     s <- r$status
     if (is.null(s) || length(s) != 1L || is.na(s)) s <- if (isTRUE(r$ok)) "ok" else "failed"
@@ -85,12 +95,13 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
     if (nzchar(ended)) ended else .sr_an_s(e$started)
   }
   elapsed <- function(id) {
+    if (!(st[[id]] %in% c("ok", "failed"))) return(NA_real_)
     x <- runs[[id]]$elapsed
     if (is.null(x) || !length(x) || is.na(x[[1L]])) NA_real_ else round(as.numeric(x[[1L]]), 1L)
   }
   cached <- function(id) {
     r <- runs[[id]]
-    if (is.null(r) || is.null(r$cached)) "" else if (isTRUE(r$cached)) "yes" else "no"
+    if (!(st[[id]] %in% c("ok", "failed")) || is.null(r) || is.null(r$cached)) "" else if (isTRUE(r$cached)) "yes" else "no"
   }
   data.frame(
     id = vapply(seq_len(nrow(o)), function(i) {
@@ -126,8 +137,8 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 #' NULL when a run may start, else the reason it may not (checked in this order).
 .sr_an_can_run <- function(p, busy = FALSE) {
   if (is.null(p)) return("open a project first")
-  if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
   if (isTRUE(busy)) return("wait for the running import or analysis to finish")
+  if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
   if (sr_blind(p)) return("lock the SAP first")
   stp <- sr_project_stopped(p)
   if (!is.null(stp)) return(paste0("the project is stopped: ", stp$reason %||% "no reason"))
@@ -205,7 +216,7 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 .sr_an_diag_plot <- function(p, id, check) {
   if (length(check) != 1L || is.na(check)) return(NULL)
   kind <- c(ph = "schoenfeld", linearity = "linearity")[check]
-  if (length(check) != 1L || is.na(check) || is.na(kind)) return(NULL)
+  if (is.na(kind)) return(NULL)
   key <- p$state$diag[[id]][[check]]$key
   if (is.null(key) || length(key) != 1L || is.na(key)) return(NULL)
   pd <- tryCatch(suppressWarnings(readRDS(file.path(p$paths$fits, paste0(key, ".rds"))))$value$plot_data,
@@ -262,7 +273,13 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
   } else {
     sel <- e[e$measure == measure & e$role == "primary", , drop = FALSE]
     if (!nrow(sel)) sel <- e[e$measure == measure, , drop = FALSE]
-    if (!nrow(sel)) return(row(ok_label, measure))
+    if (!nrow(sel)) {
+      # no row of the parent's measure (an RMST sensitivity of a Cox primary, say): show this analysis's
+      # own first primary measure, so the Measure column says it is a different one
+      pr <- e[e$role == "primary", , drop = FALSE]
+      if (!nrow(pr)) return(row(ok_label))
+      sel <- pr[pr$measure == as.character(pr$measure[1L]), , drop = FALSE]
+    }
   }
   out <- row(ok_label, as.character(sel$measure), as.character(sel$term), sel$est, sel$lo, sel$hi)
   attr(out, "measure") <- measure
@@ -335,11 +352,15 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
       k <- runs[[m]]$ok_key
       is.null(k) || length(k) != 1L || is.na(k)
     }, NA)]
-    tb <- if (length(waiting)) NULL else tryCatch(sr_family_adjust(p, id), error = function(e) NULL)
+    err <- NULL
+    tb <- if (length(waiting)) NULL else tryCatch(sr_family_adjust(p, id), error = function(e) {
+      err <<- conditionMessage(e)
+      NULL
+    })
     if (is.data.frame(tb)) tb$p <- signif(tb$p, 3L)
     if (is.data.frame(tb)) tb$p_adj <- signif(tb$p_adj, 4L)
     out[[length(out) + 1L]] <- list(id = id, method = .sr_an_s(fam[[id]]$method), table = tb,
-                                    waiting = unname(waiting))
+                                    waiting = unname(waiting), error = err)
   }
   out
 }
@@ -349,12 +370,11 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 #' the interrupted ones.
 .sr_an_history <- function(p, live = character()) {
   runs <- p$state$runs %||% list()
-  lv <- .sr_an_live_ids(live)
   rows <- list()
   for (id in sort(as.character(names(runs)), method = "radix")) {
     for (e in runs[[id]]$history %||% list()) {
       oc <- .sr_an_s(e$outcome)
-      if (identical(oc, "running") && !(id %in% lv)) oc <- "interrupted"
+      if (identical(oc, "running") && !.sr_an_is_live(live, id, e$job)) oc <- "interrupted"
       if (!(oc %in% c("cancelled", "interrupted"))) next
       rows[[length(rows) + 1L]] <- data.frame(
         analysis = id, job = .sr_an_s(e$job), started = .sr_an_s(e$started),
