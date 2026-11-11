@@ -46,7 +46,7 @@ server <- function(input, output, session) {
   project <- mod_project_server("project")
   # An analysis run makes the app busy: Data, Design and SAP refuse edits while an import OR a run is in
   # progress. The Analyses module gets the import-only flag (it combines it with its own running()).
-  run_busy <- shiny::reactiveVal(FALSE)
+  run_busy <- shiny::reactiveVal(FALSE)   # Data sees a$running() one flush late (Design/SAP use any_busy directly); negligible
   d <- mod_data_server("data", project, run_busy)
   a <- mod_analyses_server("analyses", project, d$busy)
   shiny::observe(run_busy(isTRUE(a$running())))

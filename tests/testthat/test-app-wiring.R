@@ -90,10 +90,16 @@ test_that("the Analyses tab is wired and a run blocks Data, Design and SAP edits
     expect_true(any_busy())
     expect_false(isTRUE(d$busy()))                          # the import flag is untouched
     expect_match(paste(output$`analyses-badge`$html), "running", fixed = TRUE)
+    n_ev <- function() length(sr_events_read(project()$paths$events))
+    n0 <- n_ev()
     session$setInputs(`data-path` = "x.csv", `data-import` = 1)
     expect_true(any(grepl("Import: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
     session$setInputs(`design-pico_population` = "a", `design-pico_outcome` = "b", `design-pico_save` = 1)
     expect_true(any(grepl("Save research question: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+    n_sap <- sum(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE))
+    session$setInputs(`sap-add` = 1)
+    expect_gt(sum(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE)), n_sap)
+    expect_equal(n_ev(), n0)                                # the refused edits wrote nothing
     session$setInputs(`analyses-cancel` = 1)
     t0 <- Sys.time()
     while (isTRUE(a$running()) && as.numeric(difftime(Sys.time(), t0, units = "secs")) < 30) {

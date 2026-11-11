@@ -522,7 +522,7 @@ mod_data_server <- function(id, project, busy = shiny::reactive(FALSE)) {
 
     output$import_ui <- shiny::renderUI({
       shiny::actionButton(ns("import"), "Import", class = "btn-primary",
-                          disabled = !.sr_data_can_import(pf()) || isTRUE(job$busy))
+                          disabled = !.sr_data_can_import(pf()) || isTRUE(job$busy) || isTRUE(busy()))
     })
 
     # ---- import ----------------------------------------------------------------------------------------
