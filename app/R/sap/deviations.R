@@ -34,6 +34,10 @@ sr_reducer_register("analysis.added", function(state, event) {
               table = as.character(p$table), label = as.character(p$label), family = NA_character_,
               spec = p$spec, parent = .sr_sap_chr1(p$parent), trigger = .sr_sap_chr1(p$trigger),
               addresses = character(), prespecified = FALSE, reason = .sr_sap_chr1(p$reason))
+  if (!is.null(p$engine)) {
+    rec$engine_resolved <- list(engine = .sr_sap_chr1(p$engine$engine), requested = .sr_sap_chr1(p$engine$requested),
+                                reason = .sr_sap_chr1(p$engine$reason))
+  }
   an <- state$analyses %||% list()
   an[[id]] <- rec
   state$analyses <- an
@@ -137,9 +141,15 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
          " (", paste(cc$notes, collapse = "; "), ")", call. = FALSE)
   }
   .sr_sap_compiles(r, spec, id, route)
+  # the engine is resolved now (from the sizes) and recorded; it is not part of the SAP hash
+  probe <- project
+  probe$state$analyses[[id]] <- list(route = route, table = table, spec = spec)
+  eng <- sr_engine_resolve(probe, id, spec = spec)
+  if (!is.null(eng$block)) stop(eng$block, call. = FALSE)
   sr_project_append(project, "analysis.added", list(
     id = id, route = route, route_version = as.integer(r$version), table = table, label = label, spec = spec,
-    parent = parent, trigger = trigger, reason = reason))
+    parent = parent, trigger = trigger, reason = reason,
+    engine = list(engine = eng$engine, requested = eng$requested, reason = eng$reason)))
 }
 
 # ---- the sensitivity analysis of a failed check (ruling R35) ----------------------------------------

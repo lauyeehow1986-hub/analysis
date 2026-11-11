@@ -70,3 +70,29 @@ sr_engine_resolve <- function(project, analysis_id, spec = NULL) {
   reason <- if (is.null(block)) paste0(requested, " -> ", engine, ": ", estimate$reason) else block
   list(engine = engine, requested = requested, reason = reason, estimate = estimate, block = block)
 }
+
+#' Resolve the engine of one pre-specified analysis for the lock: the sr_engine_resolve result, or the error
+#' object when the analysis cannot be sized. NULL when the analysis names no data columns (nothing to size).
+.sr_sap_engine_one <- function(project, id) {
+  a <- project$state$analyses[[id]]
+  if (!length(sr_spec_cols(a$spec))) return(NULL)
+  tryCatch(sr_engine_resolve(project, id), error = function(e) e)
+}
+
+#' The engines of the pre-specified analyses: a named list `id -> list(engine, requested, reason)`. After the
+#' lock it is the frozen `lock$engines` (empty for a SAP locked before P1e). Before the lock the engines are
+#' resolved now; an analysis that cannot be sized or whose resolution is blocked has `engine = NA`.
+.sr_sap_engines <- function(project) {
+  if (isTRUE(project$state$sap$locked)) return(project$state$sap$lock$engines %||% list())
+  out <- list()
+  for (id in names(.sr_sap_analyses(project))) {
+    r <- .sr_sap_engine_one(project, id)
+    if (is.null(r)) next
+    out[[id]] <- if (inherits(r, "error")) {
+      list(engine = NA_character_, requested = NA_character_, reason = conditionMessage(r))
+    } else {
+      list(engine = r$engine, requested = r$requested, reason = r$reason)
+    }
+  }
+  out
+}
