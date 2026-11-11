@@ -158,3 +158,81 @@ analysis. It reads stored fits only; nothing is recomputed. Status: `same_run`, 
 - `sr_srproj_import(archive, dir, verify_data = TRUE)` returns the open project.
 - `sr_freeze_diff(project, from, to = NULL)`.
 - `sr_freeze_results_diff(project, label)`.
+
+## 10. The Archive panel (P1d UI)
+
+The Archive tab is hidden until a project is open. It has five cards. Refusals show the core's message
+(prefixed with the action, for example "Freeze: ..."). While any job runs, or on a read-only project, the
+changing controls are refused with the shared text "wait for the running import, analysis, archive operation
+or project import to finish". One job runs at a time across the app.
+
+**Freeze.** A checklist shows every refusal of the freeze gate at once, with its reason when failing: Project
+writable, SAP locked, Sources hashed, Primary analyses run, Stored results present, Project verifies. The
+"Freeze label" field is prefilled from `sr_freeze_next_label()` and is checked against the label pattern
+(`^[a-z][a-z0-9-]{0,39}$`) and the labels already used. "Freeze..." opens the dialog "Freeze as '<label>'":
+"A freeze records the SAP, the stored results and the library, and cannot be undone. Type FREEZE to confirm."
+Its Freeze button stays disabled until the box holds exactly `FREEZE`; then `sr_freeze()` runs synchronously
+and the panel reports "Frozen as '<label>'".
+
+**Freezes and verify.** The table lists label, created, events_seq and the first 12 characters of the library
+hash. Pick a freeze, then:
+
+- **Quick verify**: `sr_freeze_verify(data = FALSE)`, synchronous.
+- **Verify with data**: `sr_freeze_verify(data = TRUE)` in a background worker. The worker opens the project
+  read-only, so the session keeps the lock. **Cancel** kills the worker and its process tree; the notice is
+  "Verify cancelled" and nothing is written.
+
+The result is "Every file matches the freeze." or the problem list. Data files that are not in the project
+folder are listed as information ("Data files not in the project folder (information, not a problem)"), not as
+problems.
+
+**Diff.** "From" is a freeze; "To" is another freeze or "project now". "Show diff" shows the non-empty
+sections of `sr_freeze_diff` (Tables, Library, SAP, Analyses) with unchanged table and analysis rows left out,
+or "No differences." Against "project now" it adds "Stored results against the project now" from
+`sr_freeze_results_diff` (numbers to 4 significant digits). Diff reads only; nothing is recomputed.
+
+**Export .srproj.** Choose the freeze (the latest by default), "Data files" auto / full / lean and a
+destination path. The path is typed (quotes added by a Windows copy are stripped), must end in `.srproj`, must
+not exist (nor `<path>.partial`) and its folder must exist; otherwise the refusal names the problem. Under the
+path the panel shows the plan: for auto, "auto will pick <full or lean> (<size>)" from the same rule as the core
+(`sr.freeze_full_max_bytes`, and nothing missing from the folder), with "; some data files are missing from
+the project folder" when that applies; for full or lean, "<mode> data files".
+
+- **Auto data mode** is therefore decided by the total size of the data files against
+  `sr.freeze_full_max_bytes` (editable in Settings) and by whether any file is missing.
+- **Actor warning.** When `sr.user` / `SR_USER` is not set, the core's warning is shown beside the plan (the
+  exported history holds the OS user name as the actor), with an "Open Settings" link. Set the actor before
+  recording a project that will be shared (see [settings.md](settings.md)).
+- **Job and Cancel.** "Export" releases the project lock to the worker; the panel keeps a read-only copy as the
+  open project while the job runs and re-opens the project when it ends. "Cancel" (on the export card) kills
+  the worker. Cleanup: if an `srproj.exported` event was written, the archive is kept and the notice is "Export:
+  finished before it could be cancelled (<path>)"; otherwise the archive, `<path>.partial` and the staging
+  folder `out/.srproj-<label>.partial` are removed and the notice is "Export cancelled: nothing was written".
+  Cleanup uses a keep list of the paths that existed before the job started, so a pre-existing path (including
+  an older `.partial`) is never deleted. A worker that dies, or closing the browser session mid-job, gets the
+  same cleanup. A cancel whose kill fails keeps the job and says so; it can be cancelled again.
+
+**Re-baseline.** Shows `sr_rebaseline_diff`. It is disabled, with the reason, when there is no freeze
+("freeze the project first") or the library already matches ("the library already matches the baseline"). A
+non-empty "Reason" is required (`sr_rebaseline(project, reason)`); a refusal is shown verbatim.
+
+## 11. Import in the app (Project tab)
+
+The "Import .srproj" card is on the Project tab and needs no open project. Give the archive path ("Archive (a
+.srproj file)") and the "Target folder (new, or an empty folder)". Before starting, the panel refuses: an archive
+that does not exist ("archive not found: ..."), a non-empty target ("the target folder is not empty: ..."), a
+missing parent folder, and an existing `<dir>.partial` or `<dir>.partial.src` ("... already exists; remove it
+first").
+
+"Import" runs `sr_srproj_import(archive, dir, verify_data = TRUE)` in a background worker with the
+options snapshot in [settings.md](settings.md); "Cancel" kills it.
+
+- **Success.** The project that was open is closed, the imported project becomes the open project, the notice
+  is "Imported <dir>" and the card shows the `$import` summary (label, data mode, archive sha256 to 16
+  characters, parts missing, sources missing, verify). The Write and Archive tabs appear.
+- **Failure or Cancel.** Only what the job created is removed: the target folder, `<dir>.partial` and
+  `<dir>.partial.src`, each only when it did not exist when the job started. A target folder that existed empty
+  is kept (and put back empty). The previously open project stays open. The notice is "Import cancelled:
+  nothing was imported" or "Import: <reason>".
+- **Cancel after the worker finished.** If the worker had already written its `srproj.imported` event, the
+  import is kept and opened, and the notice is "Import already finished; kept".
