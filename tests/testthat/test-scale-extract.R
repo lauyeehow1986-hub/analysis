@@ -64,7 +64,12 @@ test_that("space refusal before writing", {
 
 test_that("a COPY error leaves no temp file", {
   p <- .sx_project()
-  .ui_stub(".sr_extract_copy", function(...) stop("boom"))
+  .ui_stub(".sr_extract_copy", function(con, sql) {
+    f <- sub(".*TO '([^']*)'.*", "\\1", sql)   # the temp path in the COPY statement
+    writeLines("partial", f)
+    stopifnot(file.exists(f))
+    stop("boom")
+  })
   expect_error(sr_extract_stream(p, "t", c("sex", "y"), drive_info = .sx_ok_drive), "boom")
   d <- file.path(p$paths$dir, "data", "extracts")
   expect_length(list.files(d, pattern = "^[.]tmp-", all.files = TRUE), 0L)
