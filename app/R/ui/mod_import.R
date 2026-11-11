@@ -136,11 +136,14 @@ mod_import_server <- function(id, project, busy) {
         # a worker that stopped at the cancel file is a cancel even if a later kill error reset the flag
         settle(res, isTRUE(job$cancelling) || (is.list(res) && isTRUE(res$cancelled)))
       }, ignoreInit = TRUE)
-      started <- .sr_ui_try("Import", function() {
+      started <- tryCatch({
         task$invoke(app_dir = sr_root, fn = ".sr_im_worker", args = args, opts = .sr_job_opts())
         TRUE
-      })
-      if (!isTRUE(started)) settle(simpleError("the worker could not be started"), TRUE)
+      }, error = function(e) e)
+      # a launch failure is an error with its real reason, never a cancel
+      if (inherits(started, "error")) {
+        settle(simpleError(paste0("the worker could not be started: ", conditionMessage(started))), FALSE)
+      }
       invisible(NULL)
     }
 

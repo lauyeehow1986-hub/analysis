@@ -287,3 +287,25 @@ test_that("import is refused while another job runs", {
     expect_true(any(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)))
   })
 })
+
+test_that("a job that cannot be launched reports the launch error, never a cancel", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_opts", function() stop("no worker settings here"))
+  dir <- file.path(withr::local_tempdir(), "imported")
+  p0 <- .fx_writer_project()
+  rv <- shiny::reactiveVal(p0)
+  arch <- .im_archive()
+  shiny::testServer(mod_import_server, args = .im_args(rv), {
+    session$setInputs(archive = arch, target = dir, import = 1)
+    expect_false(running())
+    expect_length(ctl$calls, 0L)
+    expect_true(any(grepl("Import: the worker could not be started: no worker settings here", seen$msg,
+                          fixed = TRUE)))
+    expect_false(any(grepl("cancelled", seen$msg, fixed = TRUE)))
+    expect_true(any(seen$type == "error"))
+    expect_false(any(file.exists(.im_paths(dir))))
+    expect_identical(rv(), p0)
+  })
+})

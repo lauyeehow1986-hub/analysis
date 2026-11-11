@@ -489,3 +489,28 @@ test_that("closing the session mid-export kills the worker and removes the parti
     expect_false(dir.exists(staging))
   })
 })
+
+test_that("a job that cannot be launched reports the launch error, never a cancel", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_opts", function() stop("no worker settings here"))
+  p <- .ar_frozen()
+  path <- file.path(withr::local_tempdir(), "a.srproj")
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    session$flushReact()
+    session$setInputs(ex_label = "v1", ex_data = "full", ex_path = path, export = 1)
+    expect_false(running())
+    expect_true(any(grepl("Export: the worker could not be started: no worker settings here", seen$msg,
+                          fixed = TRUE)))
+    session$setInputs(freeze_pick = "v1", data_verify = 1)
+    expect_false(running())
+    expect_true(any(grepl("Verify: the worker could not be started: no worker settings here", seen$msg,
+                          fixed = TRUE)))
+    expect_length(ctl$calls, 0L)
+    expect_false(any(grepl("cancelled", seen$msg, fixed = TRUE)))
+    expect_false(file.exists(path))
+    expect_false(isTRUE(rv()$readonly))                   # the export put the project back
+  })
+})
