@@ -144,13 +144,10 @@ test_that("real worker: a killed .srproj export leaves nothing behind and the pr
     .e3_wait(function() !running(), session, secs = 60)
     expect_false(running())
     n1 <- .sr_ar_n_events(dir)
-    if (file.exists(out)) {
-      # the worker had already written srproj.exported when it was killed: the archive is kept
-      expect_identical(n1, n0 + 1L)
-      expect_identical(.sr_ar_last_type(dir), "srproj.exported")
-    } else {
-      expect_identical(n1, n0)
-    }
+    # exactly two outcomes, never one in between
+    kept <- file.exists(out) && n1 == n0 + 1L && identical(.sr_ar_last_type(dir), "srproj.exported")
+    gone <- !file.exists(out) && !file.exists(paste0(out, ".partial")) && !dir.exists(staging) && n1 == n0
+    expect_true(kept || gone, info = sprintf("archive=%s n0=%d n1=%d", file.exists(out), n0, n1))
     expect_false(file.exists(paste0(out, ".partial")))
     expect_false(dir.exists(staging))
     # no stale lock: the session took the project back and a second open is read-only only while we hold it
@@ -269,12 +266,11 @@ test_that("real worker: a killed import leaves the chosen empty folder and no pa
   })
 })
 
-# Documents the current behaviour (see the task report): Cancel after the worker has already finished the
-# import (its result not yet taken by the session) kills nothing and settles as cancelled, so the cleanup
-# removes the finished import.
-test_that("a cancel after the worker finished discards the finished import (current behaviour)", {
+# Cancel after the worker has finished the import (its result not yet taken by the session): nothing is killed,
+# and the finished import is kept and opened, as a finished export is kept.
+test_that("a cancel after the worker finished keeps the finished import and opens it", {
   skip_on_cran()
-  .ui_spy_notify()
+  seen <- .ui_spy_notify()
   ctl <- new.env()
   .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
   .ui_stub(".sr_job_kill", function(job_file, wait = 10) FALSE)   # the worker process is already gone
@@ -286,10 +282,31 @@ test_that("a cancel after the worker finished discards the finished import (curr
     expect_true(running())
     res <- .sr_im_worker(arch, dir, NULL)                  # the worker finishes ...
     expect_true(isTRUE(res$ok))
-    expect_true(dir.exists(dir))
     session$setInputs(cancel = 1)                          # ... and the user cancels before the session sees it
     expect_false(running())
-    expect_null(rv())
-    expect_false(dir.exists(dir))
+    expect_true(dir.exists(dir))
+    expect_false(is.null(rv()))
+    expect_true(.sr_data_same_dir(rv()$paths$dir, dir))
+    expect_false(isTRUE(rv()$readonly))
+    expect_true(any(seen$msg == "Import already finished; kept"))
+    expect_false(any(grepl("cancelled", seen$msg, fixed = TRUE)))
+    expect_match(paste(output$summary$html, collapse = " "), "v1", fixed = TRUE)
+    try(sr_duck_close(rv()), silent = TRUE)
+    sr_project_close(rv())
   })
+})
+
+test_that(".sr_im_result_from_disk rebuilds the worker result of a finished import", {
+  arch <- .e3_srproj()
+  dir <- file.path(withr::local_tempdir(), "imported")
+  res <- .sr_im_worker(arch, dir, NULL)
+  expect_true(isTRUE(res$ok))
+  r2 <- .sr_im_result_from_disk(dir)
+  expect_true(r2$ok)
+  expect_identical(r2$import$label, res$import$label)
+  expect_identical(r2$import$archive_sha256, res$import$archive_sha256)
+  expect_true(isTRUE(r2$import$verify$ok))
+  q <- sr_project_open(dir)                                # the lock was released
+  withr::defer(sr_project_close(q))
+  expect_false(isTRUE(q$readonly))
 })

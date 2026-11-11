@@ -229,6 +229,7 @@ test_that("a failing export shows the core message verbatim and cleans up", {
 })
 
 test_that("the export plan says what auto will pick, with the actor warning and a link to Settings", {
+  te <- environment()   # options set inside testServer are reset with this test
   withr::local_options(sr.user = NULL)
   withr::local_envvar(SR_USER = NA)
   rv <- shiny::reactiveVal(.ar_frozen())
@@ -238,7 +239,7 @@ test_that("the export plan says what auto will pick, with the actor warning and 
     expect_match(html, "auto will pick (full|lean) \\(", perl = TRUE)
     expect_match(html, "sr.user", fixed = TRUE)
     expect_match(html, "go_settings", fixed = TRUE)
-    withr::local_options(sr.user = "analyst-role")
+    withr::local_options(sr.user = "analyst-role", .local_envir = te)
     session$setInputs(ex_data = "lean")
     html2 <- paste(output$ex_plan$html, collapse = " ")
     expect_false(grepl("go_settings", html2, fixed = TRUE))
@@ -246,6 +247,7 @@ test_that("the export plan says what auto will pick, with the actor warning and 
 })
 
 test_that("re-baseline needs a reason and is refused when the library matches", {
+  te <- environment()   # options set inside testServer are reset with this test
   seen <- .ui_spy_notify()
   # no freeze yet
   rv0 <- shiny::reactiveVal(.fx_writer_project())
@@ -262,7 +264,7 @@ test_that("re-baseline needs a reason and is refused when the library matches", 
     expect_match(paste(output$rb_diff$html, collapse = " "), "the library already matches the baseline",
                  fixed = TRUE)
     # the library moves: now a reason is needed
-    withr::local_options(sr.cran_snapshot = "2099-01-01")
+    withr::local_options(sr.cran_snapshot = "2099-01-01", .local_envir = te)
     sv(1L)                                                # what a change in Settings does
     session$setInputs(rb_reason = "  ", rebaseline = 2)
     expect_true(any(grepl("Re-baseline: give a reason", seen$msg, fixed = TRUE)))

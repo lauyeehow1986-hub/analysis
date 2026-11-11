@@ -80,6 +80,13 @@ mod_import_server <- function(id, project, busy) {
         job$obs <- job$task <- NULL
         if (.sr_job_path_ok(jf)) try(unlink(c(jf, paste0(jf, ".part"))), silent = TRUE)
         good <- !cancelled && is.list(res) && !inherits(res, "condition") && isTRUE(res$ok)
+        # a cancel that came after the worker had finished: its last step (the srproj.imported event) is on
+        # disk, so the import is kept and opened (as an export the worker finished is kept)
+        kept <- FALSE
+        if (cancelled && !good && identical(.sr_ar_last_type(dir), "srproj.imported")) {
+          res <- tryCatch(.sr_im_result_from_disk(dir), error = function(e) NULL)
+          if (!is.null(res)) good <- kept <- TRUE
+        }
         if (good) {
           q <- .sr_ui_try("Import", function() sr_project_open(dir))
           if (is.null(q)) {
@@ -92,7 +99,7 @@ mod_import_server <- function(id, project, busy) {
             }
             project(q)
             summary(.sr_im_summary(res$import))
-            .sr_ui_notify(paste0("Imported ", dir), "message")
+            .sr_ui_notify(if (kept) "Import already finished; kept" else paste0("Imported ", dir), "message")
           }
         } else {
           tryCatch(.sr_im_cleanup(dir, before), error = function(e) {

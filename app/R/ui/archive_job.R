@@ -125,6 +125,24 @@
   }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
 }
 
+# The worker's result for an import that finished on disk (its srproj.imported event is written) when the
+# session never received it: list(ok = TRUE, dir, import) rebuilt from the last srproj.imported event and a
+# fresh freeze verification. The project is closed again.
+.sr_im_result_from_disk <- function(dir) {
+  q <- sr_project_open(dir)
+  on.exit({
+    try(sr_duck_close(q), silent = TRUE)
+    try(sr_project_close(q), silent = TRUE)
+  }, add = TRUE)
+  im <- q$state$srproj_imports
+  if (!length(im)) stop("no srproj.imported event", call. = FALSE)
+  pl <- im[[length(im)]]
+  v <- sr_freeze_verify(q, pl$label, data = TRUE)
+  list(ok = TRUE, dir = dir,
+       import = list(label = pl$label, data_mode = pl$data_mode, archive_sha256 = pl$archive_sha256,
+                     parts_missing = pl$parts_missing, sources_missing = pl$sources_missing, verify = v))
+}
+
 # The $import list of sr_srproj_import as a field/value frame.
 .sr_im_summary <- function(imp) {
   lst <- function(x) {
