@@ -200,3 +200,18 @@ test_that("a clean project opens with no integrity warning (I3)", {
     sr_project_close(session$returned())
   })
 })
+
+test_that("Open and Create are refused while busy", {
+  seen <- .ui_spy_notify()
+  d <- new_dir()
+  make_closed(d, "busyproj")
+  shiny::testServer(mod_project_server, args = list(busy = function() TRUE), {
+    session$setInputs(dir = d, name = "x", open = 1)
+    expect_null(session$returned())
+    session$setInputs(create = 1)
+    expect_null(session$returned())
+  })
+  expect_true(any(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)))
+  expect_true(any(grepl("^Open: ", seen$msg)))
+  expect_true(any(grepl("^New: ", seen$msg)))
+})

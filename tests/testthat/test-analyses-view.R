@@ -91,12 +91,12 @@ test_that("can_run: each reason in order", {
   p <- .fx_an_project()
   expect_null(.sr_an_can_run(p))
   expect_identical(.sr_an_can_run(NULL), "open a project first")
-  expect_identical(.sr_an_can_run(p, busy = TRUE), "wait for the running import or analysis to finish")
+  expect_identical(.sr_an_can_run(p, busy = TRUE), .sr_ui_busy_text)
   ro <- p
   ro$readonly <- TRUE
   expect_identical(.sr_an_can_run(ro), "the project is read-only (locked by another session)")
   expect_identical(.sr_an_can_run(NULL, busy = TRUE), "open a project first")
-  expect_identical(.sr_an_can_run(ro, busy = TRUE), "wait for the running import or analysis to finish")
+  expect_identical(.sr_an_can_run(ro, busy = TRUE), .sr_ui_busy_text)
 })
 
 test_that("can_run: an unlocked SAP", {
@@ -310,7 +310,7 @@ test_that("can_run: busy is reported before read-only", {
   p <- .fx_an_project()
   ro <- p
   ro$readonly <- TRUE
-  expect_identical(.sr_an_can_run(ro, busy = TRUE), "wait for the running import or analysis to finish")
+  expect_identical(.sr_an_can_run(ro, busy = TRUE), .sr_ui_busy_text)
   expect_identical(.sr_an_can_run(ro), "the project is read-only (locked by another session)")
 })
 

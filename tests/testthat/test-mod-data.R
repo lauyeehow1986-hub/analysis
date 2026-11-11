@@ -631,6 +631,6 @@ test_that("Import is refused while an analysis runs", {
   shiny::testServer(mod_data_server, args = list(project = rv, busy = shiny::reactive(TRUE)), {
     session$setInputs(path = csv, import = 1)
     expect_false(job$busy)
-    expect_true(any(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+    expect_true(any(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)))
   })
 })

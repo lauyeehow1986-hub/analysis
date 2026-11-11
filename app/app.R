@@ -43,16 +43,20 @@ ui <- do.call(bslib::page_navbar, c(
 ))
 
 server <- function(input, output, session) {
-  project <- mod_project_server("project")
-  # An analysis run makes the app busy: Data, Design and SAP refuse edits while an import OR a run is in
-  # progress. The Analyses module gets the import-only flag (it combines it with its own running()).
-  run_busy <- shiny::reactiveVal(FALSE)   # Data sees a$running() one flush late (Design/SAP use any_busy directly); negligible
-  d <- mod_data_server("data", project, run_busy)
-  a <- mod_analyses_server("analyses", project, d$busy)
-  shiny::observe(run_busy(isTRUE(a$running())))
-  any_busy <- shiny::reactive(isTRUE(d$busy()) || isTRUE(a$running()))
-  mod_design_server("design", project, any_busy)
-  mod_sap_server("sap", project, any_busy)
+  # The busy hub: one flag per job module (Tasks 5, 7, 8 and 9 add Write, Archive, Import and Settings).
+  # Every module refuses edits while any job other than its own is running. A module that owns a job
+  # receives busy_for(<its flag>), so its own running state never blocks itself.
+  flags <- shiny::reactiveValues(data = FALSE, analyses = FALSE, archive = FALSE, import = FALSE)
+  busy_for <- function(except = character()) {
+    shiny::reactive(.sr_ui_busy_any(shiny::reactiveValuesToList(flags), except))
+  }
+  project <- mod_project_server("project", busy = busy_for())
+  d <- mod_data_server("data", project, busy_for("data"))
+  a <- mod_analyses_server("analyses", project, busy_for("analyses"))
+  shiny::observe(flags$data <- isTRUE(d$busy()))
+  shiny::observe(flags$analyses <- isTRUE(a$running()))
+  mod_design_server("design", project, busy_for())
+  mod_sap_server("sap", project, busy_for())
   # The Data, Design, SAP and Analyses panels are hidden until a project is open.
   shiny::observe({
     for (p in c("Data", "Design", "SAP", "Analyses")) {

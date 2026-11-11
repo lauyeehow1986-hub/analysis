@@ -8,7 +8,7 @@ test_that("the actor refuses with no project, while busy, and on a read-only pro
   p$readonly <- TRUE; rv(p)
   act("Save", function(p) hit <<- hit + 1L)
   expect_equal(hit, 0L)
-  expect_equal(seen$msg, c("Save: open a project first", "Save: wait for the running import or analysis to finish",
+  expect_equal(seen$msg, c("Save: open a project first", paste0("Save: ", .sr_ui_busy_text),
                            "Save: the project is read-only (locked by another session)"))
   expect_equal(seen$type, rep("error", 3L))
 })
@@ -60,4 +60,12 @@ test_that("the fixtures build: a ready UI project accepts the binary spec", {
   p <- .fx_ui_project()
   p <- sr_sap_add(p, "a1", "logistic", .ui_bin_spec(), "t", label = "primary")
   expect_true("a1" %in% names(p$state$analyses))
+})
+
+test_that("busy_any: OR of the flags minus except", {
+  fl <- list(data = FALSE, archive = TRUE)
+  expect_true(.sr_ui_busy_any(fl))
+  expect_false(.sr_ui_busy_any(fl, except = "archive"))
+  expect_false(.sr_ui_busy_any(list()))
+  expect_match(.sr_ui_busy_text, "archive operation or project import", fixed = TRUE)
 })

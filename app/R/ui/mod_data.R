@@ -548,7 +548,7 @@ mod_data_server <- function(id, project, busy = shiny::reactive(FALSE)) {
       p <- project()
       if (is.null(p)) return(.sr_ui_notify("Import: open a project first", "error"))
       if (isTRUE(job$busy)) return(.sr_ui_notify("Import: one import is already running", "error"))
-      if (isTRUE(busy())) return(.sr_ui_notify("Import: wait for the running import or analysis to finish", "error"))
+      if (isTRUE(busy())) return(.sr_ui_notify(paste0("Import: ", .sr_ui_busy_text), "error"))
       if (isTRUE(p$readonly)) return(.sr_ui_notify("Import: the project is read-only (locked by another session)", "error"))
       path <- path_in()
       if (!nzchar(path)) return(.sr_ui_notify("Import: choose a file first", "error"))
