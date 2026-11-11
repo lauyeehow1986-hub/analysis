@@ -58,7 +58,9 @@ acknowledgement, per-session consent); connected mode alone sends nothing.
 The key is held only as `options(sr.jev_key)`. It is a password input, cleared right after a Set, and never
 rendered back: the table says "set" or "not set". It is never logged, never put in events, the audit log or an
 export, never written to a file and never part of the options snapshot a worker receives (no worker calls
-Jev). Reset on the key, or Reset or Set of `mode` to `airgap`, removes it.
+Jev). Reset on the key, or Reset or Set of `mode` to `airgap`, removes it. Reset removes the option only: an
+`SR_JEV_KEY` environment variable still applies afterwards, and worker processes inherit it through their
+environment (not through the options snapshot).
 
 ## 5. Actor
 

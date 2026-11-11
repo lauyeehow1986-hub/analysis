@@ -241,10 +241,15 @@ the core's note that the checklist is completed by hand.
   feasibility row downloads its single `.docx`.
 - **Open folder**: opens the export folder in the OS file manager (a local call, not a network call).
 - **Verify**: `sr_export_verify()`. Two separate findings:
-  - File problems, in red, one line each as `changed: <path>`, `missing: <path>` or `extra: <path>`. These mean
-    the export on disk no longer matches the hash in its `doc.exported` event (corruption, an edit or a stray
-    file). With none: "Every file matches its recorded hash."
+  - File problems, in red, one line each as `changed: <path>`, `missing: <path>`, `extra: <path>` or
+    `manifest: <path>`. The first three mean the export on disk no longer matches the hash in its
+    `doc.exported` event (corruption, an edit or a stray file). `manifest:` means `manifest.json` lists that
+    file with another SHA than the event, or omits it. With none: "Every file matches its recorded hash."
   - Numbers: "These numbers no longer re-derive from the project:" with the differing rows (to 4 significant
-    digits). This is not file damage: the files are intact and a re-run moved the project's numbers since the
-    export. With none: "Every number re-derives from the project."
+    digits). This is not file damage by itself: when no file problem is listed, the files are intact and a re-run
+    moved the project's numbers since the export. With none: "Every number re-derives from the project." This line shows only when the numbers
+    were really checked. If `placeholders.json` or `manifest.json` is missing, unreadable or damaged, or the
+    export folder is gone, the panel shows "Numbers not checked: <reason>" instead (in the API,
+    `numbers_ok` is FALSE and `numbers_note` holds the reason), together with the file problems. Verify never
+    throws on a damaged file.
 - A row whose files are gone shows status "missing on disk" in red; its Download and Open folder are disabled.
