@@ -128,6 +128,25 @@ test_that("the zip download holds the export files", {
   })
 })
 
+test_that("an export missing on disk has no download link, and its handler refuses", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_writer_project())
+  shiny::testServer(mod_write_server, args = list(project = rv, busy = function() FALSE), {
+    session$setInputs(export = 1)
+    expect_match(.mw_html(output$history), "dl_export_001")
+    unlink(file.path(rv()$paths$out, "exports", "export-001"), recursive = TRUE)
+    rv(sr_project_append(rv(), "note", list(text = "re-render")))   # the history re-reads the disk
+    session$flushReact()
+    html <- .mw_html(output$history)
+    expect_match(html, "missing on disk", fixed = TRUE)
+    expect_false(grepl("dl_export_001", html, fixed = TRUE))       # no link to the handler at all
+    expect_false(grepl("href", html, fixed = TRUE))
+    expect_match(html, "<button[^>]*disabled", perl = TRUE)
+    expect_error(output$dl_export_001, "missing on disk")
+  })
+})
+
 test_that("Verify on a changed file shows a red problem line", {
   withr::local_options(sr.mode = "airgap")
   .ui_spy_notify()

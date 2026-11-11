@@ -221,6 +221,11 @@ mod_write_server <- function(id, project, busy, settings = function() 0L) {
         },
         content = function(file) {
           p <- shiny::isolate(project())
+          # the handler refuses too, not only the disabled button (a link or a stale page can still ask)
+          h <- .sr_wp_history(p)
+          if (!isTRUE(h$on_disk[h$id == eid][1L])) {
+            stop("the files of export '", eid, "' are missing on disk", call. = FALSE)
+          }
           if (identical(kind, "manuscript")) return(sr_export_zip(p, eid, file))
           f <- file.path(p$paths$dir, export_of(eid)$files[[1L]]$path)
           if (!file.exists(f)) stop("the file of export '", eid, "' is missing on disk", call. = FALSE)
@@ -249,8 +254,15 @@ mod_write_server <- function(id, project, busy, settings = function() 0L) {
       row <- function(i) {
         nm <- .sr_wm_nm(h$id[i])
         gone <- identical(h$status[i], "missing on disk")
-        dl <- shiny::downloadButton(ns(paste0("dl_", nm)), "Download", class = "btn-sm btn-outline-secondary")
-        if (gone) dl <- htmltools::tagAppendAttributes(dl, class = "disabled", `aria-disabled` = "true")
+        # a missing export gets a real disabled button with no link to the download handler (CSS alone
+        # would leave the link usable from the keyboard or by its address)
+        dl <- if (gone) {
+          shiny::tags$button(type = "button", class = "btn btn-default btn-sm btn-outline-secondary", disabled = NA,
+                             `aria-disabled` = "true", title = "The files of this export are missing on disk",
+                             shiny::icon("download"), "Download")
+        } else {
+          shiny::downloadButton(ns(paste0("dl_", nm)), "Download", class = "btn-sm btn-outline-secondary")
+        }
         shiny::tags$tr(
           shiny::tags$td(h$kind[i]), shiny::tags$td(h$id[i]), shiny::tags$td(h$created[i] %||% ""),
           shiny::tags$td(if (is.na(h$preset[i])) "" else h$preset[i]), shiny::tags$td(h$n_files[i]),
