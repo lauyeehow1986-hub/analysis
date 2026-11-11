@@ -157,3 +157,22 @@ test_that("the Archive tab is wired and an archive job blocks Data, Design, SAP 
     try(sr_project_close(project()), silent = TRUE)
   })
 })
+
+test_that("badges re-render after a mode change", {
+  withr::local_options(sr.mode = "airgap", sr.jev_key = NULL)
+  withr::defer(options(sr.mode = NULL, sr.jev_key = NULL))
+  seen <- .ui_spy_notify()
+  shiny::testServer(.aw_app(), {
+    session$flushReact()
+    expect_match(paste(output$badges$html, collapse = " "), "no network", fixed = TRUE)
+    session$setInputs(`settings-val_mode` = "connected", `settings-set_mode` = 1)
+    session$setInputs(`settings-connect_word` = "CONNECT", `settings-connect_ok` = 1)
+    session$flushReact()
+    html <- paste(output$badges$html, collapse = " ")
+    expect_match(html, "connected", fixed = TRUE)
+    expect_false(grepl("no network", html, fixed = TRUE))
+    session$setInputs(`settings-val_mode` = "airgap", `settings-set_mode` = 2)
+    session$flushReact()
+    expect_match(paste(output$badges$html, collapse = " "), "no network", fixed = TRUE)
+  })
+})

@@ -111,14 +111,7 @@
   "worker stopped unexpectedly (no result)"
 }
 
-# The names of the settings the Settings panel edits. A stub until the panel's catalogue exists; that
-# module moves this function and deletes the stub.
-.sr_set_names <- function() {
-  c("mode", "profile", "user", "digits", "router_mask", "jev_key", "jev_url", "jev_model", "jev_timeout",
-    "freeze_full_max_bytes", "srproj_max_total", "cran_snapshot")
-}
-
-#' The session's settings as a named list of `sr.<name>` options, for a worker. Only settings that are set
+#' The session's settings (the names of .sr_set_names(), in ui/settings_view.R) as a named list of `sr.<name>` options, for a worker. Only settings that are set
 #' (non-NULL options); sr.jev_key is never included, and neither are the test switches (run_sync,
 #' ingest_sync, jev_transport), which are not settings.
 .sr_job_opts <- function() {
