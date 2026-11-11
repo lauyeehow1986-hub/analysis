@@ -87,7 +87,9 @@ sr_exports <- function(project) {
 #' manuscript the placeholders of placeholders.json are re-derived from the project (sr_ph_verify).
 #' @param project an open project.
 #' @param id an export id of sr_exports().
-#' @return list(ok_files, files = data.frame(path, expected, got, status), numbers, numbers_ok).
+#' @return list(ok_files, files = data.frame(path, expected, got, status), numbers, numbers_ok, numbers_note).
+#'   numbers_ok is TRUE only when the numbers were checked and all re-derive; numbers_note says why a manuscript's
+#'   numbers could not be checked (NULL when they were). This function does not throw on damaged metadata files.
 sr_export_verify <- function(project, id) {
   e <- .sr_ex_find(project, id)
   root <- project$paths$dir
@@ -107,8 +109,11 @@ sr_export_verify <- function(project, id) {
     manifest <- if (file.exists(mf)) tryCatch(.sr_parse_json(paste(readLines(mf, warn = FALSE, encoding = "UTF-8"),
                                                                     collapse = "
 ")), error = function(err) NULL)
+    if (!is.list(manifest)) manifest <- NULL
     listed <- list()
-    for (f in manifest$files %||% list()) listed[[as.character(f$path)]] <- as.character(f$sha)
+    for (f in manifest$files %||% list()) {
+      if (is.list(f) && length(f$path) == 1L) listed[[as.character(f$path)]] <- as.character(f$sha)
+    }
     pre <- paste("out", "exports", id, "", sep = "/")
     for (i in seq_along(paths)) {
       rel <- substring(paths[i], nchar(pre) + 1L)
@@ -128,12 +133,25 @@ sr_export_verify <- function(project, id) {
   }
 
   numbers <- NULL
-  if (is_ms && file.exists(file.path(dir, "placeholders.json")) && !is.null(manifest)) {
-    reg <- .sr_ex_registry(dir, manifest$suppress_k)
-    numbers <- sr_ph_verify(reg, project)
+  note <- NULL
+  if (is_ms) {
+    note <- tryCatch({
+      if (!file.exists(file.path(dir, "placeholders.json"))) {
+        "placeholders.json is missing"
+      } else if (!is.list(manifest)) {
+        "manifest.json is missing or unreadable"
+      } else {
+        reg <- .sr_ex_registry(dir, manifest$suppress_k)
+        numbers <- sr_ph_verify(reg, project)
+        NULL
+      }
+    }, error = function(err) {
+      numbers <<- NULL
+      paste0("placeholders.json or manifest.json is damaged (", conditionMessage(err), ")")
+    })
   }
   list(ok_files = all(files$status == "ok"), files = files, numbers = numbers,
-       numbers_ok = is.null(numbers) || all(numbers$ok))
+       numbers_ok = !is.null(numbers) && isTRUE(all(numbers$ok)), numbers_note = note)
 }
 
 #' A manuscript export folder as one zip file with the entries <id>/<file> for every file of the event

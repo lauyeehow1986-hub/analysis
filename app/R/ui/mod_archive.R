@@ -398,6 +398,7 @@ mod_archive_server <- function(id, project, busy, settings = function() 0L) {
       job$cancelling <- TRUE
       k <- tryCatch(.sr_job_kill(job$job_file), error = function(e) e)
       if (inherits(k, "error")) {
+        job$cancelling <- FALSE   # a verify that still finishes normally must not read as cancelled
         # the kill failed: a process may still be running, so the job stays (and can be cancelled again)
         return(.sr_ui_notify(paste0(label, ": ", conditionMessage(k)), "error"))
       }

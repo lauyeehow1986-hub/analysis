@@ -234,7 +234,8 @@ mod_write_server <- function(id, project, busy, settings = function() 0L) {
       }, ignoreInit = TRUE)
       shiny::observeEvent(input[[paste0("verify_", nm)]], {
         v <- .sr_ui_try("Verify", function() sr_export_verify(shiny::isolate(project()), eid))
-        if (!is.null(v)) shown(list(id = eid, v = v))
+        # a failed verify must not leave the previous result (maybe of another export) on screen
+        shown(if (is.null(v)) NULL else list(id = eid, v = v))
       }, ignoreInit = TRUE)
       invisible(NULL)
     }
@@ -279,6 +280,8 @@ mod_write_server <- function(id, project, busy, settings = function() 0L) {
         if (!is.null(l$numbers) && nrow(l$numbers)) {
           shiny::tagList(shiny::p(class = "text-danger", "These numbers no longer re-derive from the project:"),
                          .sr_wm_table(l$numbers))
+        } else if (!is.null(l$note)) {
+          shiny::p(class = "text-warning", paste0("Numbers not checked: ", l$note))
         } else if (isTRUE(s$v$numbers_ok) && !is.null(s$v$numbers)) {
           shiny::p(class = "text-success", "Every number re-derives from the project.")
         })

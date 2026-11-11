@@ -444,6 +444,29 @@ test_that("cancel settles when the kill finds no worker, and stays cancellable w
   })
 })
 
+test_that("a failed kill does not make a later-finishing verify read as cancelled", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) stop("could not stop the worker (process 1 still running)"))
+  rv <- shiny::reactiveVal(.ar_frozen())
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    session$setInputs(freeze_pick = "v1", data_verify = 1)
+    expect_true(running())
+    session$setInputs(cancel = 1)
+    expect_true(running())
+    expect_true(any(grepl("still running", seen$msg, fixed = TRUE)))
+    ctl$resolve(list(ok = TRUE))
+    for (i in 1:50) {
+      later::run_now(0.1)
+      session$flushReact()
+      if (!running()) break
+    }
+    expect_false(running())
+    expect_false(any(grepl("Verify cancelled", seen$msg, fixed = TRUE)))
+  })
+})
+
 test_that("closing the session mid-export kills the worker and removes the partial files", {
   ctl <- new.env()
   .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))

@@ -145,6 +145,38 @@ test_that("Verify on a changed file shows a red problem line", {
   })
 })
 
+test_that("Verify of a damaged export shows the file problem and 'not checked', never the green numbers line", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_writer_project())
+  shiny::testServer(mod_write_server, args = list(project = rv, busy = function() FALSE), {
+    session$setInputs(export = 1)
+    session$setInputs(verify_export_001 = 1)
+    expect_match(.mw_html(output$verify), "re-derives")
+    writeLines("not json {{", file.path(rv()$paths$out, "exports", "export-001", "placeholders.json"))
+    session$setInputs(verify_export_001 = 2)
+    html <- .mw_html(output$verify)
+    expect_match(html, "changed:")
+    expect_match(html, "Numbers not checked")
+    expect_false(grepl("re-derives from the project", html, fixed = TRUE))
+    expect_false(grepl("matches its recorded hash", html, fixed = TRUE))
+  })
+})
+
+test_that("a failed Verify clears the previously shown result", {
+  withr::local_options(sr.mode = "airgap")
+  .ui_spy_notify()
+  rv <- shiny::reactiveVal(.fx_writer_project())
+  shiny::testServer(mod_write_server, args = list(project = rv, busy = function() FALSE), {
+    session$setInputs(export = 1)
+    session$setInputs(verify_export_001 = 1)
+    expect_match(.mw_html(output$verify), "matches its recorded hash")
+    .ui_stub("sr_export_verify", function(project, id) stop("cannot verify"))
+    session$setInputs(verify_export_001 = 2)
+    expect_false(grepl("Verification of", .mw_html(output$verify), fixed = TRUE))
+  })
+})
+
 test_that("Open folder calls the OS opener with the export folder", {
   withr::local_options(sr.mode = "airgap")
   .ui_spy_notify()

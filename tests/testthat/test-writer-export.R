@@ -363,6 +363,7 @@ test_that("sr_export_verify: a clean export is all ok", {
   v <- sr_export_verify(p, "export-001")
   expect_true(v$ok_files)
   expect_true(v$numbers_ok)
+  expect_null(v$numbers_note)
   expect_gt(nrow(v$files), 0L)
   expect_true(all(v$files$status == "ok"))
   expect_gt(nrow(v$numbers), 0L)
@@ -431,6 +432,52 @@ test_that("sr_export_verify: a re-run that moves a number is numbers_ok FALSE wi
   expect_true(v$ok_files)
   expect_false(v$numbers_ok)
   expect_gt(sum(!v$numbers$ok), 0L)
+})
+
+test_that("sr_export_verify: damaged metadata files never throw; numbers are reported as not checked", {
+  chk <- function(v, note) {
+    expect_false(v$numbers_ok)
+    expect_null(v$numbers)
+    expect_match(v$numbers_note, note)
+  }
+  dir_of <- function(p) file.path(p$paths$out, "exports", "export-001")
+  # garbage placeholders.json: the file problem is still reported
+  p <- .fx_writer_project(); p <- sr_export(p)
+  writeLines("not json {{", file.path(dir_of(p), "placeholders.json"))
+  v <- expect_no_error(sr_export_verify(p, "export-001"))
+  expect_false(v$ok_files)
+  expect_true(any(v$files$status == "changed" & grepl("placeholders.json$", v$files$path)))
+  chk(v, "damaged")
+  # a row without an id
+  p <- .fx_writer_project(); p <- sr_export(p)
+  writeLines('[{"value": "1"}]', file.path(dir_of(p), "placeholders.json"))
+  v <- expect_no_error(sr_export_verify(p, "export-001"))
+  expect_true(any(v$files$status == "changed"))
+  chk(v, "damaged")
+  # a manifest without suppress_k
+  p <- .fx_writer_project(); p <- sr_export(p)
+  mf <- file.path(dir_of(p), "manifest.json")
+  man <- .sr_parse_json(paste(readLines(mf, warn = FALSE), collapse = "
+"))
+  man$suppress_k <- NULL
+  .sr_ex_write_text(mf, paste0(.sr_json(man), "
+"))
+  v <- expect_no_error(sr_export_verify(p, "export-001"))
+  expect_false(v$ok_files)
+  chk(v, "damaged")
+  # an unreadable manifest
+  p <- .fx_writer_project(); p <- sr_export(p)
+  writeLines("garbage", file.path(dir_of(p), "manifest.json"))
+  v <- expect_no_error(sr_export_verify(p, "export-001"))
+  expect_false(v$ok_files)
+  chk(v, "manifest.json is missing or unreadable")
+  # a deleted export folder
+  p <- .fx_writer_project(); p <- sr_export(p)
+  unlink(dir_of(p), recursive = TRUE)
+  v <- expect_no_error(sr_export_verify(p, "export-001"))
+  expect_false(v$ok_files)
+  expect_true(all(v$files$status == "missing"))
+  chk(v, "missing")
 })
 
 test_that("sr_export_verify: unknown id is refused", {

@@ -130,7 +130,7 @@
   out[, .sr_wp_hcols, drop = FALSE]
 }
 
-# The lines of a verification: list(problems, numbers). Numeric columns of the differing rows go to 4 digits.
+# The lines of a verification: list(problems, numbers, note); note says why numbers were not checked. Numeric columns of the differing rows go to 4 digits.
 .sr_wp_verify_lines <- function(v) {
   f <- v$files
   bad <- f[f$status != "ok", , drop = FALSE]
@@ -141,7 +141,7 @@
     for (j in names(nums)) if (is.numeric(nums[[j]])) nums[[j]] <- signif(nums[[j]], 4L)
     rownames(nums) <- NULL
   }
-  list(problems = problems, numbers = nums)
+  list(problems = problems, numbers = nums, note = v$numbers_note)
 }
 
 # ---- checklist -------------------------------------------------------------------------------------

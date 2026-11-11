@@ -131,6 +131,8 @@ test_that("verify lines: problems per bad file; numbers only when they differ", 
   o <- .sr_wp_verify_lines(v)
   expect_identical(o$problems, c("changed: out/b", "missing: out/c"))
   expect_null(o$numbers)
+  expect_null(o$note)
+  expect_identical(.sr_wp_verify_lines(c(v, list(numbers_note = "gone")))$note, "gone")
   v$numbers <- data.frame(id = c("E1", "E2"), ok = c(TRUE, FALSE), want = c(1, 2.123456), got = c(1, 2.5),
                           stringsAsFactors = FALSE)
   v$numbers_ok <- FALSE
