@@ -109,6 +109,33 @@ test_that("export cleanup: a finished export is kept and reported", {
   expect_true(file.exists(path))
 })
 
+test_that("export cleanup: a path that existed before the job (keep) is never removed", {
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  d <- withr::local_tempdir()
+  path <- file.path(d, "x.srproj")
+  writeLines("mine", path); writeLines("part", paste0(path, ".partial"))
+  stg <- file.path(p$paths$out, ".srproj-v1.partial")
+  dir.create(stg, recursive = TRUE)
+  n <- .sr_ar_n_events(p$paths$dir)
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n, keep = c(path)), "removed")
+  expect_true(file.exists(path))
+  expect_false(file.exists(paste0(path, ".partial")))
+  expect_false(dir.exists(stg))
+  expect_identical(readLines(path), "mine")
+})
+
+test_that("export cleanup: a finished export followed by another event is still finished", {
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  path <- file.path(withr::local_tempdir(), "x.srproj")
+  n <- .sr_ar_n_events(p$paths$dir)
+  p <- sr_srproj_export(p, path, label = "v1", data = "lean")
+  p <- sr_project_append(p, "note", list(text = "after"))
+  expect_identical(.sr_ar_last_type(p$paths$dir), "note")
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n), "finished")
+  expect_true(file.exists(path))
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", .sr_ar_n_events(p$paths$dir)), "removed")
+})
+
 test_that("verify worker on a project the session holds runs read-only and returns the verify", {
   p <- sr_freeze(.fx_writer_project(), "v1")
   # the worker is another process in the app; in-process, make the lock look like that of another live process

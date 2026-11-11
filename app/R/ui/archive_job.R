@@ -41,14 +41,33 @@
   if (is.character(t) && length(t) == 1L) t else NA_character_
 }
 
-#' After a cancelled or dead export job: "finished" when it got as far as the srproj.exported event (the
-#' archive is kept), else "removed" after deleting the archive, its .partial and the staging folder.
-.sr_ar_export_cleanup <- function(project_dir, path, label, n_before) {
-  if (.sr_ar_n_events(project_dir) > n_before && identical(.sr_ar_last_type(project_dir), "srproj.exported")) {
+# TRUE when an srproj.exported event is among the lines of events.jsonl after the first `n_before`.
+.sr_ar_exported_after <- function(project_dir, n_before) {
+  f <- sr_project_paths(project_dir)$events
+  if (!file.exists(f)) return(FALSE)
+  l <- readLines(f, warn = FALSE)
+  l <- l[nzchar(l)]
+  if (length(l) <= n_before) return(FALSE)
+  any(vapply(l[(n_before + 1L):length(l)], function(x) {
+    t <- tryCatch(jsonlite::parse_json(x)$type, error = function(e) NULL)
+    is.character(t) && length(t) == 1L && identical(t, "srproj.exported")
+  }, NA))
+}
+
+#' After a cancelled or dead export job: "finished" when its srproj.exported event was written (the archive
+#' is kept), else "removed" after deleting what the job made: the archive, its .partial and the staging
+#' folder. A path in `keep` (normalized paths that existed before the job started) is never removed.
+.sr_ar_export_cleanup <- function(project_dir, path, label, n_before, keep = character()) {
+  if (.sr_ar_n_events(project_dir) > n_before && .sr_ar_exported_after(project_dir, n_before)) {
     return("finished")
   }
-  unlink(path, recursive = TRUE)
-  unlink(paste0(path, ".partial"), recursive = TRUE)
-  unlink(file.path(project_dir, "out", paste0(".srproj-", label, ".partial")), recursive = TRUE)
+  norm <- function(x) normalizePath(x, winslash = "/", mustWork = FALSE)
+  kept <- norm(as.character(keep))
+  rm1 <- function(x, recursive) {
+    if (!(norm(x) %in% kept)) unlink(x, recursive = recursive)
+  }
+  rm1(path, FALSE)
+  rm1(paste0(path, ".partial"), FALSE)
+  rm1(file.path(project_dir, "out", paste0(".srproj-", label, ".partial")), TRUE)
   "removed"
 }
