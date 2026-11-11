@@ -315,6 +315,10 @@ sr_terms_code <- function(spec, engine = c("memory", "stream")) {
   setup <- c(
     if (stream) {
       c(if (length(.sr_exclude_rows(spec))) .sr_exclude_code(spec)[1L] else ".sr_excl <- integer()",
+        if (length(.sr_exclude_rows(spec))) c(
+          ".sr_nrow <- DBI::dbGetQuery(.sr_con, paste(\"SELECT count(*) AS n FROM\", sr_src))$n",
+          "if (max(.sr_excl) > .sr_nrow) stop(\"exclude_rows names row \", max(.sr_excl), \" but the data have \", .sr_nrow, \" rows\")"
+        ),
         .sr_inline(.h_st_excl, ".h_st_excl"),
         ".sr_where <- .h_st_excl(.sr_con, .sr_excl)")
     } else .sr_exclude_code(spec),

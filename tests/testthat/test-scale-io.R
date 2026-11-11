@@ -221,3 +221,23 @@ test_that("stream setup freezes the same levels and knots as memory", {
   expect_identical(es$.sr_fixed$levels, em$.sr_fixed$levels)
   expect_equal(es$.sr_fixed$knots, em$.sr_fixed$knots, tolerance = 1e-12)
 })
+
+test_that("stream setup refuses an out-of-range exclude_rows like memory", {
+  df <- .sc_frame(300L)
+  path <- .sc_parquet(df)
+  ex <- .sci_ex(path)
+  run_setup <- function(rows) {
+    spec <- list(exposure = "sex", exposure_ref = "F", outcome = "y", exclude_rows = rows)
+    es <- .sci_env(ex$proj)
+    code <- paste(.sr_run_prologue_stream(ex$ex), sr_terms_code(spec, "stream")$setup, sep = "\n")
+    eval(parse(text = code), es)
+    es
+  }
+  expect_error(run_setup(c(2, 301)), "exclude_rows names row 301 but the data have 300 rows", fixed = TRUE)
+  mem <- tryCatch(eval(parse(text = sr_terms_code(list(exposure = "sex", exposure_ref = "F", outcome = "y",
+                                                       exclude_rows = c(2, 301)))$setup),
+                       list2env(list(sr_data = df), parent = globalenv())),
+                  error = conditionMessage)
+  expect_identical(mem, "exclude_rows names row 301 but the data have 300 rows")
+  expect_no_error(run_setup(c(2, 300)))
+})
