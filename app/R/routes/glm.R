@@ -203,7 +203,7 @@
     code <- c(
       tc$setup,
       if (!firth) c(.sr_inline(.sr_h_vcov, ".h_vcov"), .sr_inline(.sr_h_coef_table, ".h_coef_table")),
-      if (marg_on) .sr_inline(.sr_h_gcomp, ".h_gcomp"),
+      if (marg_on) .sr_gcomp_helpers(),
       .sr_inline(.sr_h_wilson, ".h_wilson"),
       tc$design,
       "des <- .h_design(sr_data)",

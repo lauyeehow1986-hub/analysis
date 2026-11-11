@@ -6,7 +6,9 @@
 #   .sr_h_gcomp   g-computation. Set the exposure to each of two levels on the `over` rows, average
 #                 the predicted means, and give the difference and the log ratio with delta-method
 #                 standard errors g'Vg (gradient = column means of mu.eta(eta) * X at that level).
-#   .sr_h_nnt     the number needed to treat from a risk difference and its CI (Altman 1998):
+#                 Its finish (means and gradients to RD, log RR and their SEs) is .h_gcomp_finish, which
+#                 the streaming engine shares (scale/stream_marginal.R); .sr_gcomp_helpers() inlines both.
+#   .sr_h_nnt    the number needed to treat from a risk difference and its CI (Altman 1998):
 #                 NNTB / NNTH, and the "NNTB x to infinity to NNTH y" reading when the CI crosses 0.
 #   .sr_h_wilson  the Wilson score interval of a proportion.
 #
@@ -71,14 +73,37 @@
   }
   e1 <- at(levels[[1L]])
   e0 <- at(levels[[2L]])
+  k <- as.character(levels)
+  .h_gcomp_finish(stats::setNames(c(e1$mu, e0$mu), k), stats::setNames(list(e1$grad, e0$grad), k), V, levels)
+}
+
+#' The finish of g-computation, shared by .sr_h_gcomp and the streaming engine (scale/stream_marginal.R),
+#' which inline it as .h_gcomp_finish. p holds the standardised means and grad their gradients
+#' (colMeans(mu.eta(eta) * X) over the estimated coefficients), both named by as.character(level);
+#' levels = c(exposed, reference). V is the covariance of the estimated coefficients, conformable with
+#' the gradients. Returns list(p1, p0, rd, rd_se, log_rr, log_rr_se) as .sr_h_gcomp.
+.h_gcomp_finish <- function(p, grad, V, levels) {
+  k <- as.character(levels)
+  if (length(k) != 2L || !all(k %in% names(p)) || !all(k %in% names(grad))) {
+    stop("the means and gradients must hold the exposed and the reference level")
+  }
+  m1 <- p[[k[1L]]]
+  m0 <- p[[k[2L]]]
+  g1 <- grad[[k[1L]]]
+  g0 <- grad[[k[2L]]]
   se <- function(g) {
     v <- drop(crossprod(g, V %*% g))
     if (is.finite(v)) sqrt(max(v, 0)) else NA_real_
   }
-  pos <- e1$mu > 0 && e0$mu > 0
-  list(p1 = e1$mu, p0 = e0$mu, rd = e1$mu - e0$mu, rd_se = se(e1$grad - e0$grad),
-       log_rr = if (pos) log(e1$mu / e0$mu) else NA_real_,
-       log_rr_se = if (pos) se(e1$grad / e1$mu - e0$grad / e0$mu) else NA_real_)
+  pos <- m1 > 0 && m0 > 0
+  list(p1 = m1, p0 = m0, rd = m1 - m0, rd_se = se(g1 - g0),
+       log_rr = if (pos) log(m1 / m0) else NA_real_,
+       log_rr_se = if (pos) se(g1 / m1 - g0 / m0) else NA_real_)
+}
+
+# The inlined g-computation helpers: .h_gcomp and the .h_gcomp_finish it calls.
+.sr_gcomp_helpers <- function() {
+  c(.sr_inline(.sr_h_gcomp, ".h_gcomp"), .sr_inline(.h_gcomp_finish, ".h_gcomp_finish"))
 }
 
 #' Number needed to treat from a risk difference `rd` and its interval (lo, hi) (Altman 1998).
@@ -241,7 +266,7 @@
        post = c(".mg <- NULL", sprintf("if (.mg_on) .mg <- .h_mi_marg(.mi$scal, .mi$num, %s)", lev)),
        value = sprintf("if (.mg_on) list(rows = .mg, n_over = nrow(des), over = %s, note = .mg_note) else list(rows = NULL, n_over = NA_real_, over = %s, note = .mg_note)",
                        .sr_lit(.sr_marg_over(spec)), .sr_lit(.sr_marg_over(spec))),
-       helpers = c(.sr_inline(.sr_h_gcomp, ".h_gcomp"), .sr_inline(.sr_h_mi_marg, ".h_mi_marg")))
+       helpers = c(.sr_gcomp_helpers(), .sr_inline(.sr_h_mi_marg, ".h_mi_marg")))
 }
 
 # ---- the rows and the table of a marginal block ---------------------------------------------------
