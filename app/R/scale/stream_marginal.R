@@ -9,15 +9,41 @@
 #   Xa <- .h_st_marg_rows(over_chunk, rhs, exposure_col, values)   the chunk's design, exposure set to a
 #   st <- .h_st_marg_add(st, Xa, beta, keep, family)               sum mu(eta_a), sum mu.eta(eta_a) x_a, n
 #   .h_st_marg_finish(st, V, c(exposed, reference))                 means and gradients (sums / n), then
-#                                                                   .h_gcomp_finish (routes/marginal.R)
-# Dividing the sums by n gives the mean and colMeans(X * mu.eta(eta)) of .sr_h_gcomp, so RD, log RR and
-# their delta-method SEs come from the same finish as in memory. Only the estimated coefficients enter
+#                                                                   .h_gcomp_finish (below)
+# Dividing the sums by n gives the mean and colMeans(X * mu.eta(eta)) of .sr_h_gcomp, and .h_gcomp_finish
+# restates the end of .sr_h_gcomp operation for operation, so RD, log RR and their delta-method SEs are
+# computed as in memory (a test pins the two at 1e-12). .sr_h_gcomp itself is left as it was, so the
+# memory engine's emitted code stays byte-identical to before P1e (Review Focus 1, R6). Only the estimated coefficients enter
 # (keep; aliased columns are dropped as .sr_h_gcomp drops the NA coefficients), so V is the covariance
 # of the kept coefficients. A level absent from a chunk does not matter: every row is set to each level.
 #
 # Observed risk (R9), on the fitted rows during the first main pass: .h_st_obs_add counts n and events
 # per exposure level, .h_st_obs_finish builds the table of .sr_glm_obs_code with the shared .h_wilson
 # (inlined from .sr_h_wilson).
+
+#' The finish of g-computation for the stream path: the arithmetic of the end of .sr_h_gcomp
+#' (routes/marginal.R), restated here so that .sr_h_gcomp and the memory code it emits stay unchanged.
+#' p holds the standardised means and grad their gradients over the estimated coefficients, both named
+#' by as.character(level); levels = c(exposed, reference); V is the covariance of those coefficients.
+#' Returns list(p1, p0, rd, rd_se, log_rr, log_rr_se) as .sr_h_gcomp.
+.h_gcomp_finish <- function(p, grad, V, levels) {
+  k <- as.character(levels)
+  if (length(k) != 2L || !all(k %in% names(p)) || !all(k %in% names(grad))) {
+    stop("the means and gradients must hold the exposed and the reference level")
+  }
+  m1 <- p[[k[1L]]]
+  m0 <- p[[k[2L]]]
+  g1 <- grad[[k[1L]]]
+  g0 <- grad[[k[2L]]]
+  se <- function(g) {
+    v <- drop(crossprod(g, V %*% g))
+    if (is.finite(v)) sqrt(max(v, 0)) else NA_real_
+  }
+  pos <- m1 > 0 && m0 > 0
+  list(p1 = m1, p0 = m0, rd = m1 - m0, rd_se = se(g1 - g0),
+       log_rr = if (pos) log(m1 / m0) else NA_real_,
+       log_rr_se = if (pos) se(g1 / m1 - g0 / m0) else NA_real_)
+}
 
 #' The design rows of the chunk `over` with the exposure column set to each of `values` in turn, as
 #' .sr_h_gcomp builds them (a factor exposure keeps its levels). rhs is the model's right-hand side
@@ -140,18 +166,26 @@
     if (!is.null(st) && !st$bin) return(NULL)
     levels <- c(0, 1)
   }
+  k <- length(levels)
+  n <- numeric(k)
+  e <- numeric(k)
+  if (!is.null(st)) {
+    j <- match(as.character(levels), st$lev)
+    hit <- !is.na(j)
+    n[hit] <- st$n[j[hit]]
+    e[hit] <- st$events[j[hit]]
+  }
+  # one type for the whole count columns, decided once: integer (as in memory) when every count fits
+  if (all(n <= .Machine$integer.max)) {
+    n <- as.integer(n)
+    e <- as.integer(e)
+  }
   obs <- NULL
-  for (l in levels) {
-    j <- if (is.null(st)) NA_integer_ else match(as.character(l), st$lev)
-    n <- if (is.na(j)) 0 else st$n[j]
-    e <- if (is.na(j)) 0 else st$events[j]
-    if (n <= .Machine$integer.max) {
-      n <- as.integer(n)
-      e <- as.integer(e)
-    }
-    w <- .h_wilson(e, n)
-    obs <- rbind(obs, data.frame(level = as.character(l), n = n, events = e, est = w[["est"]],
-                                 lo = w[["lo"]], hi = w[["hi"]], stringsAsFactors = FALSE))
+  for (i in seq_len(k)) {
+    w <- .h_wilson(e[i], n[i])
+    obs <- rbind(obs, data.frame(level = as.character(levels[i]), n = n[i], events = e[i],
+                                 est = w[["est"]], lo = w[["lo"]], hi = w[["hi"]],
+                                 stringsAsFactors = FALSE))
   }
   obs
 }

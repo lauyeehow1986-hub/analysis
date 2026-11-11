@@ -41,8 +41,37 @@
   }
   reg("logistic", .sr_logistic_route)
   reg("modpois", .sr_modpois_route)
+  reg("lm", .sr_lm_route)
   sr_route_get(id, 1L)
 }
+
+# The memory specs whose emitted code is pinned (Review Focus 1, ruling R6): a logistic marginal block,
+# lm with marginal = TRUE and a logistic marginal block under multiple imputation.
+.smg_pin_specs <- function() {
+  cc <- .smg_layers()
+  mi <- cc
+  mi$missing <- "mi"
+  list(
+    logistic = list(id = "logistic", spec = .smg_spec()),
+    lm = list(id = "lm", spec = list(purpose = "explain-causal", outcome = "yc", exposure = "sex",
+                                     exposure_ref = "F", terms = list(list(var = "x1")), se = "model",
+                                     layers = cc, seed = 42L, marginal = TRUE)),
+    mi = list(id = "logistic", spec = list(purpose = "explain-causal", outcome = "y", exposure = "a01",
+                                           terms = list(list(var = "x1")), layers = mi,
+                                           mi = list(m = 5), seed = 42L))
+  )
+}
+
+# sha256 of the emitted memory text at the base commit 1ea4d44 (before P1e.1 Task 8), produced by a scratch
+# script that sourced `git archive 1ea4d44` and ran .sr_sha256 on .sr_inline(.sr_h_gcomp, ".h_gcomp") and on
+# sr_compile() of each .smg_pin_specs() entry. deparse() output is R-version-sensitive: these hashes were
+# made under R 4.5.2 and must be regenerated (from 1ea4d44) if the pinned R version changes.
+.smg_pin_sha <- c(
+  h_gcomp = "8172ae7b92b45d05a290e75295e74acf988acae5b4a6bf6ebf763e4bc055df93",
+  logistic = "de5f2e850aad2696640bdc4618d98efbbd4ec609eb7cc656d97cc1d5de1baf8e",
+  lm = "ca116caac2ef2d629038e67162eb453d700bac40c1c7b22c9f602c0d77a4148f",
+  mi = "e0404647a79efc3834b58b9bda1fe0273c8e716489cb95d380977e45be1d865b"
+)
 
 # The in-memory value of the route on the whole table.
 .smg_memory <- function(df, spec, id) {
@@ -160,14 +189,19 @@
   }
 }
 
-test_that(".sr_h_gcomp unchanged after the refactor", {
-  # the post-processing is .h_gcomp_finish, inlined next to .h_gcomp wherever .h_gcomp is
-  expect_true(any(grepl(".h_gcomp_finish(", deparse(.sr_h_gcomp), fixed = TRUE)))
-  code <- sr_compile(.smg_route("logistic"), .smg_spec())
-  expect_true(grepl(".h_gcomp_finish <- function", code, fixed = TRUE))
-  expect_silent(.sr_emit_check(code, "analysis"))
-  mi <- .sr_marg_mi_code(.smg_spec(), on = TRUE, strict = FALSE, ratio = TRUE)
-  expect_true(any(grepl(".h_gcomp_finish <- function", mi$helpers, fixed = TRUE)))
+test_that("the emitted memory code is byte-identical to the base commit", {
+  # Review Focus 1 / R6: a memory spec compiles exactly as before P1e, so cached fits and exported
+  # analysis.R stay valid. .h_gcomp_finish belongs to the stream path only.
+  expect_identical(.sr_sha256(.sr_inline(.sr_h_gcomp, ".h_gcomp")), .smg_pin_sha[["h_gcomp"]])
+  sp <- .smg_pin_specs()
+  for (nm in names(sp)) {
+    code <- sr_compile(.smg_route(sp[[nm]]$id), sp[[nm]]$spec)
+    expect_false(grepl(".h_gcomp_finish", code, fixed = TRUE), info = nm)
+    expect_identical(.sr_sha256(code), .smg_pin_sha[[nm]], info = nm)
+  }
+})
+
+test_that(".h_gcomp_finish equals .sr_h_gcomp", {
   d <- .smg_data(600L)
   d <- d[stats::complete.cases(d[c("y", "x1")]), ]
   fit <- stats::glm(y ~ a01 + x1, data = d, family = stats::binomial())

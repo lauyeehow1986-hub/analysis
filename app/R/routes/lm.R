@@ -113,7 +113,7 @@
     tc$setup,
     .sr_inline(.sr_h_vcov, ".h_vcov"),
     .sr_inline(.sr_h_coef_table, ".h_coef_table"),
-    if (isTRUE(spec[["marginal"]])) .sr_gcomp_helpers(),
+    if (isTRUE(spec[["marginal"]])) .sr_inline(.sr_h_gcomp, ".h_gcomp"),
     tc$design,
     "des <- .h_design(sr_data)",
     sr_outcome_code(spec, "continuous"),
