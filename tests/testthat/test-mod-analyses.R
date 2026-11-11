@@ -750,3 +750,68 @@ test_that("an unrelated project change does not redraw the cards", {
     expect_identical(dev_v(), d0)
   })
 })
+
+test_that("an ok analysis with no diagnostics shows a muted note, not an error, and Apply stays off", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  chk <- function(p, note) {
+    rv <- shiny::reactiveVal(p)
+    shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+      session$setInputs(runs_rows_selected = 1)
+      html <- paste(output$apply_preview$html)
+      expect_match(html, note, fixed = TRUE)
+      expect_false(grepl("text-danger", html, fixed = TRUE))
+      expect_false(grepl("sr_diag_run", html, fixed = TRUE))
+      expect_match(.ma_btn(html, "apply"), "disabled")
+    })
+  }
+  # a route with no applicable check records nothing
+  chk(sr_run(.fx_an_project(), "a1", job = "j0"), "No diagnostics apply to this route.")
+  # a Cox fit whose diagnostics were never recorded (a cancelled run, say)
+  chk(sr_run(.ma_cox_project(), "m1", job = "j0"), "No diagnostics recorded yet - Run selected runs them.")
+})
+
+test_that("a run that is not finished shows no stale elapsed, cached or library warning", {
+  withr::local_options(sr.run_sync = TRUE)
+  p <- sr_run(.fx_an_project(), "a1", job = "j0")
+  p$state$runs$a1$status <- "cancelled"
+  p$state$runs$a1$elapsed <- 987
+  p$state$runs$a1$cached <- TRUE
+  p$state$runs$a1$lib_changed <- TRUE
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$setInputs(runs_rows_selected = 1)
+    head <- paste(output$result_head$html)
+    expect_match(head, "cancelled", fixed = TRUE)
+    expect_false(grepl("cached", head, fixed = TRUE))
+    expect_false(grepl("fresh", head, fixed = TRUE))
+    expect_false(grepl("library snapshot", head, fixed = TRUE))
+    expect_false(grepl("987", head, fixed = TRUE))
+  })
+})
+
+test_that("the read-only banner is not shown while the app is busy", {
+  p <- .fx_an_project()
+  p$readonly <- TRUE
+  shiny::testServer(mod_analyses_server, args = list(project = shiny::reactiveVal(p), busy = shiny::reactive(FALSE)), {
+    expect_match(paste(output$run_btns$html), "read-only", fixed = TRUE)
+  })
+  shiny::testServer(mod_analyses_server, args = list(project = shiny::reactiveVal(p), busy = shiny::reactive(TRUE)), {
+    html <- paste(output$run_btns$html)
+    expect_false(grepl("alert-warning", html, fixed = TRUE))
+    expect_match(html, "wait for the running import or analysis to finish", fixed = TRUE)
+  })
+})
+
+test_that("a multiplicity error is shown instead of the generic note", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  p <- sr_run(sr_run(.ma_lm_project(), "l1", job = "j1"), "l2", job = "j2")
+  .ma_stub("sr_family_adjust", function(project, id) stop("members share no term", call. = FALSE))
+  shiny::testServer(mod_analyses_server, args = list(project = shiny::reactiveVal(p), busy = shiny::reactive(FALSE)), {
+    session$flushReact()
+    html <- paste(output$families$html)
+    expect_match(html, "members share no term", fixed = TRUE)
+    expect_false(grepl("No adjusted table", html, fixed = TRUE))
+  })
+})

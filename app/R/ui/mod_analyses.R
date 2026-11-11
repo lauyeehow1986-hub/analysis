@@ -154,7 +154,7 @@ mod_analyses_server <- function(id, project, busy) {
     shiny::observe({
       p <- project()
       rn <- isTRUE(running())
-      v <- list(reason = .sr_an_can_run(p, isTRUE(busy()) || rn), running = rn,
+      v <- list(reason = .sr_an_can_run(p, isTRUE(busy()) || rn), running = rn, busy = isTRUE(busy()),
                 readonly = !is.null(p) && isTRUE(p$readonly))
       if (!identical(shiny::isolate(gate()), v)) gate(v)
     })
@@ -163,7 +163,7 @@ mod_analyses_server <- function(id, project, busy) {
       off <- is.null(g) || !is.null(g$reason)
       rn <- isTRUE(g$running)
       shiny::tagList(
-        if (!rn && isTRUE(g$readonly)) .sr_ui_readonly_banner(shiny::isolate(project())),
+        if (!rn && !isTRUE(g$busy) && isTRUE(g$readonly)) .sr_ui_readonly_banner(shiny::isolate(project())),
         shiny::div(
           class = "d-flex gap-2 mb-2 align-items-center",
           shiny::actionButton(ns("run_sel"), "Run selected", class = "btn-primary", disabled = off),
@@ -197,7 +197,8 @@ mod_analyses_server <- function(id, project, busy) {
       id <- sel_id()
       v <- if (is.null(p) || is.null(id)) NULL else {
         list(id = id, dir = p$paths$dir, run = p$state$runs[[id]], diag = p$state$diag[[id]],
-             live = id %in% names(live()))
+             live = id %in% names(live()) && (is.null(p$state$runs[[id]]) || !identical(p$state$runs[[id]]$status, "running") ||
+                                              .sr_an_is_live(live(), id, p$state$runs[[id]]$job)))
       }
       if (!identical(shiny::isolate(card()), v)) card(v)
     })
@@ -220,18 +221,20 @@ mod_analyses_server <- function(id, project, busy) {
       r <- s$run
       st <- if (s$live) "running" else .sr_an_s(r$status)
       if (!nzchar(st)) st <- if (is.null(r)) "not run" else if (isTRUE(r$ok)) "ok" else "failed"
+      if (identical(st, "running") && !s$live) st <- "interrupted"
       cls <- switch(st, ok = "bg-success", failed = "bg-danger", "bg-warning text-dark")
       head <- if (!is.null(r)) {
-        el <- suppressWarnings(as.numeric(r$elapsed))
+        done <- st %in% c("ok", "failed")   # a run that is not finished has no elapsed time or cache flag
+        el <- if (done) suppressWarnings(as.numeric(r$elapsed)) else NA_real_
         shiny::div(
           class = "d-flex gap-2 align-items-center mb-2",
           shiny::span(class = paste("badge", cls), `data-status` = st, st),
           if (length(el) == 1L && is.finite(el)) shiny::span(class = "small", .sr_an_elapsed(el)),
-          if (!is.null(r$cached)) shiny::span(class = "small text-muted", if (isTRUE(r$cached)) "cached" else "fresh")
+          if (done && !is.null(r$cached)) shiny::span(class = "small text-muted", if (isTRUE(r$cached)) "cached" else "fresh")
         )
       }
       bits <- list(head)
-      if (isTRUE(r$lib_changed)) {
+      if (st %in% c("ok", "failed") && isTRUE(r$lib_changed)) {
         bits <- c(bits, list(shiny::div(class = "alert alert-warning py-1",
           "The library snapshot of this run differs from the one recorded at the SAP lock.")))
       }
@@ -333,9 +336,15 @@ mod_analyses_server <- function(id, project, busy) {
       rk <- if (is.null(p) || is.null(id)) NULL else p$state$runs[[id]]$ok_key
       v <- NULL
       if (!is.null(rk) && length(rk) == 1L && !is.na(rk)) {
-        pl <- tryCatch(sr_diag_apply_plan(p, id), error = function(e) e)
-        v <- if (inherits(pl, "error")) list(id = id, error = conditionMessage(pl)) else {
-          list(id = id, n = nrow(pl), words = .sr_an_plan_words(p, pl))
+        if (!length(p$state$diag[[id]])) {
+          # no diagnostics recorded: either none applies to the route or the run was cut before they ran
+          ap <- tryCatch(sr_diag_applicable(p$state$analyses[[id]]), error = function(e) character())
+          v <- list(id = id, none = if (length(ap)) "pending" else "not_applicable")
+        } else {
+          pl <- tryCatch(sr_diag_apply_plan(p, id), error = function(e) e)
+          v <- if (inherits(pl, "error")) list(id = id, error = conditionMessage(pl)) else {
+            list(id = id, n = nrow(pl), words = .sr_an_plan_words(p, pl))
+          }
         }
       }
       if (!identical(shiny::isolate(plan_v()), v)) plan_v(v)
@@ -344,10 +353,16 @@ mod_analyses_server <- function(id, project, busy) {
       v <- plan_v()
       if (is.null(v)) return(NULL)
       g <- gate()
-      off <- is.null(g) || !is.null(g$reason) || !is.null(v$error) || !isTRUE(v$n > 0L)
+      off <- is.null(g) || !is.null(g$reason) || !is.null(v$error) || !is.null(v$none) || !isTRUE(v$n > 0L)
       shiny::tagList(
         shiny::h6(class = "mt-3", "Apply diagnostics"),
-        if (!is.null(v$error)) {
+        if (!is.null(v$none)) {
+          shiny::div(class = "text-muted", if (identical(v$none, "pending")) {
+            "No diagnostics recorded yet - Run selected runs them."
+          } else {
+            "No diagnostics apply to this route."
+          })
+        } else if (!is.null(v$error)) {
           shiny::div(class = "text-danger", v$error)
         } else if (!isTRUE(v$n > 0L)) {
           shiny::div(class = "text-muted", "Nothing to apply.")
@@ -420,7 +435,7 @@ mod_analyses_server <- function(id, project, busy) {
         body <- if (length(fm$waiting)) {
           shiny::div(class = "text-muted", paste0("Waiting for: ", paste(fm$waiting, collapse = ", ")))
         } else if (!is.data.frame(fm$table)) {
-          shiny::div(class = "text-muted", "No adjusted table is available for this family.")
+          shiny::div(class = "text-muted", if (!is.null(fm$error) && nzchar(fm$error)) fm$error else "No adjusted table is available for this family.")
         } else {
           tb <- fm$table
           tb$p <- format.pval(tb$p, digits = 3L, eps = 1e-4)
