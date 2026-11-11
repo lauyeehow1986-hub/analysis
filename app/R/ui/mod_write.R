@@ -54,7 +54,7 @@ mod_write_ui <- function(id) {
     ),
     .sr_ui_card("Preview",
       shiny::actionButton(ns("preview"), "Preview", class = "btn-outline-primary mb-2"),
-      shiny::uiOutput(ns("preview"))
+      shiny::uiOutput(ns("preview_body"))
     ),
     .sr_ui_card("Checklist", shiny::uiOutput(ns("checklist"))),
     .sr_ui_card("Export and history",
@@ -168,7 +168,7 @@ mod_write_server <- function(id, project, busy, settings = function() 0L) {
       }
       bump()
     })
-    output$preview <- shiny::renderUI({
+    output$preview_body <- shiny::renderUI({
       deps()
       if (!fresh() || is.null(cache$preview)) {
         return(shiny::p(class = "text-muted small", "Press Preview to see the manuscript as the document shows it."))

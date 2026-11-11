@@ -170,8 +170,22 @@ test_that("Preview renders once per model and shows the manuscript", {
   rv <- shiny::reactiveVal(.fx_writer_project())
   shiny::testServer(mod_write_server, args = list(project = rv, busy = function() FALSE), {
     session$setInputs(preview = 1)
-    expect_match(.mw_html(output$preview), "Supplement")
+    expect_match(.mw_html(output$preview_body), "Supplement")
     session$setInputs(preview = 2)
     expect_equal(n, 1L)
   })
+})
+
+# An input and an output must not share an id (Shiny warns and the page can misbehave); the Preview
+# button and its output once did.
+test_that("no input id of the panels is also an output id", {
+  uis <- list(mod_write_ui("w"), mod_archive_ui("a"), mod_settings_ui("s"), mod_import_ui("i"))
+  for (ui in uis) {
+    h <- paste(as.character(ui), collapse = " ")
+    tags <- unlist(regmatches(h, gregexpr("<(button|div)[^>]*>", h)))
+    id_of <- function(t) sub('^.*\\bid="([^"]+)".*$', "\\1", t)
+    inputs <- id_of(grep("action-button", tags, value = TRUE))
+    outputs <- id_of(grep("shiny-html-output", tags, value = TRUE))
+    expect_length(intersect(inputs, outputs), 0L)
+  }
 })
