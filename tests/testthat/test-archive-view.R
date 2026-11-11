@@ -136,6 +136,41 @@ test_that("export cleanup: a finished export followed by another event is still 
   expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", .sr_ar_n_events(p$paths$dir)), "removed")
 })
 
+# A torn last line before the job is truncated away by the export's append: counted as a line, it would hide
+# the srproj.exported event that replaces it, and the cleanup would delete a finished archive.
+test_that("export cleanup: a torn last event line before the job does not hide the finished export", {
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  ev <- p$paths$events
+  con <- file(ev, "ab")
+  writeBin(charToRaw("{\"seq\":99,\"type\":\"tor"), con)            # an append cut short (no LF)
+  close(con)
+  n <- .sr_ar_n_events(p$paths$dir)
+  expect_warning(evs <- sr_events_read(ev), "torn event line")
+  expect_identical(n, length(evs))                                 # the torn fragment is not counted
+  path <- file.path(withr::local_tempdir(), "x.srproj")
+  p <- suppressWarnings(sr_srproj_export(p, path, label = "v1", data = "lean"))
+  expect_identical(.sr_ar_n_events(p$paths$dir), n + 1L)
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n), "finished")
+  expect_true(file.exists(path))
+})
+
+test_that("export cleanup: an srproj.exported event for another archive does not keep this one", {
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  path <- file.path(withr::local_tempdir(), "x.srproj")
+  n <- .sr_ar_n_events(p$paths$dir)
+  p <- sr_project_append(p, "srproj.exported", list(label = "v1", file = "other.srproj",
+                                                     archive_sha256 = strrep("0", 64)))
+  writeLines("half", path)
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n), "removed")
+  expect_false(file.exists(path))
+  # an event naming this file but another archive (other bytes) does not keep it either
+  writeLines("half", path)
+  p <- sr_project_append(p, "srproj.exported", list(label = "v1", file = "x.srproj",
+                                                     archive_sha256 = strrep("0", 64)))
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n), "removed")
+  expect_false(file.exists(path))
+})
+
 test_that("verify worker on a project the session holds runs read-only and returns the verify", {
   p <- sr_freeze(.fx_writer_project(), "v1")
   # the worker is another process in the app; in-process, make the lock look like that of another live process
