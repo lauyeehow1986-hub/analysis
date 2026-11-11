@@ -588,3 +588,111 @@ The writer turns a locked, run project into the manuscript, the supplement, the 
 list, the STROBE checklist and the analysis script that re-runs the results. It never computes a number.
 The guide is [writer.md](writer.md): the export files, the placeholder grammar, the claim guard (G1-G9),
 small-cell suppression, the journal presets, how to re-run `analysis.R`, and the known limitations.
+
+## 14. The Analyses panel (P1d UI sub-project 2)
+
+The Analyses tab (`app/R/ui/mod_analyses.R`, with the worker in `analyses_job.R` and the table builders in
+`analyses_view.R`) runs the locked SAP's analyses and shows their results. It sits after SAP and is hidden
+until a project is open. It holds five cards. Every card is derived from the replayed project
+(`events.jsonl` stays authoritative); the only session state about a run is the live job handle.
+
+### Running
+
+- **Card 1, Runs.** One row per analysis in SAP order (primary, secondary, then sensitivity analyses
+  indented under their parent): id, label, route, status (`not run`, `running`, `ok`, `failed`,
+  `cancelled`, `interrupted`), last run time, elapsed, cached, diagnostics summary.
+  **Run selected** re-runs the chosen analysis (also an `ok` one; the fits cache makes that fast).
+  **Run all** queues every analysis whose status is not `ok`, in SAP order. With no row selected, Run
+  selected says "select an analysis first" and writes nothing.
+- Run is enabled only when the SAP is locked, the project is not read-only, the app is not busy and the
+  project is not stopped. The server re-checks each condition and refuses with the core or busy text
+  verbatim; the buttons are also rendered disabled.
+- **The queue and the worker.** For each id the panel releases the project lock (closing DuckDB, then
+  the project, and holding a read-only copy) and starts a `mirai` worker through a Shiny `ExtendedTask`.
+  The worker sources the app, opens the project, writes its job file, calls `sr_run(job = job)` and, when
+  the run is `ok`, `sr_diag_run`, then closes the project. Back in the session the panel re-opens the
+  project (re-taking the lock) and starts the next id. The worker is an ephemeral mirai process: no
+  `mirai::daemons()` are set, so nothing is reused and a killed worker is simply gone.
+- A failed fit is recorded (`ok = FALSE`) and the queue continues; a sensitivity analysis whose parent
+  failed still runs. A refusal stops the queue (see the table).
+- The run continues while you are on another tab. Closing the browser cancels nothing: the worker
+  finishes and records its events. A job that settles while a different project is open is settled on a
+  temporary handle to its own folder (the notice ends " (in <project name>)") and the open project is
+  never replaced.
+- While a queue is running the tab shows a `running` badge. The busy flag the Analyses module receives
+  from the app is **import only**; the module combines it with its own `running()`. Data gets import OR
+  run, and Design and SAP get import OR run (`any_busy` in `app/app.R`): an import, a Design save or an
+  SAP edit is refused during a run with "wait for the running import or analysis to finish", and the Data
+  Import button is disabled.
+
+### Worker protocol, Cancel and interrupted
+
+- Three temp files per job: a progress file (`fitting` / `diagnostics`, read for the progress line), a
+  job file and a cancel file. The job file holds `"<pid> <process create time>"`. It is written to
+  `<job file>.part` and renamed into place, so a reader never sees half a line; the panel removes the
+  `.part` file with the other three when it cleans up. If the cancel file exists when the worker starts,
+  it returns `skipped` before fitting.
+- **Cancel** empties the queue, creates the cancel file and, only while the job's mirai is still
+  unresolved, calls `.sr_an_kill`. `.sr_an_kill` waits (up to 10 s) for a parseable job file, refuses to
+  kill when the PID is gone or its create time differs by more than 0.01 s (a reused PID), then, in this
+  order: **suspends the worker, snapshots and kills its descendants (the callr fit), then kills the
+  worker**. The suspend closes the race in which a worker could start a new child between the snapshot and
+  the kill. It then waits until no process runs. If a process survives, the survivors are resumed (so a
+  suspended worker never keeps the lock) and `.sr_an_kill` raises; the panel shows "Cancel: <message>" and
+  does not re-take the project until the mirai resolves. If no worker is found it says so, and the job is
+  settled when it ends. Cancel blocks the session for up to the kill wait.
+- **Settling a cancel** (`.sr_an_settle`) re-takes the project and calls `sr_run_cancel` for the job. The
+  outcomes: the kill stopped the fit, so `run.cancelled` is written ("Cancelled <id>."); the run completed
+  first, so `run.completed` wins, `sr_run_cancel` is refused as stale, nothing is written and the notice is
+  "<id> finished before it could be cancelled."; the worker was killed before `run.started` was written, so
+  "Cancelled before <id> started.". Cancelling while diagnostics are running leaves the fit standing: the
+  fit's `run.completed` is already recorded, and only the diagnostics are lost. If a cancel meets a
+  `refused` result the notice appends "The worker reported: <message>".
+- **Interrupted is derived, not an event.** An analysis whose latest run event is `run.started` is
+  `running`; when no live job in this session owns that `job` id it is shown as `interrupted` (the R
+  session died, the machine lost power, or the worker was killed outside the panel). Run selected then
+  appends a new `run.started`, so the crashed attempt stays in the log. `run.completed` carries the `job`
+  id (as `run.started` and `run.cancelled` do), so a result can be tied to its attempt.
+- A failed or cancelled attempt never removes an earlier good result; Card 2 keeps showing the last good
+  run, labelled with its time.
+
+### The five cards
+
+1. **Runs** (above), with the progress line "Running i of n: <id>, <step> (<elapsed>)".
+2. **Result of the selected analysis**, read through `sr_result()`: a header (status, elapsed, cached or
+   fresh, a warning when the library snapshot differs from the lock's, a failed run's error text
+   verbatim), the effects table (primary rows first), the route's tables, its figures (drawn with the
+   diagnostics plotting helpers), its fragments (prose with `{{E1}}`-style placeholders shown as tokens),
+   and one diagnostics row per check (verdict, value, warn and fail thresholds, detail, plus a figure when
+   the check has plot data). Below that, the **Apply diagnostics** preview: the rows of
+   `sr_diag_apply_plan` in words (rule to fire, sensitivity to add, limitation to record). The button is
+   gated like Run and executes `sr_diag_apply`, which runs exactly the previewed rows. An analysis it adds
+   appears in Card 1 as `not run`. A plan with no rows says "Nothing to apply."
+3. **Primary vs sensitivity**: one block per primary or secondary analysis, with its primary-role
+   estimate and the same-measure rows of each sensitivity analysis. After a fired `replace_primary` rule
+   the alternative is marked "now primary" and the replaced analysis is listed as a sensitivity row with
+   status `replaced`. A sensitivity analysis that has not run shows its status, never a blank.
+4. **Multiplicity**: one table per SAP family, equal to `sr_family_adjust` (p-values to four significant
+   digits). A family with a member that has not run successfully shows "Waiting for: a, b".
+5. **Deviations and run history**: the `sr_deviations` table, then every cancelled and interrupted attempt
+   (analysis, job, started, ended or `interrupted`, reason). Cancelled and interrupted attempts are run
+   history, not SAP deviations.
+
+Cards read only the event state and small cached RDS files; none re-runs `sr_sap_check` or scans DuckDB, so
+nothing scales with the row count. Values are held in value-compared reactives, so an unrelated project
+change does not redraw a card.
+
+### Failure table
+
+| Condition | Behaviour |
+|---|---|
+| Cancel races completion | `run.completed` wins; `sr_run_cancel` is refused as stale; no `run.cancelled`; a notice says it finished. |
+| Cancel before the worker's run started | "Cancelled before <id> started."; `run.cancelled` is written. |
+| Kill cannot stop a process | Survivors are resumed; the error is shown; the project is not re-taken until the mirai resolves. |
+| Browser closed mid-run | The worker finishes and records; reopening shows the result. |
+| R process or machine dies | Reopening shows `interrupted`; Run selected completes it. |
+| Lock handover race | The worker reports "the project is locked by another session"; shown as a refusal; the queue stops. |
+| `sr_run` or `sr_diag_run` refusal | The queue stops; the core message is shown verbatim ("diagnostics: " prefixes a diagnostics refusal). |
+| Fit fails | Recorded `ok = FALSE`; the queue continues; the error is shown in Card 2. |
+| Worker error outside the core | A `refused` with "worker error: ..." or "worker stopped unexpectedly (mirai error <code>)"; the queue stops. |
+| Import, Design or SAP edit during a run | Refused with "wait for the running import or analysis to finish". |

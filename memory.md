@@ -17,6 +17,7 @@ design; this file holds *what has happened* and *what we learned*.
 | 2026-11-08 | P1d.2 router done (branch `p1d-router`, Tasks 1-11): the PICO record (`pico.set`), the decision-node graph with input hashes and staleness, the metadata-only state builder with column-name masking and the token budget, the System One request / response contract, the abstain rule, the rules backend and the Jev cloud backend (gates: mode, key, DPA ack, session consent, payload approval; shadow mode, predictions never applied), the P1 nodes (design, purpose, guideline, outcome / exposure column, outcome type, primary route, covariate timing), the decision table, the shadow report and golden-set export, the SAP lock gate and router hash part, and the writer study-design paragraph, decision table and STROBE items 3-5. Guide `docs/router.md`. Full suite 13355 pass, 0 fail, 4 skip (no fst, no sas7bdat fixture, two NHEFS tests with `SR_NHEFS_CSV` unset), 1 warning (shiny built under a newer R), `LINT OK (89 files)`; after the final-review fixes (PICO in the design and purpose hashes, decisions frozen at the lock, vanished instances, mask punctuation, shadow same_input) 13483 pass, 0 fail, 4 skip, 1 warning, `LINT OK (89 files)`. The first full run failed 2 tests (test-writer-checklist): the cached writer template outlives `test-spec`, which empties the route registry, so `.fx_writer_project` now re-registers the routes |
 | 2026-11-08 | P1d.3 freeze done (branch `p1d-freeze`, Tasks 1-7): `sr_freeze` (gated, manifest with SHA-256 of store, sources, extracts, fits, exports and code; pinned events prefix and audit tip), the library baseline gate in `sr_run` with `sr_rebaseline_diff` / `sr_rebaseline`, the `.srproj` export (full / lean / auto, owner names scrubbed) and all-or-nothing import with a pure-R tar header scanner, `sr_freeze_diff` and `sr_freeze_results_diff`; `docs/archive.md`. P1 exit item 7 passes end to end (`test-archive-e2e.R`). Archives are not signed (out of scope). Full suite 13859 pass, 1 fail (the flaky 5 s timing assert in `test-archive-tar.R`, 10.9 s under load; see the gotcha), 4 skip (no fst, no sas7bdat fixture, NHEFS unset, one more textbook skip), `LINT OK (95 files)` |
 | 2026-11-09 | P1d UI sub-project 1 (Design + SAP panels) done (branch `p1d-ui-sap`, Tasks 1-9): the Design panel (`app/R/ui/mod_design.R`: PICO, run rules, decision table, shadow summary and feed export; the Ask Jev card only outside air-gap mode) and the SAP panel (`mod_sap.R`: analyses with the typed spec form, feasibility assess and decide, families and rules, the lock checklist, the typed-word lock, SAP_v1.docx and the feasibility report), wired into `app/app.R` after Data; the empty Profile tab is gone. Shared helpers `.sr_ui_*` in `app/R/ui/util.R`; the spec form is driven by `SR_FORM_KINDS` (`spec_form.R`). Tests run per file (lint, ui-util, ui-spec-form, mod-design, mod-sap, app-launch) all pass; the full suite was NOT run for this task (controller ruling). Browser walk on synthetic cardiac data (import, roles, PICO, rules, add/edit/add analyses, feasibility, DQ decisions, lock, SAP_v1.docx) found the stale-checklist issue below |
+| 2026-11-11 | P1d UI sub-project 2 (Analyses panel) done (branch `p1d-ui-analyses`, Tasks 1-9): `run.started` / `run.cancelled` events and the run history in the reducer, `sr_run_cancel`, `sr_diag_apply_plan`, the Analyses panel (`app/R/ui/mod_analyses.R`, `analyses_job.R`, `analyses_view.R`: Runs queue in a mirai worker with a process-tree Cancel, Result with diagnostics and Apply, Primary vs sensitivity, Multiplicity, Deviations and run history), wired after SAP with an app-wide busy flag; `docs/analysis.md` section 14. Suite counts and the acceptance walk: see the Task 9 commit message |
 
 **Next:**
 1. User reviews the plans and picks the execution method.
@@ -35,7 +36,7 @@ design; this file holds *what has happened* and *what we learned*.
    The freeze (P1d.3) is done (plan `docs/superpowers/plans/2026-11-08-p1d-freeze.md`, branch `p1d-freeze`,
    guide `docs/archive.md`).
    **P1d UI sub-project 1 (Design + SAP) is done 2026-11-09 (branch `p1d-ui-sap`). Next: sub-projects (2) and (3), each with its own spec, plan and branch:**
-   (2) Analyses (run, long jobs, post-lock analyses, results); (3) Write + Archive + Settings.
+   (2) Analyses (run, long jobs, post-lock analyses, results), done 2026-11-11 (branch `p1d-ui-analyses`); (3) Write + Archive + Settings.
    Together they own the payload preview, the consent dialog and the freeze, export and import buttons. The empty Profile tab is dropped (the Data panel covers it). Writer and router open items (carried into the UI, P2 and P3 work):
      - The router has only the Design panel; the preview and consent dialogs come later. Only Jev is registered (the `local` and `clm` ids are reserved for P3), and
        the abstain thresholds (`SR_ROUTER_ASK_COST`, `SR_ROUTER_DANGER_COST`) are placeholders until P3.
@@ -274,6 +275,37 @@ design; this file holds *what has happened* and *what we learned*.
   hides Data / Design / SAP; "Open existing" recovers. The Lock dialog's Lock button was enabled before the
   word was typed (`sr_sap_lock` takes no word; the panel server checks `identical(word, "LOCK")`). Accepting a leakage `drop_var` DQ decision adds a recipe
   step, which the checklist shows as a warn until applied.
+
+### P1d UI (Analyses) gotchas and rulings
+- **No mirai daemons, so a killed worker is never reused.** `.sr_an_spawn` starts an ephemeral mirai per
+  analysis (no `mirai::daemons()`), so Cancel can kill the worker and nothing is left to reuse or clean up.
+  Do not set daemons for this panel: `ps_kill` on a persistent daemon would kill the daemon.
+- **Kill order and the PID guard.** The worker writes `"<pid> <create time>"` to its job file (via
+  `<job file>.part` + rename). `.sr_an_kill` refuses when the PID is gone or the create time differs by more
+  than 0.01 s (a reused PID). It then suspends the worker, snapshots and kills the callr children, then
+  kills the worker (the old child-first order is a race: the worker can start another child). On Windows
+  `ps_kill` is TerminateProcess, with no grace. If anything survives it resumes the survivors and raises.
+- **Cancel race semantics.** `run.completed` wins: a cancel that arrives after the fit finished is refused by
+  `sr_run_cancel` as stale, writes no `run.cancelled` and says "finished before it could be cancelled". Cancel
+  during the diagnostics step leaves the fit standing (its `run.completed` is already recorded) and loses
+  only the diagnostics. A worker killed before `run.started` gives "Cancelled before <id> started.".
+- **Interrupted is derived.** Status `running` with no live job in this session is shown as `interrupted`;
+  there is no event for it. Run selected appends a new `run.started`.
+- **`run.completed` now carries `job`** (and `run.started` carries `job` and `extract_sha`). Old projects
+  without `run.started` replay unchanged.
+- **Busy flags.** The Analyses module receives the import-only flag (`d$busy`) and combines it with its own
+  `running()`; Data gets import OR run (`run_busy`, set one flush late), Design and SAP get import OR run
+  (`any_busy`). Passing import-OR-run to the Analyses module would block its own Run buttons.
+- **Lock handover.** Before each job the session closes DuckDB, then the project, and keeps a read-only copy;
+  after it settles it re-opens (only the same folder, only over the read-only copy). A job that settles while
+  another project is open settles on a temporary handle and never replaces the open project. The worker
+  closes DuckDB before the project (the Windows file lock).
+- **Tests.** The real-process tests (`test-analyses-job.R`, the Cancel tests in `test-mod-analyses.R`) are
+  skipped unless `NOT_CRAN=true`. `sr_opt("run_sync")` makes the panel run `.sr_an_job` inline (tests). A killed
+  worker rejects the ExtendedTask promise, so Shiny logs a harmless "connection reset" style warning.
+- **Observed in the acceptance walk (not changed).** The bootstrap with B = 2000 on 400 rows fits in about 4 s, so a Cancel walk needs a much larger B (60000 took 96 s). While a run is going the project is released to the worker, so the SAP panel shows its read-only banner and disabled controls (the busy text appears only on Data actions). Card 3 lists a sensitivity analysis of a different measure (an RMST difference under a Cox HR) as `ok` with no estimate, because it shows only same-measure rows.
+- **Known gap.** `.sr_data_spawn` still has the early-error gap `.sr_an_spawn` fixed (its temp files are not
+  always unlinked when the worker fails before the job starts).
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted
