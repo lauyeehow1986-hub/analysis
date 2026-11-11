@@ -24,7 +24,8 @@
     sha <- .sr_freeze_chr1(runs[[id]]$ok_extract_sha)
     if (!file.exists(file.path(p$paths$fits, paste0(key, ".rds")))) {
       stored <- c(stored, paste0("the stored result of '", id, "' is missing; run it again"))
-    } else if (is.na(sha) || !file.exists(file.path(p$paths$dir, "data", "extracts", paste0(sha, ".rds")))) {
+    } else if (is.na(sha) || !file.exists(file.path(p$paths$dir,
+                                                    .sr_extract_rel(sha, runs[[id]]$ok_extract_kind)))) {
       stored <- c(stored, paste0("the extract of '", id, "' is missing; run it again"))
     }
   }

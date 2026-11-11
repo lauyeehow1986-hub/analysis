@@ -172,6 +172,17 @@ sr_reducer_register("run.cancelled", function(state, event) {
   paste("ORDER BY", paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", "))
 }
 
+#' The project-relative path of the extract `sha` of `kind` ("rds", the in-memory extract, or "parquet",
+#' the stream extract; NULL or NA read as "rds", a run recorded before P1e, ruling R5):
+#' data/extracts/<sha>.<kind>. The script export, the freeze and the Archive panel name extracts with it.
+.sr_extract_rel <- function(sha, kind = "rds") {
+  if (is.null(kind) || (length(kind) == 1L && is.na(kind))) kind <- "rds"
+  if (!(is.character(kind) && length(kind) == 1L && kind %in% c("rds", "parquet"))) {
+    stop("the extract kind must be \"rds\" or \"parquet\"", call. = FALSE)
+  }
+  paste0("data/extracts/", sha, ".", kind)
+}
+
 #' Materialise `cols` of `table` (.sr_extract_frame()) serialised (version 3) to
 #' data/extracts/<sha>.rds under the project, `sha` being the SHA-256 of the bytes. An existing file
 #' of that name is reused as it is: whether it still holds those bytes is what the run's prologue
