@@ -103,7 +103,7 @@ test_that("lm@1 and lm_describe@1 are registered with the documented schema and 
   expect_identical(r$version, 1L)
   sc <- r$spec_schema
   expect_setequal(names(sc), c("outcome", "exposure", "terms", "interactions", "se", "cluster", "marginal",
-                               "standardize_over", "exclude_rows", "layers", "seed"))
+                               "standardize_over", "exclude_rows", "engine", "stream_chunk", "layers", "seed"))
   expect_true(sc$outcome$required)
   expect_true(sc$exposure$required)
   expect_true(sc$layers$required)

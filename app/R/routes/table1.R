@@ -283,16 +283,24 @@
 
 # ---- the route ----------------------------------------------------------------------------------
 
+# The estimand, a function of the spec so that the engine / stream_chunk fields are validated with it.
+.sr_t1_estimand <- function(spec) {
+  .sr_engine_check(spec, "table1")
+  sr_estimand(population = "analysed sample", variables = "the variables listed in the spec",
+              intercurrent = "not applicable (descriptive)",
+              summary = "baseline characteristics by group", level = "not-applicable")
+}
+
 .sr_table1_route <- function() {
   sr_route(
     id = "table1", version = 1L, family = "describe", purpose = "describe",
-    estimand = sr_estimand(population = "analysed sample", variables = "the variables listed in the spec",
-                           intercurrent = "not applicable (descriptive)",
-                           summary = "baseline characteristics by group", level = "not-applicable"),
+    estimand = .sr_t1_estimand,
     spec_schema = list(
       by = list(type = "chr", required = TRUE),
       vars = list(type = "chr", required = TRUE),
       nonnormal = list(type = "chr", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
       seed = list(type = "num", required = TRUE)
     ),
     compile = .sr_t1_compile, present = .sr_t1_present

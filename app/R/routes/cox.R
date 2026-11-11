@@ -68,6 +68,7 @@
   .sr_surv_check(spec)
   .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
+  .sr_engine_check(spec, "cox")
   base <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   cl <- spec[["cluster"]]
   if (.sr_cox_clustered(spec)) {
@@ -397,6 +398,7 @@
     cluster = list(type = "chr", required = FALSE),
     ties = list(type = "chr", required = FALSE, values = c("efron", "breslow")),
     exclude_rows = list(type = "num", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

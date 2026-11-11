@@ -38,7 +38,7 @@ test_that("rmst is registered with the documented schema", {
   r <- .rm_route()
   expect_identical(r$family, "survival")
   expect_identical(r$purpose, "explain-causal")
-  expect_setequal(names(r$spec_schema), c("time", "status", "status_event", "exposure", "tau", "layers", "seed"))
+  expect_setequal(names(r$spec_schema), c("time", "status", "status_event", "exposure", "tau", "engine", "layers", "seed"))
   expect_identical(r$spec_schema$tau$type, "num")
   expect_true(isTRUE(r$spec_schema$tau$required))
   expect_s3_class(r$estimand(.rm_spec()), "sr_estimand")

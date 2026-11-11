@@ -88,6 +88,7 @@
            call. = FALSE)
     }
   }
+  .sr_engine_check(spec, kind)
   invisible(TRUE)
 }
 
@@ -481,6 +482,8 @@
     marginal = list(type = "lgl", required = FALSE, default = TRUE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
     exclude_rows = list(type = "num", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

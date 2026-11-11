@@ -27,7 +27,8 @@ SR_FORM_KINDS <- c(
   seed = "number", tau = "number",
   event_value = "text",
   status_event = "event",
-  exclude_rows = "hidden"
+  exclude_rows = "hidden",
+  engine = "hidden", stream_chunk = "hidden"   # the engine control is a later P1e.1 task
 )
 
 # Layer defaults of the form (docs/analysis.md section 2) and the values P1 cannot run.

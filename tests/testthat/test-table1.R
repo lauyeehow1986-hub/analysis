@@ -65,8 +65,10 @@ test_that("table1@1 is a registered describe route with the documented schema an
   expect_identical(r$version, 1L)
   expect_identical(r$family, "describe")
   expect_identical(r$purpose, "describe")
-  expect_identical(r$estimand$population, "analysed sample")
-  expect_identical(r$estimand$summary, "baseline characteristics by group")
+  # the estimand is a function of the spec (it validates the engine fields with it)
+  est <- r$estimand(list(by = "g", vars = "x", seed = 1L))
+  expect_identical(est$population, "analysed sample")
+  expect_identical(est$summary, "baseline characteristics by group")
   sc <- r$spec_schema
   expect_identical(sc$by$type, "chr");        expect_true(sc$by$required)
   expect_identical(sc$vars$type, "chr");      expect_true(sc$vars$required)

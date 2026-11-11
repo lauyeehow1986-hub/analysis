@@ -61,6 +61,7 @@
   .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
   .sr_cluster_se_check(spec, .sr_lm_se(spec))
+  .sr_engine_check(spec, "lm")
   invisible(TRUE)
 }
 
@@ -341,6 +342,8 @@
     marginal = list(type = "lgl", required = FALSE, default = FALSE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
     exclude_rows = list(type = "num", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

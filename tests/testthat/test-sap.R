@@ -70,7 +70,7 @@ test_that(".sr_mem_method maps a route id to an sr_mem_estimate method", {
   expect_identical(.sr_mem_method(c("lm_fit", "lm", "lmm")), rep("lm", 3L))
   expect_identical(.sr_mem_method(c("logistic", "modpois")), rep("glm", 2L))
   expect_identical(.sr_mem_method(c("cox", "rmst")), rep("cox", 2L))
-  expect_identical(.sr_mem_method(c("table1", "stub_sap", "anything")), rep("lm", 3L))
+  expect_identical(.sr_mem_method(c("table1", "stub_sap", "anything")), c("table1", "lm", "lm"))
   expect_identical(.sr_mem_method("cox"), "cox")
 })
 
@@ -347,7 +347,7 @@ test_that("an analysis too large for an in-memory fit refuses the lock; a warn r
   expect_true(any(sr_readiness(p, "t")$status == "warn"))      # no data dictionary is attached
   expect_false(any(sr_sap_check(.fx_feasible(p))$status == "block"))
   .sap_mock("sr_mem_estimate", function(project, table, cols, method = "glm", ...) {
-    list(fits = FALSE, reason = "mock", need_gb = 99, budget_gb = 1, route = "bigglm", rows = 1, p = 1)
+    list(fits = FALSE, reason = "mock", need_gb = 99, budget_gb = 1, route = "stream", rows = 1, p = 1)
   })
   chk <- sr_sap_check(p)
   expect_true(any(chk$status == "block" & grepl("too large for an in-memory fit", chk$detail)))

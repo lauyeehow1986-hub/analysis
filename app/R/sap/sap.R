@@ -30,7 +30,7 @@ SR_SAP_METHODS <- c("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "non
 SR_SAP_ACTIONS <- c("add_sensitivity", "replace_primary")
 
 #' The `method` argument of sr_mem_estimate for a route id: lm* -> "lm", logistic* / modpois* -> "glm",
-#' cox* / rmst* -> "cox", anything else (table1, stub routes) -> "lm". Vectorised over `route_id`.
+#' cox* / rmst* -> "cox", table1 -> "table1", anything else (stub routes) -> "lm". Vectorised over `route_id`.
 .sr_mem_method <- function(route_id) {
   id <- as.character(route_id)
   starts <- function(p) !is.na(id) & startsWith(id, p)
@@ -38,6 +38,7 @@ SR_SAP_ACTIONS <- c("add_sensitivity", "replace_primary")
   out[starts("logistic") | starts("modpois")] <- "glm"
   out[starts("cox") | starts("rmst")] <- "cox"
   out[starts("lm")] <- "lm"
+  out[starts("table1")] <- "table1"
   out
 }
 

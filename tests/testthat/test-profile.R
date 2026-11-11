@@ -328,17 +328,17 @@ test_that("once the SAP is locked the outcome row is filled in", {
 
 # ---- memory estimate --------------------------------------------------------------------------------
 
-test_that("5e8 rows do not fit the locked16 budget and route glm to bigglm; 2000 rows are in memory", {
+test_that("5e8 rows do not fit the locked16 budget and route glm to stream; 2000 rows are in memory", {
   p <- .pf_cardiac()
   cols <- c("age", "sbp", "weight_kg", "sex", "site")
   big <- sr_mem_estimate(p, "cardiac", cols, "glm", profile = "locked16", override_rows = 5e8)
   expect_false(big$fits)
-  expect_identical(big$route, "bigglm")
+  expect_identical(big$route, "stream")
   expect_identical(big$budget_gb, 10)
   expect_gt(big$need_gb, 8)
   expect_named(big, c("need_gb", "budget_gb", "fits", "route", "reason", "rows", "p"))
   expect_match(big$reason, "GB")
-  expect_match(big$reason, "bigglm")
+  expect_match(big$reason, "stream")
   expect_match(big$reason, "locked16")
   small <- sr_mem_estimate(p, "cardiac", cols, "glm", profile = "locked16")
   expect_true(small$fits)
@@ -353,7 +353,7 @@ test_that("the other methods route cox to bam and ml to subsample when the data 
   cols <- c("age", "sbp", "weight_kg")
   expect_identical(sr_mem_estimate(p, "cardiac", cols, "cox", profile = "locked16", override_rows = 5e8)$route, "bam")
   expect_identical(sr_mem_estimate(p, "cardiac", cols, "ml", profile = "locked16", override_rows = 5e8)$route, "subsample")
-  expect_identical(sr_mem_estimate(p, "cardiac", cols, "lm", profile = "locked16", override_rows = 5e8)$route, "bigglm")
+  expect_identical(sr_mem_estimate(p, "cardiac", cols, "lm", profile = "locked16", override_rows = 5e8)$route, "stream")
   for (m in c("glm", "lm", "cox", "ml")) {
     expect_identical(sr_mem_estimate(p, "cardiac", cols, m, profile = "locked16")$route, "in_memory", info = m)
   }
