@@ -43,6 +43,27 @@ test_that("coerce: each validation message", {
   expect_false(grepl("sekrit", err("jev_timeout", "sekrit"), fixed = TRUE))
 })
 
+test_that("coerce: jev_url must be an http(s) URL with a host, checked without any network call", {
+  err <- function(v) tryCatch({ .sr_set_coerce("jev_url", v); NA_character_ }, error = function(e) conditionMessage(e))
+  msg <- paste0("jev_url must be an http:// or https:// URL with a host name, for example ",
+                "https://api.example.org/v1 (no spaces, no user:password@)")
+  good <- c("https://api.typesafe.ai/v1/systemone", "http://localhost:8080", "HTTPS://Example.org",
+            "https://10.0.0.5/v1?x=1", "http://[::1]:9000/", "https://example.org.", "https://a-b.example.org#f")
+  for (u in good) expect_identical(.sr_set_coerce("jev_url", u), u, info = u)
+  expect_identical(.sr_set_coerce("jev_url", "  https://example.org/v1  "), "https://example.org/v1")
+  bad <- c("example.org", "ftp://example.org", "https://", "https:///v1", "https://exa mple.org",
+           "https://user:pw@example.org", "https://example.org:0", "https://example.org:70000",
+           "https://-bad-.example.org", "https://a..b", "http//example.org", "file:///C:/x", "javascript:x")
+  for (u in bad) expect_identical(err(u), msg, info = u)
+  expect_identical(err(""), "jev_url must not be empty")
+  # an invalid URL leaves the previous one in place (in air-gap mode too: nothing is contacted)
+  withr::local_options(sr.mode = "airgap", sr.jev_url = NULL)
+  expect_identical(.sr_set_apply("jev_url", "https://example.org/v1"), "https://example.org/v1")
+  expect_identical(getOption("sr.jev_url"), "https://example.org/v1")
+  expect_error(.sr_set_apply("jev_url", "not a url"), "jev_url must be an http")
+  expect_identical(getOption("sr.jev_url"), "https://example.org/v1")
+})
+
 test_that("apply: an invalid mode restores the previous option", {
   withr::local_options(sr.mode = "airgap")
   expect_error(.sr_set_apply("mode", "bogus"), "mode must be airgap or connected")

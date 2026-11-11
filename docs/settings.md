@@ -35,7 +35,7 @@ worker already holds its snapshot of the options.
 | `digits` | whole number | 2 | "digits must be a whole number, 0 or more" |
 | `router_mask` | on / off | off | "router_mask must be on or off" |
 | `jev_key` | masked input | not set | "jev_key must not be empty" |
-| `jev_url` | text | `https://api.typesafe.ai/v1/systemone` | must not be empty |
+| `jev_url` | text | `https://api.typesafe.ai/v1/systemone` | must not be empty; "jev_url must be an http:// or https:// URL with a host name, ..." (a DNS name, IPv4 or `[IPv6]` host, optional port 1-65535, no spaces, no `user:password@`; checked by pattern only, never resolved or contacted) |
 | `jev_model` | text | `jev-latest` | must not be empty |
 | `jev_timeout` | number (s) | 20 | "jev_timeout must be a positive number of seconds" |
 | `freeze_full_max_bytes` | number (bytes) | 2147483648 (2 GiB) | "... must be a finite number of bytes, 0 or more" |

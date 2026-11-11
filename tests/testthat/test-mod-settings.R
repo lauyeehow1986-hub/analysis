@@ -20,6 +20,21 @@ test_that("set and reset digits", {
   })
 })
 
+test_that("a Jev URL that is not an http(s) URL with a host is refused with a clear message", {
+  withr::local_options(sr.jev_url = NULL, sr.mode = "airgap")
+  withr::defer(options(sr.jev_url = NULL))
+  seen <- .ui_spy_notify()
+  shiny::testServer(mod_settings_server, args = .ms_args(), {
+    session$setInputs(val_jev_url = "api.example.org/v1", set_jev_url = 1)
+    expect_null(getOption("sr.jev_url"))
+    expect_true(any(grepl("Settings: jev_url must be an http:// or https:// URL with a host name", seen$msg,
+                          fixed = TRUE)))
+    expect_true(any(seen$type == "error"))
+    session$setInputs(val_jev_url = "https://api.example.org/v1", set_jev_url = 2)
+    expect_identical(getOption("sr.jev_url"), "https://api.example.org/v1")
+  })
+})
+
 test_that("connected needs exactly CONNECT", {
   withr::local_options(sr.mode = "airgap")
   withr::defer(options(sr.mode = NULL))
