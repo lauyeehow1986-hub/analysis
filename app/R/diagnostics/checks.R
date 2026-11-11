@@ -587,7 +587,8 @@ sr_reducer_register("diag.completed", function(state, event) {
 #' prologue of sr_run), behind the fits cache keyed over list(check, route, spec). A check that fails
 #' to compute is recorded with verdict "warn", value NA and the (path-scrubbed) reason. Refused
 #' (nothing is written) for a read-only project, an unknown analysis, an unlocked SAP, a table that
-#' changed after the lock, an analysis without an ok run, or a check that does not apply.
+#' changed after the lock, an analysis without an ok run, a check that does not apply, or an analysis on
+#' the streaming engine (ruling R4). The spec is the memory run spec (.sr_run_spec).
 #' @param checks NULL (every applicable check) or a character vector of check ids
 #' @return the project
 sr_diag_run <- function(project, analysis_id, checks = NULL, timeout = 3600) {
@@ -596,6 +597,10 @@ sr_diag_run <- function(project, analysis_id, checks = NULL, timeout = 3600) {
   a <- project$state$analyses[[analysis_id]]
   if (is.null(a)) stop("unknown analysis ", .sr_sap_q(analysis_id), call. = FALSE)
   if (sr_blind(project)) stop("the SAP is not locked", call. = FALSE)
+  # the checks read the in-memory extract (ruling R4)
+  if (identical(.sr_engine_effective(project, analysis_id), "stream")) {
+    stop("diagnostics for a streaming analysis arrive in P1e.3", call. = FALSE)
+  }
   locked_hash <- project$state$sap$lock$tables[[a$table]]$store_hash
   if (is.null(locked_hash)) stop("table '", a$table, "' was not part of the SAP lock", call. = FALSE)
   if (!identical(sr_store_hash(sr_store_manifest(project, a$table)), locked_hash)) {
@@ -605,7 +610,7 @@ sr_diag_run <- function(project, analysis_id, checks = NULL, timeout = 3600) {
   if (is.null(r) || is.null(r$ok_key) || is.na(r$ok_key)) {
     stop("analysis ", .sr_sap_q(analysis_id), " has not run successfully", call. = FALSE)
   }
-  spec <- .sr_spec_from_state(a$spec)
+  spec <- .sr_run_spec(project, analysis_id, engine = "memory")
   ap <- .sr_diag_applies(a$route, spec)
   if (is.null(checks)) {
     checks <- ap

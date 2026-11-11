@@ -138,8 +138,9 @@ test_that("SQL Table 1 refusals match in-memory texts", {
   }
   s <- c(spec, list(engine = "stream", stream_chunk = 1000L))
   body <- sr_compile(sr_route_get("table1", 1L), s)
-  code <- paste(.sr_run_prologue_stream(list(rel = rel, sha = sha)), body, sep = "\n")
-  list(code = code, value = eval(parse(text = code), .st1_env(proj)), body = body)
+  prologue <- .sr_run_prologue_stream(list(rel = rel, sha = sha), threads = .sr_stream_threads("table1"))
+  code <- paste(prologue, body, sep = "\n")
+  list(code = code, value = eval(parse(text = code), .st1_env(proj)), body = body, prologue = prologue)
 }
 
 test_that("the stream Table 1 body matches the in-memory value and opens with one thread", {
@@ -150,8 +151,15 @@ test_that("the stream Table 1 body matches the in-memory value and opens with on
   r <- .st1_run(df, spec)
   .st1_expect_equal(r$value, .h_t1_main(df, "arm", vars, "x2"))
   expect_false(any(utf8ToInt(r$body) > 127L))
-  expect_match(r$body, ".h_st_open(", fixed = TRUE)
-  expect_match(r$body, "1L, sr_duck_temp", fixed = TRUE)
+  # one connection, opened by the prologue with the literal 1L threads (R14); the body opens none
+  expect_false(grepl(".h_st_open(", r$body, fixed = TRUE))
+  expect_false(grepl("dbDisconnect", r$body, fixed = TRUE))
+  expect_match(r$prologue, ".h_st_open(.sr_xf, sr_duck_memory, 1L, sr_duck_temp)", fixed = TRUE)
+  expect_false(grepl("sr_duck_threads", r$prologue, fixed = TRUE))
+  ex0 <- list(rel = paste0("data/extracts/", strrep("a", 64L), ".parquet"), sha = strrep("a", 64L))
+  expect_match(.sr_run_prologue_stream(ex0), ".h_st_open(.sr_xf, sr_duck_memory, sr_duck_threads, sr_duck_temp)",
+               fixed = TRUE)
+  expect_error(.sr_run_prologue_stream(ex0, threads = 0), "whole number")
   expect_error(.sr_emit_check(r$body, "analysis"), NA)
 })
 

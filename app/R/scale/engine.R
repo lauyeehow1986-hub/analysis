@@ -145,3 +145,66 @@ sr_engine_switch <- function(project, analysis_id, engine, reason) {
   sr_project_append(project, "engine.switched",
                     list(analysis = analysis_id, from = from, to = engine, reason = trimws(reason)))
 }
+
+# ---- the run spec, progress and the Methods fragment (rulings R6, R7, R15, R17) ------------------------
+
+#' `spec` as it runs on `engine` (ruling R6). For "memory" the fields `engine` and `stream_chunk` are removed,
+#' so a spec written before P1e compiles and hashes byte-for-byte as it did. For "stream" `engine` is set to
+#' "stream" and `stream_chunk` (an integer) to `chunk`, else the spec's own value, else
+#' sr_opt("stream_chunk_rows", 250000) (ruling R7).
+.sr_spec_for_engine <- function(spec, engine, chunk = NULL) {
+  if (!identical(engine, "stream")) {
+    spec[["engine"]] <- NULL
+    spec[["stream_chunk"]] <- NULL
+    return(spec)
+  }
+  ch <- chunk %||% spec[["stream_chunk"]] %||% sr_opt("stream_chunk_rows", 250000)
+  ch <- suppressWarnings(as.numeric(ch))
+  if (!(length(ch) == 1L && is.finite(ch) && ch >= 1 && ch == floor(ch) && ch <= .Machine$integer.max)) {
+    stop("stream_chunk must be a whole number >= 1", call. = FALSE)
+  }
+  spec[["engine"]] <- "stream"
+  spec[["stream_chunk"]] <- as.integer(ch)
+  spec
+}
+
+#' The spec an analysis runs with: its state spec on `engine` (NULL: the effective engine,
+#' .sr_engine_effective) with `chunk` (NULL: the spec's, else the option's). Used by sr_run, sr_result,
+#' .sr_script_block and sr_diag_run.
+.sr_run_spec <- function(project, id, engine = NULL, chunk = NULL) {
+  a <- project$state$analyses[[id]]
+  if (is.null(a)) stop("unknown analysis '", id, "'", call. = FALSE)
+  if (is.null(engine)) engine <- .sr_engine_effective(project, id)
+  .sr_spec_for_engine(.sr_spec_from_state(a$spec), engine, chunk)
+}
+
+#' The progress file of a streaming job (ruling R15): <project>/data/tmp/progress-<job>.json. The worker
+#' gets it as the input sr_progress_file, outside the cache key, and writes {"pass": k, "max": m} to it.
+.sr_progress_path <- function(project, job) {
+  file.path(project$paths$dir, "data", "tmp", paste0("progress-", job, ".json"))
+}
+
+#' The DuckDB thread count the stream prologue of `route_id` emits as a literal, or NULL for the input
+#' sr_duck_threads. Table 1 runs on one thread (ruling R14): one thread fixes the summation order of the SQL
+#' aggregates, and the count is then set by the lockdown with no SET after it.
+.sr_stream_threads <- function(route_id) {
+  if (identical(as.character(route_id), "table1")) 1L else NULL
+}
+
+#' The engine Methods sentence of a streamed result (spec section 7), with the numbers as digits (the writer
+#' lifts them into placeholders). `kind` is "glm" (iteratively reweighted least squares), "lm" (least
+#' squares) or "table1" (over all rows: the overall n plus the rows excluded for a missing group).
+.sr_engine_fragment <- function(value, kind) {
+  if (identical(kind, "table1")) {
+    n <- value$n
+    tot <- as.numeric(n[length(n)]) + as.numeric(value$n_excluded %||% 0)
+    return(paste0("Descriptive statistics were computed exactly by SQL aggregation over all ",
+                  format(tot, big.mark = ",", scientific = FALSE, trim = TRUE), " rows."))
+  }
+  how <- if (identical(kind, "lm")) "least squares" else "iteratively reweighted least squares"
+  paste0("The analysis dataset (", format(value$n, big.mark = ",", scientific = FALSE, trim = TRUE),
+         " rows) exceeded the in-memory budget, so the models were fitted by streaming ", how,
+         " over fixed chunks of ", format(value$chunk, scientific = FALSE, trim = TRUE),
+         " rows. This gives the same maximum-likelihood estimates and standard errors as standard software ",
+         "within numerical precision.")
+}

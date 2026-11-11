@@ -146,10 +146,12 @@ sr_reducer_register("sap.locked", function(state, event) {
 }
 
 # Refuses a spec the route cannot compile (R19): an analysis that can never run is refused when it is
-# added, not at its first run. Shared by sr_sap_add and sr_analysis_add.
+# added, not at its first run. Shared by sr_sap_add and sr_analysis_add. The spec is compiled as it would
+# run (.sr_spec_for_engine): on the streaming engine when it asks for "stream" (stream_chunk filled as the
+# run fills it), else in memory.
 .sr_sap_compiles <- function(r, spec, id, route) {
   bad <- tryCatch({
-    sr_compile(r, spec)
+    sr_compile(r, .sr_spec_for_engine(spec, if (identical(spec[["engine"]], "stream")) "stream" else "memory"))
     NULL
   }, error = function(e) conditionMessage(e))
   if (!is.null(bad)) {

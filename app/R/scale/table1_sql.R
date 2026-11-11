@@ -223,10 +223,10 @@
   list(by = by, groups = lv, n = nall, n_excluded = as.integer(total - sum(nvec)), vars = out)
 }
 
-#' The stream body of table1@1 (spec$engine = "stream"). It runs after .sr_run_prologue_stream(); the
-#' fixed prologue opens `.sr_con` with sr_duck_threads, so the body opens its own connection on the same
-#' extract with the literal 1L threads (R14: one thread fixes the summation order and no SET follows the
-#' lockdown), closes the first one, and returns the value of .h_t1_sql_main().
+#' The stream body of table1@1 (spec$engine = "stream"). It runs after
+#' .sr_run_prologue_stream(ex, threads = .sr_stream_threads("table1")), whose `.sr_con` is opened with the
+#' literal 1L threads (R14: one thread fixes the summation order and no SET follows the lockdown), and
+#' returns the value of .h_t1_sql_main().
 .sr_t1_compile_stream <- function(spec) {
   a <- .sr_t1_spec_args(spec)
   helpers <- c(
@@ -236,11 +236,6 @@
   )
   paste(c(
     helpers,
-    ".sr_con0 <- .sr_con",
-    ".sr_xp <- gsub(\"''\", \"'\", substr(sr_src, 15L, nchar(sr_src) - 2L), fixed = TRUE)",
-    ".sr_con <- .h_st_open(.sr_xp, sr_duck_memory, 1L, sr_duck_temp)",
-    "DBI::dbDisconnect(.sr_con0, shutdown = TRUE)",
-    "rm(.sr_con0, .sr_xp)",
     sprintf(".h_t1_sql_main(.sr_con, sr_src, %s, %s, %s)", .sr_lit(a$by), .sr_lit(a$vars), .sr_lit(a$nn))
   ), collapse = "\n")
 }

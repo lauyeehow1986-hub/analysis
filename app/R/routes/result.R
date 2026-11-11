@@ -113,3 +113,20 @@ sr_result_check <- function(presented, route) {
   presented$flags <- flags
   presented
 }
+
+#' The presented result of a route (ruling R17): route$present(value, spec), plus the engine Methods
+#' fragment `fragments$engine` (.sr_engine_fragment) when the value or the run spec is a streaming one
+#' (value$engine or spec$engine is "stream"; Table 1's value is the in-memory one, so its run spec says
+#' it). Every caller presents through this, not through route$present.
+sr_present <- function(route, value, spec) {
+  out <- route$present(value, spec)
+  stream <- identical(value[["engine"]], "stream") || identical(spec[["engine"]], "stream")
+  if (stream && is.list(out)) {
+    id <- as.character(route$id)
+    kind <- if (identical(id, "table1")) "table1" else if (startsWith(id, "lm")) "lm" else "glm"
+    if (identical(kind, "table1") || !is.null(value$n)) {
+      out$fragments[["engine"]] <- .sr_engine_fragment(value, kind)
+    }
+  }
+  out
+}
