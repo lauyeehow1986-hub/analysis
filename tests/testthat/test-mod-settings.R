@@ -68,6 +68,21 @@ test_that("settings are locked during a job", {
   })
 })
 
+test_that("the editors disable when a job starts and enable when it ends", {
+  flag <- shiny::reactiveVal(FALSE)
+  shiny::testServer(mod_settings_server, args = list(busy = flag), {
+    html <- function() paste(output$editors$html, collapse = " ")
+    session$flushReact()
+    expect_false(grepl("<fieldset disabled", html(), fixed = TRUE))
+    flag(TRUE)
+    session$flushReact()
+    expect_true(grepl("<fieldset disabled", html(), fixed = TRUE))
+    flag(FALSE)
+    session$flushReact()
+    expect_false(grepl("<fieldset disabled", html(), fixed = TRUE))
+  })
+})
+
 test_that("the key editor is emptied after a set and no output holds it", {
   withr::local_options(sr.jev_key = NULL)
   withr::defer(options(sr.jev_key = NULL))

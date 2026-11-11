@@ -43,7 +43,9 @@ mod_settings_server <- function(id, busy) {
     version <- shiny::reactiveVal(0L)
     edited <- shiny::reactiveVal(character())
     cat <- .sr_set_catalogue()
+    # busy_now() is isolated (for handlers); the editors read busy() reactively so they follow a job's start and end
     busy_now <- function() isTRUE(tryCatch(shiny::isolate(busy()), error = function(e) FALSE))
+    busy_live <- function() isTRUE(tryCatch(busy(), error = function(e) FALSE))
 
     # the value an editor starts with: the effective value, except that the key and an unset actor show nothing
     current <- function(nm, editor) {
@@ -68,7 +70,7 @@ mod_settings_server <- function(id, busy) {
 
     output$editors <- shiny::renderUI({
       version()
-      locked <- busy_now()
+      locked <- busy_live()
       rows <- lapply(seq_len(nrow(cat)), function(i) {
         nm <- cat$name[i]
         ed <- cat$editor[i]

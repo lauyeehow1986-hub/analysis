@@ -1,6 +1,6 @@
 options(shiny.autoload.r = FALSE)  # app/global.R is the only loader; never auto-source app/R/*.R
 
-# StatRouter shell. The Project, Data, Design, SAP, Analyses, Write, Archive and Settings panels work (all but the first once a project is open); the rest are placeholders.
+# StatRouter shell. The Project, Data, Design, SAP, Analyses, Write, Archive and Settings panels work; Project and Settings are always visible, the others appear once a project is open. Reviewer is a placeholder.
 # With autoloading off, Shiny runs this file with the app directory as the working directory and does
 # not source global.R for an app.R app, so load it here unless a caller already did.
 if (!exists("sr_root", inherits = TRUE)) source("global.R", local = FALSE, encoding = "UTF-8")
