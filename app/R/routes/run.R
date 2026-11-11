@@ -151,8 +151,14 @@ sr_reducer_register("run.cancelled", function(state, event) {
   sr_store_view(project, table)
   con <- sr_duck(project)
   q <- DBI::dbQuoteIdentifier(con, cols)
-  sr_duck_query(con, sprintf("SELECT %s FROM %s ORDER BY %s", paste(q, collapse = ", "),
-                             DBI::dbQuoteIdentifier(con, table), paste(q, collapse = ", ")))
+  sr_duck_query(con, sprintf("SELECT %s FROM %s %s", paste(q, collapse = ", "),
+                             DBI::dbQuoteIdentifier(con, table), .sr_extract_order_sql(con, cols)))
+}
+
+#' The `ORDER BY <every col>` clause both extracts use, so that the stream extract's `.sr_row` equals
+#' the row position of `.sr_extract_frame` (the connection does not preserve insertion order).
+.sr_extract_order_sql <- function(con, cols) {
+  paste("ORDER BY", paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", "))
 }
 
 #' Materialise `cols` of `table` (.sr_extract_frame()) serialised (version 3) to
