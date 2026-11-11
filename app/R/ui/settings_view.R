@@ -2,7 +2,8 @@
 # applying and resetting an option, and the table of effective values. No Shiny here.
 #
 # A setting is the option sr.<name> (sr_opt falls back to the env var SR_<NAME>, then to the default). Edits
-# are session-only: nothing is written to disk and nothing is a project event. The Jev key is held only as
+# are process-wide R options, shared by every browser tab of this R process (last set wins) and lost when it
+# exits: nothing is written to disk and nothing is a project event. The Jev key is held only as
 # options(sr.jev_key); no function here returns or prints its value.
 
 # The settings the panel edits, in the order of the panel: name, label, editor kind and the default the core's

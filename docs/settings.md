@@ -1,8 +1,11 @@
 # StatRouter settings guide (P1d UI)
 
-The Settings tab is always visible. It edits the user-facing settings for **this session only**. Nothing is
-written to disk and nothing is a project event: the audit log never records a settings change, and a restart
-starts again from the environment variables and the defaults.
+The Settings tab is always visible. It edits the user-facing settings as **process-wide R options**
+(`options(sr.<name>)`) of the app's R process. They are not per browser tab: every browser tab or Shiny
+session served by that one R process shares them, and the last Set or Reset from any tab wins (another tab
+sees the change the next time it re-reads a setting). Nothing is written to disk and nothing is a project
+event: the audit log never records a settings change, and when the R process exits the edits are lost; a
+restart starts again from the environment variables and the defaults.
 
 StatRouter is a research and governance tool, not for clinical or diagnostic use.
 
@@ -14,7 +17,7 @@ and its source:
 
 | Source | Meaning |
 |---|---|
-| edited here | set in this session through the panel |
+| edited here | set through the panel in this R process (from any browser tab it serves) |
 | option | an `sr.<name>` option set some other way |
 | env | the `SR_<NAME>` environment variable |
 | default | the built-in default |

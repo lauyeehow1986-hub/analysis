@@ -1,10 +1,11 @@
-# ui/mod_settings.R - Shiny module: the Settings panel (session-only settings, see ui/settings_view.R).
+# ui/mod_settings.R - Shiny module: the Settings panel (process-wide settings, see ui/settings_view.R).
 #
 # mod_settings_server(id, busy) takes `busy` (a reactive or function, TRUE while any job runs) and returns
 # list(version): a counter reactive that goes up by one after every successful set or reset. Write, Archive
 # and the top-bar badges watch it.
 #
-# Edits are options(sr.<name>) for this session only: nothing is written to disk, nothing is a project event,
+# Edits are options(sr.<name>) of this R process, shared by every browser tab it serves (last set wins), and
+# last until the process exits: nothing is written to disk, nothing is a project event,
 # and the audit log never records them. The Jev key is a password input; it is cleared right after a set, is
 # held only as options(sr.jev_key), and is never rendered back (the table says "set" or "not set"). While a job
 # runs every set and reset is refused and the editors are disabled (a worker already holds its snapshot).
@@ -14,7 +15,7 @@ mod_settings_ui <- function(id) {
   shiny::tagList(
     .sr_ui_card("Effective settings",
       shiny::p(class = "text-muted small",
-               "Edits last for this session only; a restart starts again from the environment and the defaults.",
+               "Edits apply to this app process and every open browser tab shares them; a restart starts again from the environment and the defaults.",
                "Settings are not project events."),
       shiny::tableOutput(ns("table"))),
     .sr_ui_card("Edit", shiny::uiOutput(ns("editors")))
