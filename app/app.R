@@ -1,11 +1,11 @@
 options(shiny.autoload.r = FALSE)  # app/global.R is the only loader; never auto-source app/R/*.R
 
-# StatRouter shell. The Project, Data, Design, SAP and Analyses panels work (the last four once a project is open); the rest are placeholders.
+# StatRouter shell. The Project, Data, Design, SAP, Analyses, Write and Archive panels work (all but the first once a project is open); the rest are placeholders.
 # With autoloading off, Shiny runs this file with the app directory as the working directory and does
 # not source global.R for an app.R app, so load it here unless a caller already did.
 if (!exists("sr_root", inherits = TRUE)) source("global.R", local = FALSE, encoding = "UTF-8")
 
-.sr_panel_names <- c("Archive", "Reviewer", "Settings")
+.sr_panel_names <- c("Reviewer", "Settings")
 
 .sr_placeholder_panel <- function(title) {
   bslib::nav_panel(title, bslib::card(bslib::card_body(shiny::p(class = "text-muted",
@@ -37,7 +37,8 @@ ui <- do.call(bslib::page_navbar, c(
     bslib::nav_panel("SAP", mod_sap_ui("sap"), value = "SAP"),
     bslib::nav_panel(shiny::span("Analyses ", shiny::uiOutput("analyses-badge", inline = TRUE)),
                      mod_analyses_ui("analyses"), value = "Analyses"),
-    bslib::nav_panel("Write", mod_write_ui("write"), value = "Write")
+    bslib::nav_panel("Write", mod_write_ui("write"), value = "Write"),
+    bslib::nav_panel("Archive", mod_archive_ui("archive"), value = "Archive")
   ),
   lapply(.sr_panel_names, .sr_placeholder_panel),
   list(bslib::nav_spacer(), .sr_badges())
@@ -59,9 +60,11 @@ server <- function(input, output, session) {
   mod_design_server("design", project, busy_for())
   mod_sap_server("sap", project, busy_for())
   mod_write_server("write", project, busy_for(), settings = function() 0L)
-  # The Data, Design, SAP and Analyses panels are hidden until a project is open.
+  ar <- mod_archive_server("archive", project, busy_for("archive"))
+  shiny::observe(flags$archive <- isTRUE(ar$running()))
+  # The Data, Design, SAP, Analyses, Write and Archive panels are hidden until a project is open.
   shiny::observe({
-    for (p in c("Data", "Design", "SAP", "Analyses", "Write")) {
+    for (p in c("Data", "Design", "SAP", "Analyses", "Write", "Archive")) {
       if (is.null(project())) bslib::nav_hide("main_nav", p) else bslib::nav_show("main_nav", p)
     }
   })

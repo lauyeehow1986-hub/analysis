@@ -33,3 +33,24 @@
        terms = list(list(var = "age"), list(var = "z1")), marginal = TRUE, layers = .fx_writer_layers(),
        seed = 42L, event_value = "yes")
 }
+
+# Replace the global function `name` for the rest of the calling test; returns the original.
+.ui_stub <- function(name, fn, env = parent.frame()) {
+  old <- get(name, envir = globalenv())
+  assign(name, fn, envir = globalenv())
+  withr::defer(assign(name, old, envir = globalenv()), envir = env)
+  invisible(old)
+}
+
+# A stand-in for .sr_job_spawn whose job stays pending until the test calls ctl$resolve(value) or
+# ctl$reject(error) (no worker process); each call is recorded in ctl$calls (fn, args, opts).
+.ui_pending_spawn <- function(ctl) {
+  ctl$calls <- list()
+  function(app_dir, fn, args = list(), opts = list()) {
+    ctl$calls[[length(ctl$calls) + 1L]] <- list(app_dir = app_dir, fn = fn, args = args, opts = opts)
+    promises::promise(function(resolve, reject) {
+      ctl$resolve <- resolve
+      ctl$reject <- reject
+    })
+  }
+}
