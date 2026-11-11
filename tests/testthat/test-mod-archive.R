@@ -369,3 +369,98 @@ test_that("a background export that ends ok is settled with the project writable
     expect_true(any(grepl(paste0("Exported ", normalizePath(path, winslash = "/", mustWork = FALSE)), seen$msg, fixed = TRUE)))
   })
 })
+
+# Start a pending export in the running testServer session; returns the destination path.
+.ar_start_pending <- function(session, td, name = "a.srproj") {
+  path <- file.path(td, name)
+  session$setInputs(ex_label = "v1", ex_data = "full", ex_path = path, export = sample.int(1e6, 1))
+  path
+}
+
+test_that("a cleanup that throws still releases the busy flag and the project", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) TRUE)
+  .ui_stub(".sr_ar_export_cleanup", function(...) stop("disk on fire"))
+  td <- withr::local_tempdir()
+  rv <- shiny::reactiveVal(.ar_frozen())
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    .ar_start_pending(session, td)
+    expect_true(running())
+    session$setInputs(ex_cancel = 1)
+    expect_false(running())
+    expect_false(isTRUE(rv()$readonly))
+    expect_true(any(grepl("disk on fire", seen$msg, fixed = TRUE)))
+  })
+})
+
+test_that("a verify whose display throws still releases the busy flag", {
+  withr::local_options(sr.run_sync = TRUE)
+  seen <- .ui_spy_notify()
+  .ui_stub(".sr_ar_verify_rows", function(v) stop("cannot show"))
+  rv <- shiny::reactiveVal(.ar_frozen())
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    session$setInputs(freeze_pick = "v1", data_verify = 1)
+    expect_false(running())
+    expect_true(any(grepl("cannot show", seen$msg, fixed = TRUE)))
+    # the next job is not refused as busy
+    session$setInputs(data_verify = 2)
+    expect_false(any(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)))
+  })
+})
+
+test_that("cancel settles when the kill finds no worker, and stays cancellable when the kill fails", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  kill <- "gone"
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) {
+    if (identical(kill, "fail")) stop("could not stop the analysis worker (process 1 still running)")
+    identical(kill, "killed")
+  })
+  td <- withr::local_tempdir()
+  rv <- shiny::reactiveVal(.ar_frozen())
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    n0 <- .ar_n_events(rv)
+    path <- .ar_start_pending(session, td)
+    writeLines("x", paste0(path, ".partial"))
+    # a live process the kill could not stop: nothing is cleaned, the job stays and can be cancelled again
+    kill <<- "fail"
+    session$setInputs(ex_cancel = 1)
+    expect_true(running())
+    expect_true(rv()$readonly)
+    expect_true(file.exists(paste0(path, ".partial")))
+    expect_true(any(grepl("still running", seen$msg, fixed = TRUE)))
+    # the worker never started / is gone (the kill returns FALSE): cleanup and release
+    kill <<- "gone"
+    session$setInputs(ex_cancel = 2)
+    expect_false(running())
+    expect_false(isTRUE(rv()$readonly))
+    expect_false(file.exists(paste0(path, ".partial")))
+    expect_identical(.ar_n_events(rv), n0)
+  })
+})
+
+test_that("closing the session mid-export kills the worker and removes the partial files", {
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  killed <- FALSE
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) {
+    killed <<- TRUE
+    TRUE
+  })
+  p <- .ar_frozen()
+  staging <- file.path(p$paths$dir, "out", ".srproj-v1.partial")
+  td <- withr::local_tempdir()
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_archive_server, args = .ar_args(rv), {
+    path <- .ar_start_pending(session, td)
+    writeLines("x", paste0(path, ".partial"))
+    dir.create(staging, recursive = TRUE)
+    session$close()
+    expect_true(killed)
+    expect_false(file.exists(paste0(path, ".partial")))
+    expect_false(dir.exists(staging))
+  })
+})

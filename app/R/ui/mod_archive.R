@@ -270,35 +270,52 @@ mod_archive_server <- function(id, project, busy, settings = function() 0L) {
       n_before <- job$n_before
       keep <- job$keep
       jf <- job$job_file
-      if (!is.null(job$obs)) job$obs$destroy()
-      job$obs <- job$task <- NULL
-      if (.sr_job_path_ok(jf)) try(unlink(c(jf, paste0(jf, ".part"))), silent = TRUE)
-      if (identical(kind, "verify")) {
-        if (cancelled) {
-          .sr_ui_notify("Verify cancelled", "message")
-        } else if (is.list(res) && !inherits(res, "condition") && !is.null(res$ok)) {
-          show_verify(label, TRUE, res)
-        } else {
-          .sr_ui_notify(paste0("Verify: ", .sr_am_error_text(res)), "error")
-        }
-      } else {
-        good <- is.list(res) && !inherits(res, "condition") && isTRUE(res$ok)
-        state <- if (good) "ok" else .sr_ar_export_cleanup(dir, path, label, n_before, keep)
-        reopen(dir)
-        if (good || identical(state, "finished")) {
+      # whatever happens below, the job is released: the busy flag (running()) drops and the job env is
+      # emptied, so the app is never left blocked
+      on.exit({
+        for (nm in ls(job, all.names = TRUE)) rm(list = nm, envir = job)
+        active(FALSE)
+      }, add = TRUE)
+      tryCatch({
+        if (!is.null(job$obs)) job$obs$destroy()
+        job$obs <- job$task <- NULL
+        if (.sr_job_path_ok(jf)) try(unlink(c(jf, paste0(jf, ".part"))), silent = TRUE)
+        if (identical(kind, "verify")) {
           if (cancelled) {
-            .sr_ui_notify(sprintf("Export: finished before it could be cancelled (%s)", path), "message")
+            .sr_ui_notify("Verify cancelled", "message")
+          } else if (is.list(res) && !inherits(res, "condition") && !is.null(res$ok)) {
+            show_verify(label, TRUE, res)
           } else {
-            .sr_ui_notify(paste0("Exported ", path), "message")
+            .sr_ui_notify(paste0("Verify: ", .sr_am_error_text(res)), "error")
           }
-        } else if (cancelled) {
-          .sr_ui_notify("Export cancelled: nothing was written", "message")
         } else {
-          .sr_ui_notify(paste0("Export: ", .sr_am_error_text(res)), "error")
+          good <- is.list(res) && !inherits(res, "condition") && isTRUE(res$ok)
+          state <- if (good) {
+            "ok"
+          } else {
+            tryCatch(.sr_ar_export_cleanup(dir, path, label, n_before, keep), error = function(e) {
+              .sr_ui_notify(paste0("Export cleanup: ", conditionMessage(e)), "error")
+              "failed"
+            })
+          }
+          reopen(dir)
+          if (good || identical(state, "finished")) {
+            if (cancelled) {
+              .sr_ui_notify(sprintf("Export: finished before it could be cancelled (%s)", path), "message")
+            } else {
+              .sr_ui_notify(paste0("Exported ", path), "message")
+            }
+          } else if (identical(state, "failed")) {
+            NULL                                  # the cleanup error was reported
+          } else if (cancelled) {
+            .sr_ui_notify("Export cancelled: nothing was written", "message")
+          } else {
+            .sr_ui_notify(paste0("Export: ", .sr_am_error_text(res)), "error")
+          }
         }
-      }
-      for (nm in ls(job, all.names = TRUE)) rm(list = nm, envir = job)
-      active(FALSE)
+      }, error = function(e) {
+        try(.sr_ui_notify(paste0("Archive: ", conditionMessage(e)), "error"), silent = TRUE)
+      })
       invisible(NULL)
     }
 
@@ -381,14 +398,11 @@ mod_archive_server <- function(id, project, busy, settings = function() 0L) {
       job$cancelling <- TRUE
       k <- tryCatch(.sr_job_kill(job$job_file), error = function(e) e)
       if (inherits(k, "error")) {
-        # a process survived: say so and wait for the worker's own end before taking the project back
+        # the kill failed: a process may still be running, so the job stays (and can be cancelled again)
         return(.sr_ui_notify(paste0(label, ": ", conditionMessage(k)), "error"))
       }
-      if (isFALSE(k)) {
-        # no job file or no such process: the worker is done or about to be; settle its own result
-        return(.sr_ui_notify(sprintf("%s: no running worker was found; it will be settled when it ends", label),
-                             "message"))
-      }
+      # TRUE: the worker was killed. FALSE: there is no worker to kill (it never started, its job file is
+      # missing, or its process is gone). Either way nothing runs any more: clean up and release.
       settle(NULL, TRUE)
     }
     shiny::observeEvent(input$cancel, cancel_job("verify", "Cancel"))
@@ -504,6 +518,19 @@ mod_archive_server <- function(id, project, busy, settings = function() 0L) {
       if (!nzchar(reason)) return(.sr_ui_notify("Re-baseline: give a reason", "error"))
       r <- act("Re-baseline", function(p) sr_rebaseline(p, reason))
       if (!is.null(r)) shiny::updateTextInput(session, "rb_reason", value = "")
+    })
+
+    # Closing the session mid-job kills the worker and removes what an unfinished export left behind (never
+    # a path that existed before it). It never raises; a worker that could not be killed is left alone.
+    session$onSessionEnded(function() {
+      try({
+        if (isTRUE(shiny::isolate(active())) && !is.null(job$job_file)) {
+          k <- tryCatch(.sr_job_kill(job$job_file), error = function(e) e)
+          if (!inherits(k, "error") && identical(job$kind, "export")) {
+            .sr_ar_export_cleanup(job$dir, job$path, job$label, job$n_before, job$keep)
+          }
+        }
+      }, silent = TRUE)
     })
 
     list(running = running)
