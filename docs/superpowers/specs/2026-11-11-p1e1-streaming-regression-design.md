@@ -468,3 +468,49 @@ These are inputs no task test pins down unless named:
   - the run shows progress and the badge;
   - the result matches an in-memory run of the same spec;
   - the docx Methods carries the engine sentence.
+
+## 12. Plan rulings
+
+These were decided while writing the implementation plan
+(`docs/superpowers/plans/2026-11-11-p1e1-streaming.md`), after reading the code. Where one conflicts
+with the text above, the ruling wins.
+
+- **R1** (section 6.3) Levels and knots are computed over the rows left after `exclude_rows` only,
+  not over the complete-case set, as the in-memory setup does. "After `<keep>`" in 6.3 means after
+  the exclusion.
+- **R2** glm warnings are reproduced as the value fields `converged`, `near_separation` and
+  `risk_above_one`, not as warning texts (in memory they are suppressed).
+- **R3** lm under stream: `fig = NULL`; `sigma = sqrt(RSS / (n - rank))`; `r2` and `adj_r2` from a
+  streamed total sum of squares.
+- **R4** `sr_diag_run` refuses a stream analysis: "diagnostics for a streaming analysis arrive in
+  P1e.3".
+- **R5** `run.completed` gains `engine`, `extract_kind` and `chunk`; old events read as memory, rds
+  and NULL. Export, freeze and archive take the extract extension from `ok_extract_kind`.
+- **R6** One helper `.sr_run_spec()` builds the run spec. For memory it removes `engine` and
+  `stream_chunk`, so a pre-P1e spec compiles and hashes byte-for-byte as before.
+- **R7** (section 6.2) The chunk size is the optional spec field `stream_chunk`, filled by the run
+  from `sr_opt("stream_chunk_rows", 250000)`. Compile reads it from the spec, not from options,
+  because the run key hashes the spec.
+- **R8** (section 6.2) Complete cases are decided in R per chunk with the in-memory snippets. SQL
+  drops only `exclude_rows`. Whole-column checks run on the accumulated counts with the in-memory
+  texts.
+- **R9** (section 6.6) Observed risk is accumulated in R during the first main pass over the rows
+  `.sr_glm_obs_code` uses, not by SQL `GROUP BY`.
+- **R10** The alias tolerance is `1e-7` for lm and `1e-11` for glm (the `Cdqrls` tolerance
+  `glm.fit` uses), re-decided on every IRLS pass.
+- **R11** glm robust and cluster scores follow `sandwich::estfun.glm`: mu and eta at the final beta,
+  working weights at the previous one.
+- **R12** The TSQR merge uses LINPACK `qr(rbind(M, B), tol = 0)` and stores the unpivoted R, so a
+  column that is zero in one chunk cannot permute the result.
+- **R13** (section 6.2) `exclude_rows` is always registered as a temp table `sr_excl`; there is no
+  1000-position branch.
+- **R14** The Table 1 compile passes the literal `1L` threads to `.h_st_open`, so no `SET` follows
+  the lockdown.
+- **R15** (section 6.2) The progress file is `<project>/data/tmp/progress-<job>.json`, passed to the
+  worker as `sr_progress_file`, outside the cache key. For robust SEs the marginal sums share the SE
+  pass.
+- **R16** The Streaming badge comes from the event-sourced `ok_engine`, not from the result value.
+- **R17** (section 7) A new `sr_present()` wraps `route$present` and appends the engine Methods
+  fragment for a stream value; every `present` call site uses it.
+- **R18** After the lock the SAP hash reads the frozen `lock$engines`. Before the lock it resolves
+  the engines now, and a resolution error counts as not stream.
