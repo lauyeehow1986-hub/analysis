@@ -9,6 +9,8 @@
 # instead (tests). Before the job starts the module records which of <dir>, <dir>.partial and
 # <dir>.partial.src already exist; a failed or cancelled import removes only what the job itself created
 # (.sr_im_cleanup). On success the project that was open is closed and the imported one becomes project().
+# Cancel creates a cancel file the worker checks (.sr_im_worker) before it kills the worker; when no worker
+# can be killed yet, the job settles (as a cancel) only when the worker's mirai resolves.
 # Every exit path (success, error, cancel, a rejected job) releases the busy flag.
 
 mod_import_ui <- function(id) {
@@ -70,6 +72,7 @@ mod_import_server <- function(id, project, busy) {
       dir <- job$dir
       before <- job$before
       jf <- job$job_file
+      cf <- job$cancel_file
       # whatever happens below, the job is released: the busy flag drops and the job env is emptied
       on.exit({
         for (nm in ls(job, all.names = TRUE)) rm(list = nm, envir = job)
@@ -79,6 +82,7 @@ mod_import_server <- function(id, project, busy) {
         if (!is.null(job$obs)) job$obs$destroy()
         job$obs <- job$task <- NULL
         if (.sr_job_path_ok(jf)) try(unlink(c(jf, paste0(jf, ".part"))), silent = TRUE)
+        if (.sr_job_path_ok(cf)) try(unlink(cf), silent = TRUE)
         good <- !cancelled && is.list(res) && !inherits(res, "condition") && isTRUE(res$ok)
         # a cancel that came after the worker had finished: its last step (the srproj.imported event) is on
         # disk, so the import is kept and opened (as an export the worker finished is kept)
@@ -129,13 +133,17 @@ mod_import_server <- function(id, project, busy) {
         st <- task$status()
         if (!(st %in% c("success", "error"))) return(invisible(NULL))
         res <- tryCatch(task$result(), error = function(e) e)
-        settle(res, isTRUE(job$cancelling))
+        # a worker that stopped at the cancel file is a cancel even if a later kill error reset the flag
+        settle(res, isTRUE(job$cancelling) || (is.list(res) && isTRUE(res$cancelled)))
       }, ignoreInit = TRUE)
-      started <- .sr_ui_try("Import", function() {
+      started <- tryCatch({
         task$invoke(app_dir = sr_root, fn = ".sr_im_worker", args = args, opts = .sr_job_opts())
         TRUE
-      })
-      if (!isTRUE(started)) settle(simpleError("the worker could not be started"), TRUE)
+      }, error = function(e) e)
+      # a launch failure is an error with its real reason, never a cancel
+      if (inherits(started, "error")) {
+        settle(simpleError(paste0("the worker could not be started: ", conditionMessage(started))), FALSE)
+      }
       invisible(NULL)
     }
 
@@ -148,31 +156,43 @@ mod_import_server <- function(id, project, busy) {
       if (!is.null(why)) return(.sr_ui_notify(paste0("Import: ", why), "error"))
       summary(NULL)
       jf <- tempfile("sr-im-job-")
+      cf <- tempfile("sr-im-cancel-")
       job$dir <- dir
       job$job_file <- jf
+      job$cancel_file <- cf
       job$before <- .sr_im_snapshot(dir)                 # before anything is created
       active(TRUE)
-      launch(list(arch, dir, jf))
+      launch(list(arch, dir, jf, cf))
     })
 
+    # Cancel creates the cancel file first, then kills the worker recorded in the job file. When there is no
+    # worker to kill (it has not recorded itself yet, or it is already done) the job is NOT settled here: the
+    # worker stops at the cancel file (or has finished), and its mirai is settled as a cancel when it resolves,
+    # so an import can never complete after "Import cancelled".
     shiny::observeEvent(input$cancel, {
       if (!isTRUE(shiny::isolate(active()))) return(.sr_ui_notify("Cancel: nothing is running", "message"))
       job$cancelling <- TRUE
+      if (.sr_job_path_ok(job$cancel_file)) try(file.create(job$cancel_file), silent = TRUE)
       k <- tryCatch(.sr_job_kill(job$job_file), error = function(e) e)
       if (inherits(k, "error")) {
         # the kill failed: a process may still be running, so the job stays (and can be cancelled again)
         job$cancelling <- FALSE
+        if (.sr_job_path_ok(job$cancel_file)) try(unlink(job$cancel_file), silent = TRUE)
         return(.sr_ui_notify(paste0("Cancel: ", conditionMessage(k)), "error"))
       }
-      # TRUE: the worker was killed. FALSE: there is no worker to kill. Either way nothing runs any more.
-      settle(NULL, TRUE)
+      # TRUE: the worker was killed, nothing runs any more
+      if (isTRUE(k)) return(settle(NULL, TRUE))
+      .sr_ui_notify("Cancelling: no running import worker was found; the import is settled when its worker ends",
+                    "message")
     })
 
     # Closing the session mid-job kills the worker and removes what it created (never a path that existed
-    # before it). It never raises; a worker that could not be killed is left alone.
+    # before it). It never raises; a worker that could not be killed is left alone. The cancel file stops a
+    # worker that has not recorded itself yet.
     session$onSessionEnded(function() {
       try({
         if (isTRUE(shiny::isolate(active())) && !is.null(job$job_file)) {
+          if (.sr_job_path_ok(job$cancel_file)) try(file.create(job$cancel_file), silent = TRUE)
           k <- tryCatch(.sr_job_kill(job$job_file), error = function(e) e)
           if (!inherits(k, "error")) .sr_im_cleanup(job$dir, job$before)
         }

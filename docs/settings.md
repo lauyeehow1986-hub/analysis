@@ -1,8 +1,11 @@
 # StatRouter settings guide (P1d UI)
 
-The Settings tab is always visible. It edits the user-facing settings for **this session only**. Nothing is
-written to disk and nothing is a project event: the audit log never records a settings change, and a restart
-starts again from the environment variables and the defaults.
+The Settings tab is always visible. It edits the user-facing settings as **process-wide R options**
+(`options(sr.<name>)`) of the app's R process. They are not per browser tab: every browser tab or Shiny
+session served by that one R process shares them, and the last Set or Reset from any tab wins (another tab
+sees the change the next time it re-reads a setting). Nothing is written to disk and nothing is a project
+event: the audit log never records a settings change, and when the R process exits the edits are lost; a
+restart starts again from the environment variables and the defaults.
 
 StatRouter is a research and governance tool, not for clinical or diagnostic use.
 
@@ -14,7 +17,7 @@ and its source:
 
 | Source | Meaning |
 |---|---|
-| edited here | set in this session through the panel |
+| edited here | set through the panel in this R process (from any browser tab it serves) |
 | option | an `sr.<name>` option set some other way |
 | env | the `SR_<NAME>` environment variable |
 | default | the built-in default |
@@ -35,7 +38,7 @@ worker already holds its snapshot of the options.
 | `digits` | whole number | 2 | "digits must be a whole number, 0 or more" |
 | `router_mask` | on / off | off | "router_mask must be on or off" |
 | `jev_key` | masked input | not set | "jev_key must not be empty" |
-| `jev_url` | text | `https://api.typesafe.ai/v1/systemone` | must not be empty |
+| `jev_url` | text | `https://api.typesafe.ai/v1/systemone` | must not be empty; "jev_url must be an http:// or https:// URL with a host name, ..." (a DNS name, IPv4 or `[IPv6]` host, optional port 1-65535, no spaces, no `user:password@`; checked by pattern only, never resolved or contacted) |
 | `jev_model` | text | `jev-latest` | must not be empty |
 | `jev_timeout` | number (s) | 20 | "jev_timeout must be a positive number of seconds" |
 | `freeze_full_max_bytes` | number (bytes) | 2147483648 (2 GiB) | "... must be a finite number of bytes, 0 or more" |
@@ -44,6 +47,9 @@ worker already holds its snapshot of the options.
 
 The test switches `run_sync`, `ingest_sync` and `jev_transport` are not settings and are not shown. A failed
 Set leaves the previous value in place and shows the message; the message never contains the typed value.
+
+Note: because `jev_url` is checked by pattern only, a host name with an underscore or a non-ASCII (IDN) name is
+rejected; use the ASCII (punycode) form of the name or an IP address.
 
 ## 3. Mode and CONNECT
 

@@ -2,7 +2,8 @@
 # applying and resetting an option, and the table of effective values. No Shiny here.
 #
 # A setting is the option sr.<name> (sr_opt falls back to the env var SR_<NAME>, then to the default). Edits
-# are session-only: nothing is written to disk and nothing is a project event. The Jev key is held only as
+# are process-wide R options, shared by every browser tab of this R process (last set wins) and lost when it
+# exits: nothing is written to disk and nothing is a project event. The Jev key is held only as
 # options(sr.jev_key); no function here returns or prints its value.
 
 # The settings the panel edits, in the order of the panel: name, label, editor kind and the default the core's
@@ -41,6 +42,25 @@
   x <- suppressWarnings(as.numeric(value))
   if (length(x) != 1L || !is.finite(x)) return(NA_real_)
   x
+}
+
+# TRUE when `s` is an http:// or https:// URL with a host: a DNS name or IPv4 address (or a bracketed IPv6
+# literal), an optional port 1-65535, then nothing or a path, query or fragment, and no blank anywhere. No
+# user:password@ part (a credential does not belong in the URL). Checked by pattern only: never resolved
+# and never contacted, so it is safe in air-gap mode.
+.sr_set_url_ok <- function(s) {
+  if (!is.character(s) || length(s) != 1L || is.na(s) || grepl("[[:space:]]", s)) return(FALSE)
+  m <- regmatches(s, regexec("^[Hh][Tt][Tt][Pp][Ss]?://([^/?#]*)([/?#].*)?$", s))[[1L]]
+  if (!length(m)) return(FALSE)
+  auth <- m[2L]
+  if (grepl("@", auth, fixed = TRUE)) return(FALSE)
+  hp <- regmatches(auth, regexec("^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$", auth))[[1L]]
+  if (!length(hp)) return(FALSE)
+  host <- hp[2L]
+  if (nzchar(hp[4L]) && !(as.integer(hp[4L]) >= 1L && as.integer(hp[4L]) <= 65535L)) return(FALSE)
+  if (startsWith(host, "[")) return(grepl(":", host, fixed = TRUE))
+  labels <- strsplit(sub("[.]$", "", host), ".", fixed = TRUE)[[1L]]
+  length(labels) > 0L && all(grepl("^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$", labels))
 }
 
 #' The typed value of setting `name` for the text or number `value`; stops with the message of the rule it
@@ -85,7 +105,14 @@
       stop("router_mask must be on or off", call. = FALSE)
     },
     jev_key = nonempty(),
-    jev_url = nonempty(),
+    jev_url = {
+      s <- nonempty()
+      if (!.sr_set_url_ok(s)) {
+        stop("jev_url must be an http:// or https:// URL with a host name, for example ",
+             "https://api.example.org/v1 (no spaces, no user:password@)", call. = FALSE)
+      }
+      s
+    },
     jev_model = nonempty(),
     jev_timeout = {
       x <- .sr_set_num(value)

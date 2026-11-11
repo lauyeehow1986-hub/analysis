@@ -225,7 +225,17 @@ missing parent folder, and an existing `<dir>.partial` or `<dir>.partial.src` ("
 first").
 
 "Import" runs `sr_srproj_import(archive, dir, verify_data = TRUE)` in a background worker with the
-options snapshot in [settings.md](settings.md); "Cancel" kills it.
+options snapshot in [settings.md](settings.md). "Cancel" first creates a cancel file that the worker checks, then
+kills the worker recorded in its job file. The worker records itself and then looks for the cancel file: when it
+exists before the import, nothing is imported; when it appears during the import, what the import created is
+removed again. When Cancel finds no running worker to kill (it has not recorded itself yet), the notice is
+"Cancelling: no running import worker was found; the import is settled when its worker ends" and the job is
+settled as a cancel when the worker stops at the cancel file or ends.
+
+If the worker cannot be started at all, the Import job fails with its real reason, never as a cancel: the notice
+is "Import: the worker could not be started: <reason>". The Archive jobs (Export and Verify with data) report a
+launch failure the same way: "Export: the worker could not be started: <reason>" and "Verify: the worker could
+not be started: <reason>".
 
 - **Success.** The project that was open is closed, the imported project becomes the open project, the notice
   is "Imported <dir>" and the card shows the `$import` summary (label, data mode, archive sha256 to 16

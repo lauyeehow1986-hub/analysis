@@ -23,46 +23,57 @@
   }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
 }
 
-# The number of lines of events.jsonl (0 when there is none).
-.sr_ar_n_events <- function(project_dir) {
+# The event lines of events.jsonl the way they are counted and indexed everywhere here: complete
+# (LF-terminated) lines only, blank ones dropped. A torn final fragment is not a line: the next append
+# truncates it away (sr_project_append), so counting it would hide the event that replaces it.
+.sr_ar_event_lines <- function(project_dir) {
   f <- sr_project_paths(project_dir)$events
-  if (!file.exists(f)) return(0L)
-  length(readLines(f, warn = FALSE))
+  if (!file.exists(f)) return(character())
+  l <- sub("\r$", "", .sr_split_lf(.sr_read_bytes(f))$lines)
+  l[nzchar(l)]
 }
+
+# The number of event lines of events.jsonl (0 when there is none).
+.sr_ar_n_events <- function(project_dir) length(.sr_ar_event_lines(project_dir))
 
 # The type of the last event of events.jsonl, or NA.
 .sr_ar_last_type <- function(project_dir) {
-  f <- sr_project_paths(project_dir)$events
-  if (!file.exists(f)) return(NA_character_)
-  l <- readLines(f, warn = FALSE)
-  l <- l[nzchar(l)]
+  l <- .sr_ar_event_lines(project_dir)
   if (!length(l)) return(NA_character_)
   t <- tryCatch(jsonlite::parse_json(l[length(l)])$type, error = function(e) NULL)
   if (is.character(t) && length(t) == 1L) t else NA_character_
 }
 
-# TRUE when an srproj.exported event is among the lines of events.jsonl after the first `n_before`.
-.sr_ar_exported_after <- function(project_dir, n_before) {
-  f <- sr_project_paths(project_dir)$events
-  if (!file.exists(f)) return(FALSE)
-  l <- readLines(f, warn = FALSE)
-  l <- l[nzchar(l)]
+# TRUE when an srproj.exported event is among the event lines after the first `n_before`. With `file` and
+# `sha`, only an event for that archive counts: its payload names the file (basename) and, when `sha` is
+# not NULL, holds that archive_sha256.
+.sr_ar_exported_after <- function(project_dir, n_before, file = NULL, sha = NULL) {
+  l <- .sr_ar_event_lines(project_dir)
   if (length(l) <= n_before) return(FALSE)
   any(vapply(l[(n_before + 1L):length(l)], function(x) {
-    t <- tryCatch(jsonlite::parse_json(x)$type, error = function(e) NULL)
-    is.character(t) && length(t) == 1L && identical(t, "srproj.exported")
+    e <- tryCatch(jsonlite::parse_json(x), error = function(e) NULL)
+    if (!is.list(e) || !identical(e$type, "srproj.exported")) return(FALSE)
+    pl <- e$payload
+    if (!is.null(file) && !identical(pl$file, basename(file))) return(FALSE)
+    is.null(sha) || identical(pl$archive_sha256, sha)
   }, NA))
 }
 
 #' After a cancelled or dead export job: "finished" when its srproj.exported event was written (the archive
 #' is kept), else "removed" after deleting what the job made: the archive, its .partial and the staging
 #' folder. A path in `keep` (normalized paths that existed before the job started) is never removed.
+#' The event is this job's: written after the first `n_before` event lines (counted by .sr_ar_n_events) and
+#' naming this archive, with the archive_sha256 of the file at `path` when it exists.
 .sr_ar_export_cleanup <- function(project_dir, path, label, n_before, keep = character()) {
-  if (.sr_ar_n_events(project_dir) > n_before && .sr_ar_exported_after(project_dir, n_before)) {
-    return("finished")
-  }
   norm <- function(x) normalizePath(x, winslash = "/", mustWork = FALSE)
   kept <- norm(as.character(keep))
+  # find this job's event by type and file name first; hash the archive only when one exists, to confirm it
+  finished <- .sr_ar_exported_after(project_dir, n_before, file = path)
+  if (finished && file.exists(path) && !dir.exists(path) && !(norm(path) %in% kept)) {
+    sha <- tryCatch(sr_sha256_file(path), error = function(e) NULL)   # unreadable: match the file name only
+    finished <- .sr_ar_exported_after(project_dir, n_before, file = path, sha = sha)
+  }
+  if (finished) return("finished")
   rm1 <- function(x, recursive) {
     if (!(norm(x) %in% kept)) unlink(x, recursive = recursive)
   }
@@ -114,13 +125,27 @@
 
 #' Import `archive` into the new folder `dir`. list(ok = TRUE, dir, import) or list(ok = FALSE, error). The
 #' project is closed again (the session opens it).
-.sr_im_worker <- function(archive, dir, job_file) {
+#'
+#' `cancel_file` (created by the session on Cancel) closes the window before the worker has recorded itself in
+#' `job_file`, when Cancel finds nothing to kill: the worker records itself first and then checks the file, so
+#' a Cancel that gave up waiting for the job file always finds the worker stopping here. When the file exists
+#' before the import, nothing is imported; when it appears during the import, what the import created is
+#' removed again (.sr_im_cleanup against a snapshot taken just before it, so a folder that existed before is
+#' never removed). Either way the value is list(ok = FALSE, cancelled = TRUE, error).
+.sr_im_worker <- function(archive, dir, job_file, cancel_file = NULL) {
   .sr_job_record(job_file)
+  asked <- function() .sr_job_path_ok(cancel_file) && file.exists(cancel_file)
+  if (asked()) return(list(ok = FALSE, cancelled = TRUE, error = "the import was cancelled before it started"))
+  before <- .sr_im_snapshot(dir)
   tryCatch({
     p <- sr_srproj_import(archive, dir, verify_data = TRUE)
     imp <- p$import
     try(sr_duck_close(p), silent = TRUE)
     try(sr_project_close(p), silent = TRUE)
+    if (asked()) {
+      .sr_im_cleanup(dir, before)
+      return(list(ok = FALSE, cancelled = TRUE, error = "the import was cancelled; what it created was removed"))
+    }
     list(ok = TRUE, dir = dir, import = imp)
   }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
 }

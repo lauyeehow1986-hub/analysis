@@ -326,6 +326,9 @@ Gotchas:
 - **Test option leaks.** An option set inside a `testServer` leaks into later test files; use `withr::local_options(..., .local_envir = <the test env>)` (a `test_that`-level frame), not a bare `options()` or a `defer` that clears the baseline (for example `sr.user`, `sr.cran_snapshot`).
 - **A killed real mirai job leaves a rejected-task warning** (a harmless "connection reset" style warning in the console); the panel still settles.
 - **`settle()` releases busy in `on.exit`.** Whatever fails while settling, the job env is emptied and `active(FALSE)` runs, so the app is never left blocked.
+- **Export cancel race (known, narrow, not fixed).** The export worker records itself in its job file just after the 10 s wait Cancel allows, and opens the project before the session's `reopen()`; a Cancel landing in that window can find no worker to kill. Import has a cancel file for this; export does not.
+- **Import Cancel on a never-resolving worker stays busy until the session ends.** With no worker to kill, the job is settled only when the worker's mirai resolves; if it never does, the busy flag stays set and the panel is blocked until the session ends.
+- **Settings are process-wide, not per tab (M6, documented, not re-architected).** A Set is `options(sr.<name>)` in the one R process, so every browser tab or Shiny session that process serves shares it and the last Set or Reset wins; nothing is on disk and a restart forgets it. `docs/settings.md` says so; a per-session store would need every `sr_opt()` caller to take a session context.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted

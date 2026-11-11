@@ -203,6 +203,76 @@ test_that("a cancel whose kill raises stays cancellable; a rejected job releases
   })
 })
 
+# Cancel inside the wait for the job file: nothing can be killed yet, so the job must not settle at once (the
+# worker would go on and import after "Import cancelled"); the worker stops at the cancel file instead.
+test_that("a cancel before the worker recorded itself: the worker stops at the cancel file, nothing is imported", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_kill", function(job_file, wait = 10) FALSE)   # no job file yet: nothing to kill
+  td <- withr::local_tempdir()
+  dir <- file.path(td, "imported")
+  p0 <- .fx_writer_project()
+  rv <- shiny::reactiveVal(p0)
+  arch <- .im_archive()
+  shiny::testServer(mod_import_server, args = .im_args(rv), {
+    session$setInputs(archive = arch, target = dir, import = 1)
+    a <- ctl$calls[[1L]]$args
+    cf <- a[[4L]]
+    expect_false(file.exists(cf))
+    session$setInputs(cancel = 1)
+    expect_true(running())                                # not settled: the worker has not run yet
+    expect_true(file.exists(cf))
+    expect_false(any(grepl("Import cancelled", seen$msg, fixed = TRUE)))
+    res <- do.call(.sr_im_worker, a)                      # the worker starts late and sees the cancel file
+    expect_false(isTRUE(res$ok))
+    expect_true(isTRUE(res$cancelled))
+    expect_false(any(file.exists(.im_paths(dir))))
+    ctl$resolve(res)
+    for (i in 1:50) {
+      later::run_now(0.1)
+      session$flushReact()
+      if (!running()) break
+    }
+    expect_false(running())
+    expect_true(any(seen$msg == "Import cancelled: nothing was imported"))
+    expect_false(any(file.exists(.im_paths(dir))))
+    expect_false(file.exists(cf))
+    expect_false(file.exists(a[[3L]]))                    # the job file the late worker wrote is removed
+    expect_identical(rv(), p0)
+  })
+})
+
+test_that("import worker: a cancel during the import removes what it created, never a folder that existed", {
+  arch <- .im_archive()
+  td <- withr::local_tempdir()
+  cf <- file.path(td, "cancel")
+  real <- sr_srproj_import
+  .ui_stub("sr_srproj_import", function(...) {
+    p <- real(...)
+    file.create(cf)                                       # Cancel arrives while the import runs
+    p
+  })
+  for (pre in c(FALSE, TRUE)) {
+    dir <- file.path(td, if (pre) "pre" else "new")
+    if (pre) dir.create(dir)                              # the empty folder the user chose
+    unlink(cf)
+    res <- .sr_im_worker(arch, dir, NULL, cf)
+    expect_false(isTRUE(res$ok))
+    expect_true(isTRUE(res$cancelled))
+    expect_identical(dir.exists(dir), pre)
+    if (pre) expect_length(list.files(dir, all.files = TRUE, no.. = TRUE), 0L)
+    expect_false(any(file.exists(paste0(dir, c(".partial", ".partial.src")))))
+  }
+  # no cancel file: the same worker imports
+  unlink(cf)
+  .ui_stub("sr_srproj_import", real)
+  dir <- file.path(td, "kept")
+  res <- .sr_im_worker(arch, dir, NULL, cf)
+  expect_true(isTRUE(res$ok))
+  expect_true(dir.exists(dir))
+})
+
 test_that("import is refused while another job runs", {
   seen <- .ui_spy_notify()
   ctl <- new.env()
@@ -215,5 +285,27 @@ test_that("import is refused while another job runs", {
     expect_false(running())
     expect_length(ctl$calls, 0L)
     expect_true(any(grepl(.sr_ui_busy_text, seen$msg, fixed = TRUE)))
+  })
+})
+
+test_that("a job that cannot be launched reports the launch error, never a cancel", {
+  seen <- .ui_spy_notify()
+  ctl <- new.env()
+  .ui_stub(".sr_job_spawn", .ui_pending_spawn(ctl))
+  .ui_stub(".sr_job_opts", function() stop("no worker settings here"))
+  dir <- file.path(withr::local_tempdir(), "imported")
+  p0 <- .fx_writer_project()
+  rv <- shiny::reactiveVal(p0)
+  arch <- .im_archive()
+  shiny::testServer(mod_import_server, args = .im_args(rv), {
+    session$setInputs(archive = arch, target = dir, import = 1)
+    expect_false(running())
+    expect_length(ctl$calls, 0L)
+    expect_true(any(grepl("Import: the worker could not be started: no worker settings here", seen$msg,
+                          fixed = TRUE)))
+    expect_false(any(grepl("cancelled", seen$msg, fixed = TRUE)))
+    expect_true(any(seen$type == "error"))
+    expect_false(any(file.exists(.im_paths(dir))))
+    expect_identical(rv(), p0)
   })
 })

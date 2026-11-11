@@ -253,3 +253,5 @@ the core's note that the checklist is completed by hand.
     `numbers_ok` is FALSE and `numbers_note` holds the reason), together with the file problems. Verify never
     throws on a damaged file.
 - A row whose files are gone shows status "missing on disk" in red; its Download and Open folder are disabled.
+  The Download is a disabled button with no link to the download handler, and the handler itself refuses an
+  export whose files are missing on disk.

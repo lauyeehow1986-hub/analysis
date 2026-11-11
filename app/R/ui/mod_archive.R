@@ -334,11 +334,14 @@ mod_archive_server <- function(id, project, busy, settings = function() 0L) {
         res <- tryCatch(task$result(), error = function(e) e)
         settle(res, isTRUE(job$cancelling))
       }, ignoreInit = TRUE)
-      started <- .sr_ui_try(if (identical(job$kind, "export")) "Export" else "Verify", function() {
+      started <- tryCatch({
         task$invoke(app_dir = sr_root, fn = fn, args = args, opts = .sr_job_opts())
         TRUE
-      })
-      if (!isTRUE(started)) settle(simpleError("the worker could not be started"), TRUE)
+      }, error = function(e) e)
+      # a launch failure is an error with its real reason, never a cancel
+      if (inherits(started, "error")) {
+        settle(simpleError(paste0("the worker could not be started: ", conditionMessage(started))), FALSE)
+      }
       invisible(NULL)
     }
 
