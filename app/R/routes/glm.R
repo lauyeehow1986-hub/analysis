@@ -153,6 +153,7 @@
   f <- function(spec) {
     .sr_glm_check(spec, kind)
     .sr_glm_layers_check(spec, id)
+    if (identical(spec[["engine"]], "stream")) return(.sr_glm_compile_stream(spec, kind))
     if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, f, id, "glm"))
     if (.sr_mi_on(spec)) return(.sr_glm_mi_compile(spec, kind))
     firth <- .sr_glm_firth(spec)

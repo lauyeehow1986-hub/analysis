@@ -157,10 +157,17 @@
 #' pass's weights came from; NULL when they came from mustart), R (rank x rank, pivot order), keep, rank,
 #' B = chol2inv(R) in keep order named by the kept columns, iter, converged, deviance (at beta),
 #' near_separation, risk_above_one (both on the final mu, as routes/glm.R: binomial mu < 1e-08 or
-#' > 1 - 1e-08; poisson mu > 1), aliased, passes, n).
-.h_st_irls <- function(passfn, family, p, nms, maxit = 25L, epsilon = 1e-8) {
+#' > 1 - 1e-08; poisson mu > 1), aliased, passes, n, sel).
+#' select (NULL, or a function of no arguments) is called once after the first pass and returns
+#' list(nms, sel): the names of the p = length(nms) streamed design columns and the indices of the columns
+#' the model has (the stream compile drops the columns of factor levels absent from the fitted rows, as
+#' lm and glm do with drop.unused.levels). p and nms may then be NA and NULL at the call. Only the selected
+#' columns enter the WLS solve; beta, keep, B and aliased are over them (keep indexes sel), beta_prev is
+#' over all p columns (0 outside sel). Without select, sel is seq_len(p) and the fit is unchanged.
+.h_st_irls <- function(passfn, family, p, nms, maxit = 25L, epsilon = 1e-8, select = NULL) {
   fam <- .h_st_fam(family)
   p <- as.integer(p)
+  sel <- NULL
   maxit <- as.integer(maxit)
   if (is.na(maxit) || maxit < 1L) stop("maxit must be a whole number >= 1")
   one <- function(beta) {
@@ -198,14 +205,23 @@
   }
   step <- function(acc) {
     if (is.null(acc$M)) stop("no complete rows: every row has a missing value in the model")
-    al <- .h_st_alias(acc$M, p, 1e-11)
+    s <- if (is.null(sel)) seq_len(p) else sel
+    ps <- length(s)
+    Ms <- acc$M[, c(s, p + 1L), drop = FALSE]
+    al <- .h_st_alias(Ms, ps, 1e-11)
     r <- al$rank
-    zq <- qr.qty(al$qr, acc$M[, p + 1L])
+    zq <- qr.qty(al$qr, Ms[, ps + 1L])
     b <- stats::setNames(rep(0, p), nms)
-    b[al$pivot[seq_len(r)]] <- backsolve(al$R, zq[seq_len(r)])
-    list(b = b, al = al)
+    b[s[al$pivot[seq_len(r)]]] <- backsolve(al$R, zq[seq_len(r)])
+    list(b = b, al = al, s = s)
   }
   a <- one(NULL)
+  if (!is.null(select)) {
+    sv <- select()
+    nms <- as.character(sv[["nms"]])
+    p <- length(nms)
+    sel <- as.integer(sv[["sel"]])
+  }
   cur <- step(a)
   devold <- a$dev
   prev <- NULL
@@ -228,16 +244,19 @@
     cur <- step(last)
   }
   al <- cur$al
+  s <- cur$s
+  ns <- nms[s]
   r <- al$rank
-  beta <- cur$b
+  beta <- cur$b[s]
   beta[-al$keep] <- NA_real_
   o <- order(al$pivot[seq_len(r)])
   B <- chol2inv(al$R)[o, o, drop = FALSE]
-  dimnames(B) <- list(nms[al$keep], nms[al$keep])
+  dimnames(B) <- list(ns[al$keep], ns[al$keep])
   binom <- identical(fam, "binomial")
   list(beta = beta, beta_prev = prev, R = al$R, keep = al$keep, rank = r, B = B, iter = iter,
        converged = conv, deviance = last$dev, near_separation = binom && last$sep,
-       risk_above_one = !binom && last$rab, aliased = nms[is.na(beta)], passes = passes, n = last$n)
+       risk_above_one = !binom && last$rab, aliased = ns[is.na(beta)], passes = passes, n = last$n,
+       sel = s)
 }
 
 #' The glm scores of ruling R11 (sandwich::estfun.glm, dispersion 1) for the kept design columns X:

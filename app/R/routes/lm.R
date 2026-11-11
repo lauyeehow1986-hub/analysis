@@ -100,6 +100,7 @@
 .sr_lm_compile <- function(spec) {
   .sr_lm_check(spec)
   .sr_lm_layers_check(spec)
+  if (identical(spec[["engine"]], "stream")) return(.sr_lm_compile_stream(spec))
   if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_lm_compile, "lm", "lm"))
   if (.sr_mi_on(spec)) return(.sr_lm_mi_compile(spec))
   se <- .sr_lm_se(spec)
