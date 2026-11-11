@@ -48,6 +48,9 @@ worker already holds its snapshot of the options.
 The test switches `run_sync`, `ingest_sync` and `jev_transport` are not settings and are not shown. A failed
 Set leaves the previous value in place and shows the message; the message never contains the typed value.
 
+Note: because `jev_url` is checked by pattern only, a host name with an underscore or a non-ASCII (IDN) name is
+rejected; use the ASCII (punycode) form of the name or an IP address.
+
 ## 3. Mode and CONNECT
 
 Switching `mode` to `connected` opens the dialog "Switch to connected mode": "Connected mode allows network
