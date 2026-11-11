@@ -99,6 +99,20 @@ test_that("export cleanup: removes the archive, its .partial and the staging fol
   expect_false(dir.exists(stg))
 })
 
+test_that("export cleanup: the archive is not hashed when no srproj.exported event exists", {
+  p <- sr_freeze(.fx_writer_project(), "v1")
+  path <- file.path(withr::local_tempdir(), "x.srproj")
+  writeLines("x", path)
+  n <- .sr_ar_n_events(p$paths$dir)
+  hashed <- 0L
+  env <- environment(.sr_ar_export_cleanup)
+  real <- get("sr_sha256_file", envir = env)
+  withr::defer(assign("sr_sha256_file", real, envir = env))
+  assign("sr_sha256_file", function(...) { hashed <<- hashed + 1L; "x" }, envir = env)
+  expect_identical(.sr_ar_export_cleanup(p$paths$dir, path, "v1", n), "removed")
+  expect_identical(hashed, 0L)
+})
+
 test_that("export cleanup: a finished export is kept and reported", {
   p <- sr_freeze(.fx_writer_project(), "v1")
   path <- file.path(withr::local_tempdir(), "x.srproj")

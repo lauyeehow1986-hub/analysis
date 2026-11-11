@@ -67,10 +67,13 @@
 .sr_ar_export_cleanup <- function(project_dir, path, label, n_before, keep = character()) {
   norm <- function(x) normalizePath(x, winslash = "/", mustWork = FALSE)
   kept <- norm(as.character(keep))
-  sha <- if (file.exists(path) && !dir.exists(path) && !(norm(path) %in% kept)) {
-    tryCatch(sr_sha256_file(path), error = function(e) NULL)       # unreadable: match the file name only
+  # find this job's event by type and file name first; hash the archive only when one exists, to confirm it
+  finished <- .sr_ar_exported_after(project_dir, n_before, file = path)
+  if (finished && file.exists(path) && !dir.exists(path) && !(norm(path) %in% kept)) {
+    sha <- tryCatch(sr_sha256_file(path), error = function(e) NULL)   # unreadable: match the file name only
+    finished <- .sr_ar_exported_after(project_dir, n_before, file = path, sha = sha)
   }
-  if (.sr_ar_exported_after(project_dir, n_before, file = path, sha = sha)) return("finished")
+  if (finished) return("finished")
   rm1 <- function(x, recursive) {
     if (!(norm(x) %in% kept)) unlink(x, recursive = recursive)
   }
