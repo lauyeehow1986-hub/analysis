@@ -184,7 +184,7 @@ test_that("busy: add refused", {
     n0 <- .ms_n_events(rv())
     session$setInputs(add = 1)
     expect_length(modal$html, 0L)
-    expect_true(any(grepl("wait for the import", seen$msg)))
+    expect_true(any(grepl("wait for the running import or analysis", seen$msg)))
     session$setInputs(analyses_rows_selected = 1L)
     session$setInputs(remove = 1, remove_ok = 1)
     expect_equal(.ms_n_events(rv()), n0)

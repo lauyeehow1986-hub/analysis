@@ -8,7 +8,7 @@ test_that("the actor refuses with no project, while busy, and on a read-only pro
   p$readonly <- TRUE; rv(p)
   act("Save", function(p) hit <<- hit + 1L)
   expect_equal(hit, 0L)
-  expect_equal(seen$msg, c("Save: open a project first", "Save: wait for the import to finish",
+  expect_equal(seen$msg, c("Save: open a project first", "Save: wait for the running import or analysis to finish",
                            "Save: the project is read-only (locked by another session)"))
   expect_equal(seen$type, rep("error", 3L))
 })

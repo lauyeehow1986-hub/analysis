@@ -418,7 +418,7 @@ mod_data_ui <- function(id) {
 
 # ---- server -------------------------------------------------------------------------------------------
 
-mod_data_server <- function(id, project) {
+mod_data_server <- function(id, project, busy = shiny::reactive(FALSE)) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
     roots <- tryCatch(shinyFiles::getVolumes()(), error = function(e) c(Home = path.expand("~")))
@@ -438,7 +438,7 @@ mod_data_server <- function(id, project) {
     })
 
     # Run a project-changing step (refuses while an import runs or the project is read-only).
-    act <- .sr_ui_actor(project, busy = function() isTRUE(shiny::isolate(job$busy)))
+    act <- .sr_ui_actor(project, busy = function() isTRUE(shiny::isolate(job$busy)) || isTRUE(shiny::isolate(busy())))
 
     need_table <- function(label) {
       t <- shiny::isolate(tbl())
@@ -546,6 +546,7 @@ mod_data_server <- function(id, project) {
       p <- project()
       if (is.null(p)) return(.sr_ui_notify("Import: open a project first", "error"))
       if (isTRUE(job$busy)) return(.sr_ui_notify("Import: one import is already running", "error"))
+      if (isTRUE(busy())) return(.sr_ui_notify("Import: wait for the running import or analysis to finish", "error"))
       if (isTRUE(p$readonly)) return(.sr_ui_notify("Import: the project is read-only (locked by another session)", "error"))
       path <- path_in()
       if (!nzchar(path)) return(.sr_ui_notify("Import: choose a file first", "error"))

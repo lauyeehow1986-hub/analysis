@@ -51,7 +51,7 @@
 # the actions that do not return a project.
 .sr_ui_refusal <- function(p, busy = function() FALSE) {
   if (is.null(p)) return("open a project first")
-  if (isTRUE(busy())) return("wait for the import to finish")
+  if (isTRUE(busy())) return("wait for the running import or analysis to finish")
   if (isTRUE(p$readonly)) return("the project is read-only (locked by another session)")
   NULL
 }

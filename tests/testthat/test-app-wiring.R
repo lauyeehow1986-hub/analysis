@@ -63,3 +63,45 @@ test_that("the lock checklist is a lazy reactive, not an observer-driven flag", 
   expect_match(src, "chk <- shiny::reactive(.sr_sap_check_view(project()))", fixed = TRUE)
   expect_false(grepl("chk <- .sr_sap_flag", src, fixed = TRUE))
 })
+
+test_that("the Analyses tab is wired and a run blocks Data, Design and SAP edits", {
+  skip_if_not_installed("later")
+  withr::local_options(sr.mode = "airgap", sr.run_sync = FALSE)
+  seen <- .ui_spy_notify()
+  old <- get(".sr_an_spawn", envir = globalenv())
+  ctl <- new.env()
+  assign(".sr_an_spawn", function(app_dir, project_dir, id, job, progress_file, job_file, cancel_file) {
+    promises::promise(function(resolve, reject) ctl$reject <- reject)   # pending until Cancel kills it
+  }, envir = globalenv())
+  withr::defer(assign(".sr_an_spawn", old, envir = globalenv()))
+  oldk <- get(".sr_an_kill", envir = globalenv())
+  assign(".sr_an_kill", function(job_file, wait = 10) {
+    ctl$reject(simpleError("19 | Connection reset"))     # what a killed worker's mirai gives
+    TRUE
+  }, envir = globalenv())
+  withr::defer(assign(".sr_an_kill", oldk, envir = globalenv()))
+  p <- .fx_an_project()
+  shiny::testServer(.aw_app(), {
+    project(p)
+    session$flushReact()
+    expect_false(isTRUE(any_busy()))
+    session$setInputs(`analyses-run_all` = 1)
+    expect_true(a$running())
+    expect_true(any_busy())
+    expect_false(isTRUE(d$busy()))                          # the import flag is untouched
+    expect_match(paste(output$`analyses-badge`$html), "running", fixed = TRUE)
+    session$setInputs(`data-path` = "x.csv", `data-import` = 1)
+    expect_true(any(grepl("Import: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+    session$setInputs(`design-pico_population` = "a", `design-pico_outcome` = "b", `design-pico_save` = 1)
+    expect_true(any(grepl("Save research question: wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+    session$setInputs(`analyses-cancel` = 1)
+    t0 <- Sys.time()
+    while (isTRUE(a$running()) && as.numeric(difftime(Sys.time(), t0, units = "secs")) < 30) {
+      later::run_now(0.2)
+      session$flushReact()
+    }
+    expect_false(a$running())
+    expect_false(any_busy())
+    try(sr_project_close(project()), silent = TRUE)
+  })
+})

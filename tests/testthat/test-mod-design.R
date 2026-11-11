@@ -108,7 +108,7 @@ test_that("busy: edits refused", {
     n0 <- .md_n_events(rv())
     session$setInputs(pico_population = "a", pico_outcome = "b", pico_save = 1)
     expect_equal(.md_n_events(rv()), n0)
-    expect_true(any(grepl("wait for the import to finish", seen$msg)))
+    expect_true(any(grepl("wait for the running import or analysis to finish", seen$msg)))
   })
 })
 

@@ -622,3 +622,15 @@ test_that("the flow image scales to its card instead of showing at its pixel siz
     expect_match(img$style %||% "", "height:[[:space:]]*auto")
   })
 })
+
+test_that("Import is refused while an analysis runs", {
+  seen <- .md_spy_notify()
+  p <- .fx_project()
+  csv <- .md_csv(p)
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_data_server, args = list(project = rv, busy = shiny::reactive(TRUE)), {
+    session$setInputs(path = csv, import = 1)
+    expect_false(job$busy)
+    expect_true(any(grepl("wait for the running import or analysis to finish", seen$msg, fixed = TRUE)))
+  })
+})
