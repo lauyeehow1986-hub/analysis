@@ -337,7 +337,7 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
     }, NA)]
     tb <- if (length(waiting)) NULL else tryCatch(sr_family_adjust(p, id), error = function(e) NULL)
     if (is.data.frame(tb)) tb$p <- signif(tb$p, 3L)
-    if (is.data.frame(tb)) tb$p_adj <- signif(tb$p_adj, 3L)
+    if (is.data.frame(tb)) tb$p_adj <- signif(tb$p_adj, 4L)
     out[[length(out) + 1L]] <- list(id = id, method = .sr_an_s(fam[[id]]$method), table = tb,
                                     waiting = unname(waiting))
   }

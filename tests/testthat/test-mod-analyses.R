@@ -526,8 +526,10 @@ test_that("the result card shows effects, tables, figures, fragments and diagnos
     expect_match(output$diag, "ph", fixed = TRUE)
     expect_match(output$diag, "fail", fixed = TRUE)
     pres <- sr_result(rv(), "m1")
-    if (length(pres$tables)) expect_match(paste(output$tables$html), names(pres$tables)[1L], fixed = TRUE)
-    if (length(pres$fragments)) expect_match(paste(output$fragments$html), "<pre", fixed = TRUE)
+    expect_gt(length(pres$tables), 0L)                       # the fixture really has tables and fragments
+    expect_gt(length(pres$fragments), 0L)
+    expect_match(paste(output$tables$html), names(pres$tables)[1L], fixed = TRUE)
+    expect_match(paste(output$fragments$html), "<pre", fixed = TRUE)
     html <- paste(output$apply_preview$html)
     expect_match(html, "`m1_ph`", fixed = TRUE)
     expect_false(grepl("disabled", .ma_btn(html, "apply"), fixed = TRUE))
@@ -628,5 +630,123 @@ test_that("Apply is refused while a queue runs", {
     session$setInputs(apply = 1)
     expect_true(any(seen$msg == "Apply diagnostics: wait for the running import or analysis to finish"))
     ctl$resolve(list(status = "ok", message = NULL))
+  })
+})
+
+# ---- cards 3-5: comparison, multiplicity, deviations and run history -----------------------------------
+
+# A locked project with real lm analyses: l1 (primary) and l2 (secondary) in the family f1 (holm), and
+# ls, a pre-specified sensitivity analysis of l1.
+.ma_lm_project <- function(env = parent.frame()) {
+  p <- .dv_project(env = env)
+  p <- sr_sap_add(p, "l1", "lm", .dv_lm(outcome = "time"), "t", label = "primary")
+  p <- sr_sap_add(p, "l2", "lm", .dv_lm(outcome = "time", seed = 12L), "t", label = "secondary")
+  p <- sr_sap_add(p, "ls", "lm", .dv_lm(outcome = "time", seed = 13L), "t", label = "sensitivity", parent = "l1")
+  p <- sr_sap_family(p, "f1", c("l1", "l2"), "holm")
+  sr_sap_lock(.fx_feasible(p))
+}
+
+test_that("compare shows each sensitivity analysis under its parent, never blank", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  p <- sr_run(sr_run(.ma_lm_project(), "l1", job = "j1"), "l2", job = "j2")
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$flushReact()
+    cp <- .sr_an_compare(rv())
+    expect_identical(cp$analysis[cp$block == "l1"], c("l1", "ls"))
+    expect_identical(cp$status[cp$analysis == "ls"], "not run")           # never blank
+    expect_identical(cp$status[cp$analysis == "l1"], "ok")
+    expect_identical(cmp_v(), cp)
+    html <- output$compare
+    expect_match(html, "not run", fixed = TRUE)
+    expect_match(html, "ls", fixed = TRUE)
+    expect_match(html, as.character(cp$est[cp$analysis == "l1"][1L]), fixed = TRUE)
+    # running the sensitivity analysis fills its row
+    session$setInputs(runs_rows_selected = match("ls", .sr_an_order(rv())$id), run_sel = 1)
+    expect_identical(rv()$state$runs$ls$status, "ok")
+    expect_identical(.sr_an_compare(rv())$status[cp$analysis == "ls"], "ok")
+    expect_identical(cmp_v(), .sr_an_compare(rv()))
+  })
+})
+
+test_that("compare says so when there is no primary or secondary analysis, and with no project", {
+  rv <- shiny::reactiveVal(NULL)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    expect_match(output$compare, "open a project first", fixed = TRUE)
+    expect_match(paste(output$families$html), "open a project first", fixed = TRUE)
+    expect_match(output$deviations, "open a project first", fixed = TRUE)
+    expect_match(output$history, "open a project first", fixed = TRUE)
+  })
+  rv2 <- shiny::reactiveVal(.fx_ready_project(.run_frame(), "t", .run_roles))
+  shiny::testServer(mod_analyses_server, args = list(project = rv2, busy = shiny::reactive(FALSE)), {
+    expect_match(output$compare, "No primary or secondary analysis.", fixed = TRUE)
+    expect_match(paste(output$families$html), "No multiplicity family in the SAP.", fixed = TRUE)
+  })
+})
+
+test_that("a family waits for its unrun members, then matches sr_family_adjust", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  rv <- shiny::reactiveVal(sr_run(.ma_lm_project(), "l1", job = "j1"))
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    html <- paste(output$families$html)
+    expect_match(html, "f1 (holm)", fixed = TRUE)
+    expect_match(html, "Waiting for: l2", fixed = TRUE)
+    expect_null(fam_v()[[1L]]$table)
+    session$setInputs(runs_rows_selected = match("l2", .sr_an_order(rv())$id), run_sel = 1)
+    expect_identical(rv()$state$runs$l2$status, "ok")
+    html <- paste(output$families$html)
+    expect_false(grepl("Waiting for", html, fixed = TRUE))
+    expect_match(html, "f1 (holm)", fixed = TRUE)
+    fa <- sr_family_adjust(rv(), "f1")
+    tb <- fam_v()[[1L]]$table
+    expect_equal(tb$p_adj, signif(fa$p_adj, 4))
+    expect_identical(tb$analysis, fa$analysis)
+    expect_match(html, "l2", fixed = TRUE)
+  })
+})
+
+test_that("deviations match sr_deviations and history lists a cancelled attempt", {
+  skip_on_cran()
+  withr::local_options(sr.run_sync = TRUE)
+  p <- .ma_lm_project()
+  expect_identical(nrow(sr_deviations(p)), 0L)
+  rv <- shiny::reactiveVal(p)
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    expect_match(output$deviations, "No deviation from the locked SAP.", fixed = TRUE)
+    expect_match(output$history, "No cancelled or interrupted run.", fixed = TRUE)
+    q <- sr_analysis_add(rv(), "e1", "lm", .dv_lm(outcome = "time", seed = 14L), "t", "exploratory",
+                         reason = "look at it <b>")
+    q <- sr_project_append(q, "run.started", list(analysis = "l1", key = "k", extract_sha = "s", job = "jc"))
+    q <- sr_run_cancel(q, "l1", "jc")
+    rv(q)
+    session$flushReact()
+    d <- sr_deviations(q)
+    expect_identical(dev_v(), d)
+    expect_match(output$deviations, "exploratory", fixed = TRUE)
+    expect_match(output$deviations, "e1", fixed = TRUE)
+    expect_match(output$deviations, "look at it &lt;b&gt;", fixed = TRUE)
+    h <- .sr_an_history(q)
+    expect_identical(h$job, "jc")
+    expect_identical(hist_v(), h)
+    expect_match(output$history, "jc", fixed = TRUE)
+    expect_match(output$history, "cancelled", fixed = TRUE)
+  })
+})
+
+test_that("an unrelated project change does not redraw the cards", {
+  withr::local_options(sr.run_sync = TRUE)
+  rv <- shiny::reactiveVal(.fx_an_project())
+  shiny::testServer(mod_analyses_server, args = list(project = rv, busy = shiny::reactive(FALSE)), {
+    session$flushReact()
+    c0 <- cmp_v(); d0 <- dev_v()
+    expect_identical(c0$analysis, c("a1", "s1", "a2"))
+    ro <- rv()
+    ro$meta$note <- "changed"                                  # a new project value, same cards
+    rv(ro)
+    session$flushReact()
+    expect_identical(cmp_v(), c0)
+    expect_identical(dev_v(), d0)
   })
 })

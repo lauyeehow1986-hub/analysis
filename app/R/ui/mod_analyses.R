@@ -1,7 +1,7 @@
 # ui/mod_analyses.R - Shiny module: the Analyses tab. Card 1 (Runs) lists the analyses of the locked SAP
 # with their run status and runs them: Run selected, Run all (every analysis not ok, in display order) and
-# Cancel. Cards 2-5 (Result, Primary vs sensitivity, Multiplicity, Deviations and run history) are filled
-# by later tasks.
+# Cancel. Card 2 (Result) shows the selected analysis with its diagnostics and Apply; cards 3-5 (Primary vs
+# sensitivity, Multiplicity, Deviations and run history) are read-only views of the replayed project.
 #
 # mod_analyses_server(id, project, busy) takes the project reactiveVal of mod_project_server() and `busy`, a
 # reactive that is TRUE while an import runs. It returns list(running): TRUE while a queue item runs or ids
@@ -67,9 +67,18 @@ mod_analyses_ui <- function(id) {
       shiny::uiOutput(ns("diag_figs")),
       shiny::uiOutput(ns("apply_preview"))
     ),
-    .sr_ui_card("Primary vs sensitivity"),
-    .sr_ui_card("Multiplicity"),
-    .sr_ui_card("Deviations and run history")
+    .sr_ui_card("Primary vs sensitivity",
+      DT::DTOutput(ns("compare"), fill = FALSE)
+    ),
+    .sr_ui_card("Multiplicity",
+      shiny::uiOutput(ns("families"))
+    ),
+    .sr_ui_card("Deviations and run history",
+      shiny::h6("Deviations"),
+      DT::DTOutput(ns("deviations"), fill = FALSE),
+      shiny::h6(class = "mt-3", "Run history"),
+      DT::DTOutput(ns("history"), fill = FALSE)
+    )
   )
 }
 
@@ -364,6 +373,63 @@ mod_analyses_server <- function(id, project, busy) {
       if (inherits(pl, "error")) return(.sr_ui_notify(paste0("Apply diagnostics: ", conditionMessage(pl)), "error"))
       if (!nrow(pl)) return(.sr_ui_notify("Apply diagnostics: nothing to apply", "message"))
       act("Apply diagnostics", function(p) sr_diag_apply(p, id))
+    })
+
+    # ---- cards 3-5: comparison, multiplicity, deviations and run history ---------------------------------
+    # Each card re-derives from the replayed project and keeps its value in a reactiveVal that is written
+    # only when it changed, so an unrelated project change redraws nothing. Nothing here runs sr_sap_check
+    # or scans DuckDB. A derivation that fails is shown as its message (a character string).
+    derive <- function(fn) {
+      v <- shiny::reactiveVal(NULL)
+      shiny::observe({
+        p <- project()
+        x <- if (is.null(p)) NULL else tryCatch(fn(p), error = function(e) conditionMessage(e))
+        if (!identical(shiny::isolate(v()), x)) v(x)
+      })
+      v
+    }
+    cmp_v <- derive(function(p) .sr_an_compare(p, live()))
+    fam_v <- derive(.sr_an_families)
+    dev_v <- derive(sr_deviations)
+    hist_v <- derive(function(p) .sr_an_history(p, live()))
+
+    # a one-cell table: what a card shows instead of rows
+    note_dt <- function(msg) {
+      DT::datatable(data.frame(note = msg, stringsAsFactors = FALSE), rownames = FALSE, selection = "none",
+                    escape = TRUE, options = list(dom = "t", ordering = FALSE), class = "compact stripe")
+    }
+    # a table card: the frame, or the note when it has no rows (or the derivation failed / no project)
+    table_dt <- function(v, empty) {
+      if (is.null(v)) return(note_dt("open a project first"))
+      if (is.character(v)) return(note_dt(v))
+      if (!nrow(v)) return(note_dt(empty))
+      DT::datatable(v, rownames = FALSE, selection = "none", escape = TRUE,
+                    options = list(dom = "tip", pageLength = 25L, scrollX = TRUE, ordering = FALSE),
+                    class = "compact stripe")
+    }
+    output$compare <- DT::renderDT(table_dt(cmp_v(), "No primary or secondary analysis."), server = FALSE)
+    output$deviations <- DT::renderDT(table_dt(dev_v(), "No deviation from the locked SAP."), server = FALSE)
+    output$history <- DT::renderDT(table_dt(hist_v(), "No cancelled or interrupted run."), server = FALSE)
+
+    output$families <- shiny::renderUI({
+      f <- fam_v()
+      if (is.null(f)) return(shiny::div(class = "text-muted", "open a project first"))
+      if (is.character(f)) return(shiny::div(class = "text-danger", f))
+      if (!length(f)) return(shiny::div(class = "text-muted", "No multiplicity family in the SAP."))
+      do.call(shiny::tagList, lapply(f, function(fm) {
+        body <- if (length(fm$waiting)) {
+          shiny::div(class = "text-muted", paste0("Waiting for: ", paste(fm$waiting, collapse = ", ")))
+        } else if (!is.data.frame(fm$table)) {
+          shiny::div(class = "text-muted", "No adjusted table is available for this family.")
+        } else {
+          tb <- fm$table
+          tb$p <- format.pval(tb$p, digits = 3L, eps = 1e-4)
+          DT::datatable(tb, rownames = FALSE, selection = "none", escape = TRUE,
+                        options = list(dom = "t", pageLength = 100L, scrollX = TRUE, ordering = FALSE),
+                        class = "compact stripe")
+        }
+        shiny::tagList(shiny::h6(class = "mt-3", sprintf("%s (%s)", fm$id, fm$method)), body)
+      }))
     })
 
     # ---- the queue ----------------------------------------------------------------------------------
