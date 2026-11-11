@@ -96,3 +96,52 @@ sr_engine_resolve <- function(project, analysis_id, spec = NULL) {
   }
   out
 }
+
+# ---- engine switch (computational deviation) ---------------------------------------------------------
+
+#' The engine an analysis runs on now: the latest switch, else the one frozen at the lock, else the one
+#' resolved when the analysis was added, else "memory".
+.sr_engine_effective <- function(project, id) {
+  st <- project$state
+  pick <- function(x) if (is.character(x) && length(x) == 1L && !is.na(x) && x %in% c("memory", "stream")) x
+  pick(st$engines[[id]]$to) %||% pick(st$sap$lock$engines[[id]]$engine) %||%
+    pick(st$analyses[[id]]$engine_resolved$engine) %||% "memory"
+}
+
+sr_reducer_register("engine.switched", function(state, event) {
+  p <- event$payload
+  id <- .sr_sap_chr1(p$analysis)
+  if (is.na(id)) stop("engine.switched needs an analysis id", call. = FALSE)
+  eg <- state$engines %||% list()
+  eg[[id]] <- list(from = .sr_sap_chr1(p$from), to = .sr_sap_chr1(p$to), reason = .sr_sap_chr1(p$reason))
+  state$engines <- eg
+  state
+})
+
+#' Switch an analysis between the in-memory and the streaming engine. The estimator is unchanged, so the SAP
+#' hash is too; the switch is listed by sr_deviations as a computational deviation. Refused for a read-only
+#' project, an unknown analysis, an engine other than "memory"/"stream", no reason, the engine it already
+#' uses, "memory" for an analysis that does not fit, and "stream" for one the streaming engine cannot run yet.
+#' @return the project
+sr_engine_switch <- function(project, analysis_id, engine, reason) {
+  if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  a <- project$state$analyses[[analysis_id]]
+  if (is.null(a)) stop("unknown analysis '", analysis_id, "'", call. = FALSE)
+  if (!(is.character(engine) && length(engine) == 1L && !is.na(engine) && engine %in% c("memory", "stream"))) {
+    stop("engine must be \"memory\" or \"stream\"", call. = FALSE)
+  }
+  reason <- .sr_sap_chr1(reason)
+  if (is.na(reason) || !nzchar(trimws(reason))) stop("a reason is required", call. = FALSE)
+  from <- .sr_engine_effective(project, analysis_id)
+  if (identical(from, engine)) stop("analysis '", analysis_id, "' already uses the ", engine, " engine", call. = FALSE)
+  spec <- .sr_spec_from_state(a$spec)
+  if (identical(engine, "memory")) {
+    est <- sr_mem_estimate(project, a$table, sr_spec_cols(spec), .sr_mem_method(a$route))
+    if (!isTRUE(est$fits)) stop("the analysis does not fit in memory: ", est$reason, call. = FALSE)
+  } else {
+    why <- .sr_engine_refusal(a$route, spec)
+    if (!is.null(why)) stop(why, call. = FALSE)
+  }
+  sr_project_append(project, "engine.switched",
+                    list(analysis = analysis_id, from = from, to = engine, reason = trimws(reason)))
+}

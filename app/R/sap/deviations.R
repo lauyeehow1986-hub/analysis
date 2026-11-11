@@ -421,7 +421,8 @@ sr_diag_apply <- function(project, analysis_id) {
 #' trigger). kind: exploratory / post_hoc (an analysis added after the lock with that label),
 #' unplanned_sensitivity (a sensitivity analysis added after the lock, by hand or by sr_diag_apply),
 #' rule_fired (a pre-specified rule acted on a diagnostic; analysis = the analysis the check failed
-#' for), lib_changed (the latest run of the analysis used a library snapshot other than the lock's).
+#' for), lib_changed (the latest run of the analysis used a library snapshot other than the lock's),
+#' computational (an engine switch, sr_engine_switch; trigger NA).
 sr_deviations <- function(project) {
   st <- project$state
   an <- st$analyses %||% list()
@@ -456,6 +457,11 @@ sr_deviations <- function(project) {
       add(id, label_of(id), "lib_changed",
           "the latest run used a library snapshot that differs from the one recorded at the SAP lock", NA_character_)
     }
+  }
+  for (id in names(st$engines %||% list())) {
+    e <- st$engines[[id]]
+    add(id, label_of(id), "computational",
+        sprintf("engine changed from %s to %s: %s; estimator unchanged", e$from, e$to, e$reason), NA_character_)
   }
   if (!length(out)) {
     return(data.frame(analysis = character(), label = character(), kind = character(), reason = character(),
