@@ -17,12 +17,49 @@
 #     the quartiles from quantile_cont (R's type 7);
 #   * categorical: the level counts by (group, value) mapped on the in-memory levels; a NaN is neither a
 #     level nor a missing value there (as.character(NaN) is "NaN"), and it is neither here.
-# The compile passes one DuckDB thread (R14), so the summation order is fixed.
+#   * the mean is the correctly rounded quotient of an exact sum (Shewchuk partials accumulated in R over
+#     the streamed values, so independent of order and threads), which is R's mean() to the bit; the SD
+#     second pass uses that mean as a literal. A column with an infinite value has mean +-Inf (or NaN)
+#     and SD NaN, as in memory, with no SQL pass.
+# The compile passes one DuckDB thread (R14), so the summation order of the SQL sums is fixed.
+# Known difference: a factor/ENUM column would have its levels sorted by radix here, not kept in the
+# declared factor order of memory (unreachable today: ingest converts factors to character).
 
 .h_t1_sql_main <- function(con, src, by, vars, nonnormal) {
   qid <- function(x) as.character(DBI::dbQuoteIdentifier(con, x))
   qry <- function(sql) DBI::dbGetQuery(con, sql)
   lit <- function(x) sprintf("%.17g", x)
+  # Shewchuk's grow-expansion: the exact sum of the partials p and x, as non-overlapping partials
+  grow <- function(p, x) {
+    out <- numeric(0)
+    for (y in p) {
+      if (abs(x) < abs(y)) {
+        tmp <- x
+        x <- y
+        y <- tmp
+      }
+      hi <- x + y
+      lo <- y - (hi - x)
+      if (lo != 0) out <- c(out, lo)
+      x <- hi
+    }
+    c(out, x)
+  }
+  # The correctly rounded mean of exact partials p over n values: m0 = sum / n, then the exact
+  # residual sum(p) - m0 * n (Dekker's product) refines it once.
+  exmean <- function(p, n) {
+    m0 <- sum(p) / n
+    c1 <- 134217729 * m0
+    mh <- c1 - (c1 - m0)
+    ml <- m0 - mh
+    c2 <- 134217729 * n
+    nh <- c2 - (c2 - n)
+    nl <- n - nh
+    ph <- m0 * n
+    pl <- ((mh * nh - ph) + mh * nl + ml * nh) + ml * nl
+    r <- grow(grow(p, -ph), -pl)
+    m0 + sum(r) / n
+  }
   ds <- qry(paste("DESCRIBE SELECT * FROM", src))
   ty <- toupper(as.character(ds$column_type))
   names(ty) <- ds$column_name
@@ -71,7 +108,7 @@
       rv <- numeric(ng)
       rv[rows$gi] <- as.numeric(rows$n)
       stat <- function(by_group) {
-        sel <- paste0("count(x) AS n, fsum(x) / count(x) AS m, quantile_cont(x, 0.25) AS q1, ",
+        sel <- paste0("count(x) AS n, quantile_cont(x, 0.25) AS q1, ",
                       "quantile_cont(x, 0.5) AS q2, quantile_cont(x, 0.75) AS q3")
         if (by_group) qry(paste0("SELECT gi, ", sel, " FROM (", xd, ") GROUP BY gi"))
         else qry(paste0("SELECT ", sel, " FROM (", xd, ")"))
@@ -81,19 +118,56 @@
       pos <- match(seq_len(ng), sg$gi)
       n_k <- c(as.numeric(sg$n[pos]), as.numeric(sa$n))
       n_k[is.na(n_k)] <- 0
-      m_k <- c(as.numeric(sg$m[pos]), as.numeric(sa$m))
+      # the mean: an exact sum over the streamed values (Shewchuk partials, order independent), then
+      # a correctly rounded division; this is R's mean() (long double sum, refined) to the bit
+      acc <- lapply(seq_len(ng), function(k) list(p = numeric(0), nf = 0, nfn = 0))
+      res <- DBI::dbSendQuery(con, xd)
+      repeat {
+        df <- DBI::dbFetch(res, n = 100000L)
+        if (!nrow(df)) break
+        for (k in unique(df$gi)) {
+          z <- df$x[df$gi == k]
+          fin <- is.finite(z)
+          if (!all(fin)) {
+            acc[[k]]$nf <- acc[[k]]$nf + sum(z[!fin])
+            acc[[k]]$nfn <- acc[[k]]$nfn + sum(!fin)
+            z <- z[fin]
+          }
+          p <- acc[[k]]$p
+          for (v2 in z) p <- grow(p, v2)
+          acc[[k]]$p <- p
+        }
+      }
+      DBI::dbClearResult(res)
+      pa <- numeric(0)
+      nfa <- 0
+      nfna <- 0
+      for (k in seq_len(ng)) {
+        for (v2 in acc[[k]]$p) pa <- grow(pa, v2)
+        nfa <- nfa + acc[[k]]$nf
+        nfna <- nfna + acc[[k]]$nfn
+      }
+      acc[[ng + 1L]] <- list(p = pa, nf = nfa, nfn = nfna)
+      m_k <- vapply(seq_len(ng + 1L), function(k) {
+        if (n_k[k] == 0) return(NA_real_)
+        if (acc[[k]]$nfn > 0) return(acc[[k]]$nf / n_k[k])
+        exmean(acc[[k]]$p, n_k[k])
+      }, numeric(1L))
       q_k <- rbind(c(as.numeric(sg$q1[pos]), as.numeric(sa$q1)),
                    c(as.numeric(sg$q2[pos]), as.numeric(sa$q2)),
                    c(as.numeric(sg$q3[pos]), as.numeric(sa$q3)))
       ss_k <- rep(NA_real_, ng + 1L)
-      mg <- which(n_k[seq_len(ng)] > 1)
+      # a non-finite mean (an infinite value) gives a NaN SD, as sd() does; no SQL pass for it
+      bad <- which(n_k > 1 & !is.finite(m_k))
+      ss_k[bad] <- NaN
+      mg <- which(n_k[seq_len(ng)] > 1 & is.finite(m_k[seq_len(ng)]))
       if (length(mg)) {
         cs <- paste0("CASE gi ", paste0("WHEN ", mg, " THEN ", lit(m_k[mg]), collapse = " "), " END")
         r <- qry(paste0("SELECT gi, fsum((x - ", cs, ") * (x - ", cs, ")) AS ss FROM (", xd,
                         ") WHERE gi IN (", paste(mg, collapse = ", "), ") GROUP BY gi"))
         ss_k[r$gi] <- as.numeric(r$ss)
       }
-      if (n_k[ng + 1L] > 1) {
+      if (n_k[ng + 1L] > 1 && is.finite(m_k[ng + 1L])) {
         r <- qry(paste0("SELECT fsum((x - ", lit(m_k[ng + 1L]), ") * (x - ", lit(m_k[ng + 1L]),
                         ")) AS ss FROM (", xd, ")"))
         ss_k[ng + 1L] <- as.numeric(r$ss)

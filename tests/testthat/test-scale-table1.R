@@ -154,3 +154,56 @@ test_that("the stream Table 1 body matches the in-memory value and opens with on
   expect_match(r$body, "1L, sr_duck_temp", fixed = TRUE)
   expect_error(.sr_emit_check(r$body, "analysis"), NA)
 })
+
+# ---- the mean is R's mean() to the bit (fix round 1) --------------------------------------------
+
+# The SQL value on a locked-down connection with ONE thread, as the real run opens it (R14).
+.st1_sql1 <- function(df, by, vars, nonnormal, env = parent.frame()) {
+  path <- .sc_parquet(df, env = env)
+  con <- .h_st_open(path, "2GB", 1L, tempdir())
+  withr::defer(try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE), envir = env)
+  src <- paste0("read_parquet('", gsub("'", "''", normalizePath(path, winslash = "/"), fixed = TRUE), "')")
+  .h_t1_sql_main(con, src, by, vars, nonnormal)
+}
+
+test_that("the SQL mean equals mean() bitwise on .xx5 tie grids and the strings are identical", {
+  bad <- 0L
+  total <- 0L
+  for (seed in 1:6) {
+    for (grid in c(0.01, 0.1)) {
+      set.seed(1000L * seed + round(grid * 100))
+      ng <- 40L
+      sz <- 2L * sample(2:40, ng, replace = TRUE)           # even n, 4 to 80
+      g <- rep(sprintf("g%02d", seq_len(ng)), sz)
+      x <- round(sample(0:600, length(g), replace = TRUE) * grid + if (grid == 0.1) 100 else 0, 2)
+      df <- data.frame(g = g, x = x, stringsAsFactors = FALSE)
+      mem <- .h_t1_main(df, "g", "x", character())
+      sql <- .st1_sql1(df, "g", "x", character())
+      mm <- mem$vars[[1L]]$mean
+      sm <- sql$vars[[1L]]$mean
+      bad <- bad + sum(!mapply(identical, as.list(mm), as.list(sm)))
+      total <- total + length(mm)
+      spec <- list(by = "g", vars = "x", nonnormal = character())
+      pm <- .sr_t1_present(mem, spec)$tables$table1
+      ps <- .sr_t1_present(sql, spec)$tables$table1
+      expect_identical(ps, pm, info = paste(seed, grid))
+      expect_equal(sql$vars[[1L]]$sd, mem$vars[[1L]]$sd, tolerance = 1e-12)
+    }
+  }
+  expect_gt(total, 400L)
+  expect_identical(bad, 0L)
+})
+
+test_that("an infinite value gives mean Inf and SD NaN as in memory", {
+  set.seed(5)
+  df <- data.frame(g = rep(c("a", "b"), 30), x = c(Inf, rnorm(59)), y = c(rnorm(58), -Inf, Inf),
+                   stringsAsFactors = FALSE)
+  mem <- .h_t1_main(df, "g", c("x", "y"), character())
+  sql <- .st1_sql1(df, "g", c("x", "y"), character())
+  for (i in 1:2) {
+    expect_identical(sql$vars[[i]]$mean, mem$vars[[i]]$mean)
+    expect_identical(is.nan(sql$vars[[i]]$sd), is.nan(mem$vars[[i]]$sd))
+    expect_identical(is.na(sql$vars[[i]]$sd), is.na(mem$vars[[i]]$sd))
+  }
+  expect_identical(sql$vars[[1L]]$mean[c(1L, 3L)], c(Inf, Inf))
+})
