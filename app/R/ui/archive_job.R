@@ -114,13 +114,27 @@
 
 #' Import `archive` into the new folder `dir`. list(ok = TRUE, dir, import) or list(ok = FALSE, error). The
 #' project is closed again (the session opens it).
-.sr_im_worker <- function(archive, dir, job_file) {
+#'
+#' `cancel_file` (created by the session on Cancel) closes the window before the worker has recorded itself in
+#' `job_file`, when Cancel finds nothing to kill: the worker records itself first and then checks the file, so
+#' a Cancel that gave up waiting for the job file always finds the worker stopping here. When the file exists
+#' before the import, nothing is imported; when it appears during the import, what the import created is
+#' removed again (.sr_im_cleanup against a snapshot taken just before it, so a folder that existed before is
+#' never removed). Either way the value is list(ok = FALSE, cancelled = TRUE, error).
+.sr_im_worker <- function(archive, dir, job_file, cancel_file = NULL) {
   .sr_job_record(job_file)
+  asked <- function() .sr_job_path_ok(cancel_file) && file.exists(cancel_file)
+  if (asked()) return(list(ok = FALSE, cancelled = TRUE, error = "the import was cancelled before it started"))
+  before <- .sr_im_snapshot(dir)
   tryCatch({
     p <- sr_srproj_import(archive, dir, verify_data = TRUE)
     imp <- p$import
     try(sr_duck_close(p), silent = TRUE)
     try(sr_project_close(p), silent = TRUE)
+    if (asked()) {
+      .sr_im_cleanup(dir, before)
+      return(list(ok = FALSE, cancelled = TRUE, error = "the import was cancelled; what it created was removed"))
+    }
     list(ok = TRUE, dir = dir, import = imp)
   }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
 }

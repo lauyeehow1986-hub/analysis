@@ -267,7 +267,7 @@ test_that("real worker: a killed import leaves the chosen empty folder and no pa
 })
 
 # Cancel after the worker has finished the import (its result not yet taken by the session): nothing is killed,
-# and the finished import is kept and opened, as a finished export is kept.
+# the job waits for the worker's mirai, and the finished import is kept and opened, as a finished export is kept.
 test_that("a cancel after the worker finished keeps the finished import and opens it", {
   skip_on_cran()
   seen <- .ui_spy_notify()
@@ -283,6 +283,9 @@ test_that("a cancel after the worker finished keeps the finished import and open
     res <- .sr_im_worker(arch, dir, NULL)                  # the worker finishes ...
     expect_true(isTRUE(res$ok))
     session$setInputs(cancel = 1)                          # ... and the user cancels before the session sees it
+    expect_true(running())                                 # nothing was killed: wait for the worker's value
+    ctl$resolve(res)
+    .e3_wait(function() !running(), session, secs = 30)
     expect_false(running())
     expect_true(dir.exists(dir))
     expect_false(is.null(rv()))
