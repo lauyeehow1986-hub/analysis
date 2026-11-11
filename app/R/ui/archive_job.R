@@ -71,3 +71,79 @@
   rm1(file.path(project_dir, "out", paste0(".srproj-", label, ".partial")), TRUE)
   "removed"
 }
+
+# ---- import ---------------------------------------------------------------------------------------------
+
+# Which of the three paths an import may create exist now: the target folder, <dir>.partial and
+# <dir>.partial.src (trailing slashes are stripped as sr_srproj_import does). A named logical: dir, partial, src.
+.sr_im_snapshot <- function(dir) {
+  dir <- sub("[/\\]+$", "", dir)
+  c(dir = file.exists(dir), partial = file.exists(paste0(dir, ".partial")),
+    src = file.exists(paste0(dir, ".partial.src")))
+}
+
+#' After a cancelled or failed import job: remove each of the three paths that exists now and did not exist in
+#' `before` (a .sr_im_snapshot taken before the job started). A target folder that existed (empty) before is
+#' kept: only what the job put into it is removed, and it is put back empty if the job removed it. Returns the
+#' removed paths invisibly.
+.sr_im_cleanup <- function(dir, before) {
+  dir <- sub("[/\\]+$", "", dir)
+  paths <- c(dir = dir, partial = paste0(dir, ".partial"), src = paste0(dir, ".partial.src"))
+  gone <- character()
+  for (nm in names(paths)) {
+    p <- paths[[nm]]
+    was <- isTRUE(before[[nm]])
+    if (!was && file.exists(p)) {
+      unlink(p, recursive = TRUE)
+      gone <- c(gone, p)
+    }
+  }
+  if (isTRUE(before[["dir"]])) {
+    if (dir.exists(dir)) {
+      kids <- list.files(dir, all.files = TRUE, no.. = TRUE, full.names = TRUE)
+      if (length(kids)) {
+        unlink(kids, recursive = TRUE)
+        gone <- c(gone, kids)
+      }
+    } else {
+      dir.create(dir, showWarnings = FALSE)
+    }
+  }
+  invisible(gone)
+}
+
+#' Import `archive` into the new folder `dir`. list(ok = TRUE, dir, import) or list(ok = FALSE, error). The
+#' project is closed again (the session opens it).
+.sr_im_worker <- function(archive, dir, job_file) {
+  .sr_job_record(job_file)
+  tryCatch({
+    p <- sr_srproj_import(archive, dir, verify_data = TRUE)
+    imp <- p$import
+    try(sr_duck_close(p), silent = TRUE)
+    try(sr_project_close(p), silent = TRUE)
+    list(ok = TRUE, dir = dir, import = imp)
+  }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+}
+
+# The $import list of sr_srproj_import as a field/value frame.
+.sr_im_summary <- function(imp) {
+  lst <- function(x) {
+    x <- as.character(unlist(x))
+    if (length(x)) paste(x, collapse = ", ") else "none"
+  }
+  v <- imp$verify
+  vtxt <- if (is.list(v) && isTRUE(v$ok)) {
+    "ok"
+  } else if (is.list(v) && length(v$problems)) {
+    paste(as.character(unlist(v$problems)), collapse = "; ")
+  } else {
+    "not ok"
+  }
+  data.frame(
+    field = c("label", "data mode", "archive sha256", "parts missing", "sources missing", "verify"),
+    value = c(as.character(imp$label)[1L], as.character(imp$data_mode)[1L],
+              substr(as.character(imp$archive_sha256)[1L], 1L, 16L), lst(imp$parts_missing),
+              lst(imp$sources_missing), vtxt),
+    stringsAsFactors = FALSE
+  )
+}

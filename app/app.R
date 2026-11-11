@@ -31,7 +31,7 @@ ui <- do.call(bslib::page_navbar, c(
     theme = bslib::bs_theme(version = 5),
     # the Data, Design, SAP and Analyses tabs are normal scrolling pages of cards (in a fill layout their cards are squashed and overlap); the others keep the fill layout
     fillable = c("Project", .sr_panel_names),
-    bslib::nav_panel("Project", mod_project_ui("project")),
+    bslib::nav_panel("Project", mod_project_ui("project"), mod_import_ui("import")),
     bslib::nav_panel("Data", mod_data_ui("data"), value = "Data"),
     bslib::nav_panel("Design", mod_design_ui("design"), value = "Design"),
     bslib::nav_panel("SAP", mod_sap_ui("sap"), value = "SAP"),
@@ -62,6 +62,8 @@ server <- function(input, output, session) {
   mod_write_server("write", project, busy_for(), settings = function() 0L)
   ar <- mod_archive_server("archive", project, busy_for("archive"))
   shiny::observe(flags$archive <- isTRUE(ar$running()))
+  im <- mod_import_server("import", project, busy_for("import"))
+  shiny::observe(flags$import <- isTRUE(im$running()))
   # The Data, Design, SAP, Analyses, Write and Archive panels are hidden until a project is open.
   shiny::observe({
     for (p in c("Data", "Design", "SAP", "Analyses", "Write", "Archive")) {
