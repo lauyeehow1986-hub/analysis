@@ -196,6 +196,7 @@
 .sr_cox_compile <- function(spec) {
   .sr_cox_check(spec)
   .sr_glm_layers_check(spec, "cox")   # the layer stack is the one of the other model routes
+  if (identical(spec[["engine"]], "stream")) return(.sr_cox_compile_stream(spec))
   if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_cox_compile, "cox", "cox"))
   if (.sr_mi_on(spec)) return(.sr_cox_mi_compile(spec))
   tc <- sr_terms_code(spec)

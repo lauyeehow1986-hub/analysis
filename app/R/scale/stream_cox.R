@@ -8,6 +8,7 @@
 #   chol     .h_st_chol2(M, toler) / .h_st_chsolve2(ch, b) / .h_st_chinv2(ch): the generalised LDL' (S6)
 #   weights  .h_st_cox_wts(S0, E0, d, ties): the per-block Efron / Breslow weights (S8, S9, S12)
 #   step     .h_st_cox_new(p, ties), .h_st_cox_step(st, time, event, X, eta, strat), .h_st_cox_close(st)
+#   guard    .h_st_time_guard(st, time, strat): the S10 time-order check, carried across chunks
 #   fit      .h_st_coxfit(passfn, p, nms, scale, maxit, eps): coxfit6's Newton loop (S5, Task 4)
 #   warn     .h_st_cox_warn(fit, eps): coxph.fit's warnings, verbatim (S7)
 #
@@ -263,6 +264,21 @@
                   E0 = ag$E0[nb], E1 = ag$E1[nb, , drop = FALSE], d = ag$d[nb], LE = ag$LE[nb],
                   XE = ag$XE[nb, , drop = FALSE], E2 = ex_last$E2, S2 = ex_last$S2)
   st
+}
+
+#' The time-order guard of a chunk (S10): within one stratum the analysed .time must not increase, the
+#' last stratum and time carried across chunks in st (NULL at the start of a pass, then list(s, t)).
+#' Returns the updated carry, or stops when a time rises above the one before it in the same stratum.
+.h_st_time_guard <- function(st, time, strat) {
+  n <- length(time)
+  if (!n) return(st)
+  s <- c(if (!is.null(st)) st$s, strat)
+  t <- c(if (!is.null(st)) st$t, time)
+  k <- length(t)
+  if (k > 1L && any(s[-1L] == s[-k] & t[-1L] > t[-k])) {
+    stop("the streamed Cox needs .time to keep the order of the time column")
+  }
+  list(s = strat[n], t = time[n])
 }
 
 #' Flush the pending block and return list(loglik, U, I) of the pass.
