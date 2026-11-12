@@ -42,13 +42,13 @@ test_that("pass reads in file order and detects disorder", {
   expect_equal(r2$state, n)
 })
 
-test_that("stream predicate registers the excluded rows", {
+test_that("stream predicate lists the excluded rows as literals", {
   df <- .sc_frame(50L)
   path <- .sc_parquet(df)
   con <- .sc_con(path)
   expect_identical(.h_st_excl(con, integer()), "TRUE")
   w <- .h_st_excl(con, c(3L, 10L, 50L))
-  expect_identical(w, "\".sr_row\" NOT IN (SELECT r FROM sr_excl)")
+  expect_identical(w, "\".sr_row\" NOT IN (3, 10, 50)")
   got <- DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s WHERE %s", .sci_src(path), w))$n
   expect_equal(got, 47)
 })
@@ -201,7 +201,7 @@ test_that("stream terms setup keeps design identical", {
   expect_false(grepl("sr_data", st$setup, fixed = TRUE))
   expect_error(sr_terms_code(spec, "gpu"))
   # the emitted setup passes the checker
-  expect_true(.sr_emit_check(paste(st$setup, st$design, sep = "\n"), "analysis"))
+  expect_true(.sr_emit_check(paste(st$setup, st$design, sep = "\n"), "analysis", stream = TRUE))
 })
 
 test_that("stream setup freezes the same levels and knots as memory", {

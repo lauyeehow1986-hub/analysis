@@ -40,11 +40,12 @@
 }
 
 #' The SQL predicate that drops the excluded rows (ruling R13). With no rows it is "TRUE"; otherwise
-#' the rows are registered as the in-memory table sr_excl(r) and the predicate is a NOT IN over it.
+#' it is a NOT IN over the row numbers as literals. A literal list is pushed into the Parquet scan as a
+#' filter, so the scan keeps the order of .sr_row; a NOT IN (SELECT ...) subquery is planned as a
+#' parallel join whose output is not in .sr_row order once the extract has several row groups (Task 15).
 .h_st_excl <- function(con, rows) {
   if (!length(rows)) return("TRUE")
-  duckdb::duckdb_register(con, "sr_excl", data.frame(r = as.numeric(rows)), overwrite = TRUE)
-  "\".sr_row\" NOT IN (SELECT r FROM sr_excl)"
+  paste0("\".sr_row\" NOT IN (", paste(sprintf("%.0f", sort(unique(as.numeric(rows)))), collapse = ", "), ")")
 }
 
 #' Fold step(state, df) over the result of `sql` in chunks of `chunk` rows. With order = TRUE the
@@ -112,8 +113,9 @@
   nk <- as.integer(nk)
   if (nk < 3L || nk > 7L) stop("knots for '", col, "' must be a number of knots (3 to 7)")
   p <- prob[[nk - 2L]]
+  # a NaN is missing, as in memory (.h_knots drops is.na, which holds for NaN); DuckDB would sort it last
   base <- paste0("WITH d AS (SELECT CAST(", id, " AS DOUBLE) AS x FROM ", src, " WHERE (", where,
-                 ") AND ", id, " IS NOT NULL)")
+                 ") AND ", id, " IS NOT NULL AND NOT isnan(CAST(", id, " AS DOUBLE)))")
   qs <- paste0("quantile_cont(x, ", sprintf("%.17g", p), ") AS q", seq_along(p), collapse = ", ")
   st <- DBI::dbGetQuery(con, paste0(
     base, ", s AS (SELECT min(x) AS lo, max(x) AS hi FROM d) ",

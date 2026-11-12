@@ -40,3 +40,6 @@ Thumbs.db
 
 # generated sample data (see samples/make_samples.R)
 samples/out/
+
+# tool outputs (scale and test-runner reports)
+tools/out/

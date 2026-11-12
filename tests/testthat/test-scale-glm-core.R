@@ -273,7 +273,7 @@ test_that("the glm core helpers inline as ASCII code the emit checker accepts an
            ".h_st_irls", ".h_st_glm_scores", ".h_st_meat_add", ".h_st_vcov_finish")
   code <- paste(vapply(fns, function(f) .sr_inline(match.fun(f), f), character(1)), collapse = "\n")
   expect_false(grepl("[^\\x01-\\x7F]", code, perl = TRUE))
-  expect_silent(.sr_emit_check(code, "analysis"))
+  expect_silent(.sr_emit_check(code, "analysis", stream = TRUE))
   e <- new.env(parent = baseenv())
   eval(parse(text = code), e)
   df <- .glc_data(500L)

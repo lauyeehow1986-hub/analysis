@@ -258,7 +258,7 @@ test_that("the lm core helpers inline as ASCII code the emit checker accepts and
            ".h_st_cluster_step", ".h_st_cluster_flush", ".h_st_vcov_finish")
   code <- paste(vapply(fns, function(f) .sr_inline(match.fun(f), f), character(1)), collapse = "\n")
   expect_false(grepl("[^\\x01-\\x7F]", code, perl = TRUE))
-  expect_silent(.sr_emit_check(code, "analysis"))
+  expect_silent(.sr_emit_check(code, "analysis", stream = TRUE))
   # evaluated where no StatRouter function is visible
   e <- new.env(parent = baseenv())
   eval(parse(text = code), e)

@@ -302,7 +302,7 @@ test_that("the marginal helpers: lm (identity), empty chunks, refusals, inlining
   H <- .smg_helpers()
   E <- H$env
   expect_false(grepl("[^\\x01-\\x7F]", H$code, perl = TRUE))
-  expect_silent(.sr_emit_check(H$code, "analysis"))
+  expect_silent(.sr_emit_check(H$code, "analysis", stream = TRUE))
   d <- .smg_data(800L)
   d <- d[stats::complete.cases(d[c("yc", "x1")]), ]
   d$sexf <- factor(d$sex, levels = c("F", "M"))

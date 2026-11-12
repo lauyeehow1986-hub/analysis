@@ -35,8 +35,7 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 .sr_an_progress_text <- function(file) {
   tryCatch({
     if (!.sr_an_path_ok(file) || !file.exists(file)) return("")
-    x <- jsonlite::fromJSON(paste(readLines(file, warn = FALSE), collapse = "
-"), simplifyVector = TRUE)
+    x <- jsonlite::parse_json(paste(readLines(file, warn = FALSE), collapse = "\n"), simplifyVector = TRUE)
     if (!is.list(x)) return("")
     num <- function(v) {
       if (is.numeric(v) && length(v) == 1L && is.finite(v) && v >= 0) as.integer(v) else NA_integer_

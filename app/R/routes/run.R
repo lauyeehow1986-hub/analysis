@@ -257,7 +257,7 @@ sr_extract <- function(project, table, cols) {
     "on.exit(DBI::dbDisconnect(.sr_con, shutdown = TRUE), add = TRUE)",
     "sr_src <- paste0(\"read_parquet('\", gsub(\"'\", \"''\", normalizePath(.sr_xf, winslash = \"/\", mustWork = FALSE), fixed = TRUE), \"')\")",
     "rm(.sr_xf)"), collapse = "\n")
-  .sr_emit_check(code, "analysis", prologue = TRUE)
+  .sr_emit_check(code, "analysis", prologue = TRUE, stream = TRUE)
   code
 }
 
@@ -364,7 +364,7 @@ sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
   }
 
   body <- sr_compile(route, spec)
-  .sr_emit_check(body, "analysis")
+  .sr_emit_check(body, "analysis", stream = stream)
   ex <- if (stream) sr_extract_stream(project, a$table, cols) else sr_extract(project, a$table, cols)
   route_key <- .sr_route_key(a$route, a$route_version)
   hw_fp <- sr_hw_fingerprint()

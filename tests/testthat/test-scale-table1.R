@@ -160,7 +160,7 @@ test_that("the stream Table 1 body matches the in-memory value and opens with on
   expect_match(.sr_run_prologue_stream(ex0), ".h_st_open(.sr_xf, sr_duck_memory, sr_duck_threads, sr_duck_temp)",
                fixed = TRUE)
   expect_error(.sr_run_prologue_stream(ex0, threads = 0), "whole number")
-  expect_error(.sr_emit_check(r$body, "analysis"), NA)
+  expect_error(.sr_emit_check(r$body, "analysis", stream = TRUE), NA)
 })
 
 # ---- the mean is R's mean() to the bit (fix round 1) --------------------------------------------
