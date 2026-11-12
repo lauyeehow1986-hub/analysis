@@ -151,10 +151,17 @@ S1 to S9 are probe facts (survival 3.8.3). S10 to S21 are design rulings made wh
   The near-tie map is built after pass 0 from the distinct raw times of the KM count table (S3 applied in R).
   Later chunks map `.time` with `.h_st_timefix_apply`. The map only moves times down and is monotone, so the
   DESC order and the contiguity of tie blocks survive.
-- **S12 W equals Lam.** The deferred S2 weight of a block is sum_l 1/D_l, which is the hazard increment
-  dLam, for both Breslow and Efron. W_after(t_i) is the Lam accumulated before row i's block.
-  - Per chunk: A += crossprod(X, r * X) and B += crossprod(X, (r * W_after) * X).
-  - At the stratum end: I += Lam_stratum * A - B, and A and B reset.
+- **S12 W equals Lam (amended after the Task 3 review).** The deferred S2 weight of a block is
+  w1 = sum_l 1/D_l, which is the hazard increment dLam, for both Breslow and Efron.
+  - **Do not use `Lam*A - B`.** It cancels catastrophically once max|eta| exceeds about 10 (I came out 0 or
+    negative at beta = 4 and 6, p = 1, x sd 2).
+  - **Positive-weight form.** Carry per stratum S2c = sum of r x x' over rows already read. Per chunk
+    segment, W = sum of w1 over its complete blocks, and each row gets wrow = the reverse cumulative sum of w1
+    from its own block to the segment end (0 for pending-block rows). Then
+    I += W * S2c + crossprod(Xr, (rr * wrow) * Xr), and then S2c += crossprod(Xr, rr * Xr). S2c resets at a
+    stratum change; there is no stratum-close term.
+  - Task 6's residual term x_i Lam(t_i) - B(t_i) has the same shape; compare it at a looser tolerance when
+    max|eta| is large.
 - **S13 KM group** (as in `.sr_cox_compile`).
   - **Factor exposure (`t1f`):** its levels in order, with absent levels dropped (`droplevels`).
   - **Numeric exposure:** counts are keyed by value while the number of distinct values seen is <= 8. Once a
