@@ -11,7 +11,7 @@ state and decisions are in [../memory.md](../memory.md). This page lists phase s
 | P1c analysis, P1c.1 feasibility and cluster SE | done |
 | P1d writer, router, freeze, UI (Design + SAP, Analyses, Write + Archive + Import + Settings) | done and merged (UI 3: PR 10, PR 11) |
 | P1e.1 streaming regression and SQL Table 1 (lm, logistic, modpois, table1) | done and merged (PR 12). Guide [scale.md](scale.md); evidence in [validation.md](validation.md) section 4. 20M-row smoke row for the laptop profile: pending (laptop) |
-| P1e.2 streaming Cox and RMST (piecewise-exponential) | next |
-| P1e.3 MI, bootstrap (bag of little bootstraps), Firth and diagnostics at scale | next, after P1e.2 |
+| P1e.2 streaming Cox, cluster SE, KM / RMST and the piecewise-exponential Cox method | done (branch `p1e2-survival`). Guide [scale.md](scale.md) section 6a; evidence in [validation.md](validation.md) section 5. Open: laptop 20M-row smoke, optional dedupe of the survival stream prologue |
+| P1e.3 MI, bootstrap (bag of little bootstraps), Firth and diagnostics at scale | next |
 
 Later phases (P2 onward) are in the design spec.

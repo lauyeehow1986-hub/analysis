@@ -1,6 +1,6 @@
-# Analysis at scale: the streaming engine (P1e.1)
+# Analysis at scale: the streaming engine (P1e.1, P1e.2)
 
-StatRouter fits `lm`, `logistic`, `modpois` and `table1` analyses either **in memory** (the data is read
+StatRouter fits `lm`, `logistic`, `modpois`, `table1`, `cox` and `rmst` analyses either **in memory** (the data is read
 into R) or by **streaming**: the data is written once to a Parquet extract and fitted over fixed-size
 chunks, so R never holds the table. The two engines give the same estimates and standard errors within
 numerical precision; the streaming one exists for tables that do not fit the machine's RAM budget.
@@ -105,7 +105,6 @@ Memory and disk:
 
 | Spec | Refused with |
 |---|---|
-| route `cox` or `rmst` and `engine = "stream"` | "the streaming engine for Cox / RMST arrives in P1e.2". With `auto` they resolve to memory; if the table does not fit, the lock checklist blocks. |
 | `layers$missing = "mi"` | P1e.3 (multiple imputation at scale) |
 | `layers$resampling = "bootstrap"` | P1e.3 (bag of little bootstraps) |
 | `penalty = "firth"` | P1e.3 |
@@ -113,7 +112,57 @@ Memory and disk:
 
 When `engine = "stream"` the refusal comes from the route's validation. When the engine is `auto` and
 resolves to `stream`, the lock checklist blocks with the same reason. Effect-size diagnostics, MI and the
-bootstrap therefore stay in memory until P1e.2 and P1e.3 are built.
+bootstrap therefore stay in memory until P1e.3 is built. Cox and RMST stream since P1e.2 (section 6a);
+`cox_method = "pem"` with MI or the bootstrap is refused on both engines.
+
+## 6a. Streamed survival: Cox, RMST and the piecewise-exponential method (P1e.2)
+
+The routes `cox`, `cox_describe` and `rmst` run on the streaming engine. The rows are read in
+`stream_chunk_rows` chunks sorted by the strata columns, the time column descending and `.sr_row`; R holds one
+chunk plus the p x p accumulators and, for a clustered fit, a DuckDB table of the event times.
+
+| Analysis | What streams | Passes over the analysed rows |
+|---|---|---|
+| exact Cox (`cox_method = "exact"`, the default) | The partial likelihood, replicating `survival::coxph.fit` (survival 3.8.3): the centring and scaling, near-tie times (`aeqSurv`), the Newton loop with `iter.max = 20` and `eps = 1e-9`, step-halving, the Cholesky rule for aliased columns, Efron or Breslow ties, strata, and the `coxph` warning texts. The model SE is the inverse information at the final coefficients. | One counting pass, then the Newton passes (the start pass plus one per iteration): `iter + 2` in all, at most 23. |
+| exact Cox, cluster-robust SE | The `coxph` robust variance (D'D of the score residuals summed by cluster, no small-sample factor). Two extra passes: the first writes the per-event-time quantities into a DuckDB TEMP table `sr_et` in the run connection (no file is written) and a view adds the cumulative sums per stratum; the second joins every row to that view with an ASOF LEFT JOIN on stratum and time, sorted by the cluster. The view columns are prefixed `.sr_et_`, so they cannot clash with a data column. | `iter + 4` in all, at most 25 |
+| `rmst` | Kaplan-Meier counts keyed by (exposure level, raw time) are accumulated in R, and the RMST, its SE and the differences are computed exactly from them, with the same near-tie map as `survfit`. | 1 |
+| KM table and risk table of `cox` | The same counts, collected in the counting pass. | 0 extra |
+| `cox_method = "pem"` | The piecewise-exponential (Poisson) model with `pem_cuts` (below), fitted by the streamed IRLS with the offset `log(pt)`. The model SE uses dispersion 1; the cluster SE is the HC1 `vcovCL` on the expanded rows. | One counting pass, then the IRLS passes: `iter + 2` in all, at most 27; `iter + 3` with a cluster SE |
+
+The progress line shows the pass number and its maximum; the maximum is lowered to the passes run when the fit
+converges.
+
+### Choosing exact Cox or PEM
+
+Use the exact method unless a reason says otherwise: it is the in-memory Cox, and the streamed result matches
+it. The piecewise-exponential model (`cox_method = "pem"`) is an **approximation to the Cox model**: its
+baseline hazard is constant inside K intervals whose cuts are fixed before the fit. Choose it when you accept
+that approximation for a cheaper, fixed-cut streamed fit. Its hazard ratios are close to the Cox ones when K
+is large enough, but they are not equal; see [validation.md](validation.md) section 5.
+
+- `pem_cuts = list(rule = "quantile", k = K)` (K from 2 to 50; the default is K = 10) puts the cuts at event-time
+  quantiles; `list(rule = "explicit", at = c(...))` uses your cut times (increasing, above zero; those at or
+  above the longest time are dropped).
+- A stratified PEM has one baseline hazard per (stratum, interval) combination.
+- A change of `cox_method` or `pem_cuts` after the lock changes the estimator, so it is a **methodological
+  deviation** (a SAP amendment), unlike an engine switch.
+- The SAP_v1.docx shows a Method row only when the spec stores `cox_method`; a spec without it (every project
+  locked before P1e.2) keeps its document and SAP hash.
+
+### Known limits of the streamed survival engine
+
+- **Possibly-infinite coefficients** (monotone likelihood, a single event): `coxph` warns "Loglik converged
+  before variable ...". On such a flat likelihood the SE changes by about 1e-7 relative between runs, from the
+  order of summation alone, so those rows are compared at 1e-6.
+- **Clustered monotone likelihood.** There the score residuals that `coxph` returns are themselves about 1e-4
+  off, so the in-memory robust SE can differ from the streamed one by orders of magnitude (174 against 0.16 in
+  a test fixture). The streamed value agrees with a brute-force residual calculation and is the more accurate.
+- **PEM re-sorts the expanded rows on every IRLS pass**, so on very large data a PEM fit costs more per pass
+  than its pass count suggests.
+- A quantile cut equal to the longest time leaves an empty last interval, as in memory.
+- The `glm` null-deviance refit warning is not reproduced by the streamed PEM.
+- Rows whose time order is not kept stop the streamed Cox with "the streamed Cox needs .time to keep the order
+  of the time column".
 
 ## 7. Behaviour that differs from in memory
 
@@ -151,5 +200,6 @@ bootstrap therefore stay in memory until P1e.2 and P1e.3 are built.
 ## 8. How it was checked
 
 See [validation.md](validation.md) section 4: the 1M-row memory-versus-stream equivalence, the 20M-row smoke
-(logistic with a cluster SE), and the browser walk. Tools: `tools/scale_equiv.R` (`--rows`, `--chunk`,
+(logistic with a cluster SE), and the browser walk. The streamed survival checks are in section 5 of the same
+file. Tools: `tools/scale_equiv.R` (`--rows`, `--chunk`,
 `--out`) and `tools/scale_fit.R` (`--rows`, `--patients`, `--chunk`, `--routes`).

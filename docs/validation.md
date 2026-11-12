@@ -401,3 +401,43 @@ equivalence comparison for a3 are memory against memory; the streaming Table 1 i
 walk). The Switch engine dialog, Cancel of a streaming run, and a table large enough for a real spill were
 not exercised. The reason text used to show a tiny forced budget as "0 GB"; it now prints the budget to
 three significant digits.
+
+## 5. Streaming survival (P1e.2)
+
+The streamed Cox, KM / RMST and piecewise-exponential (PEM) engines (see [scale.md](scale.md) section 6a) are
+compared with the in-memory routes on synthetic data. Nothing here is a clinical validation.
+
+### Tolerances
+
+Relative to max(1, |x|). Counts, `n`, `events`, `n_clusters`, `aliased`, `levels`, warnings, KM and risk-table
+counts and the PEM cuts must be identical.
+
+| Comparison | Tolerance |
+|---|---|
+| exact Cox, stream vs memory (coef, SE, CI, p; model and cluster SE) | 1e-8 |
+| KM `surv`, `lower`, `upper`, stream vs memory | 1e-12 |
+| RMST, its SE and differences, stream vs memory | 1e-10 |
+| PEM, stream vs memory (coef, SE, CI) | 1e-8 |
+| exact Cox, the same spec at chunk sizes 7, 50 and 1e5 | 1e-12 |
+| PEM, the same spec at chunk sizes 7, 50 and 1e5 | 1e-10 (the strata and cluster baseline columns; the plan said 1e-12) |
+| rows with a possibly-infinite coefficient (monotone likelihood, single event) | 1e-6 |
+
+For possibly-infinite coefficients the SE moves by about 1e-7 relative between runs from the order of
+summation alone (true of `coxph` too), so those rows use 1e-6. In a clustered monotone-likelihood fit the
+score residuals that `coxph` returns are about 1e-4 off, so that case is checked against a brute-force
+residual calculation instead of against memory. The memory sha256 pins of the existing cox, cox_describe and
+rmst code are unchanged.
+
+### Weibull sanity check (not an equivalence claim)
+
+On a simulated Weibull sample (n = 20,000, shape 1.5, true log HR 0.5, binary exposure) the PEM log hazard
+ratio with K = 10 quantile intervals is within 0.02 of the exact Cox log hazard ratio from `coxph` (and within
+0.1 of 0.5). This only shows that the approximation is reasonable in a well-behaved case. PEM is an
+approximation to the Cox model, not an equal estimator, and no equivalence is claimed. The check is in
+`tests/testthat/test-cox-pem.R`.
+
+### Known failures that are not from this phase
+
+On `main` at 19e459e, before P1e.2, `test-impute.R` fails 5 expectations ("cat" inside `.h_st_progress` in
+the emit lint), and `test-writer-export.R` fails only when run in the full-suite order (it passes alone; the
+cause is not isolated). The branch adds no failure to either.
