@@ -37,7 +37,7 @@ sr_root <- normalizePath(sr_root, winslash = "/", mustWork = TRUE)
   "io/cohort", "profile/suggest", "profile/query", "profile/flow", "routes/emit", "routes/result",
   "routes/terms", "sap/sap", "routes/run", "routes/table1", "routes/se", "routes/lm",
   "routes/marginal", "routes/glm", "routes/cox", "routes/rmst", "scale/engine", "scale/stream_extract", "scale/stream_io",
-  "scale/stream_fit", "scale/stream_vcov", "scale/stream_marginal", "scale/stream_compile", "scale/table1_sql",
+  "scale/stream_fit", "scale/stream_vcov", "scale/stream_marginal", "scale/stream_surv", "scale/stream_compile", "scale/table1_sql",
   "impute/pool", "impute/impute",
   "resample/boot", "diagnostics/checks", "diagnostics/plots", "sap/deviations", "sap/feas_engine",
   "sap/feasibility", "resample/coverage", "resample/feas_sim", "writer/placeholders",
