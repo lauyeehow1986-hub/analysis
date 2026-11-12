@@ -78,6 +78,7 @@
 .sr_rmst_compile <- function(spec) {
   .sr_rmst_check(spec)
   .sr_glm_layers_check(spec, "rmst")
+  if (identical(spec[["engine"]], "stream")) return(.sr_rmst_compile_stream(spec))
   if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_rmst_compile, "rmst", "rmst"))
   if (.sr_mi_on(spec)) return(.sr_rmst_mi_compile(spec))
   cols <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])

@@ -336,3 +336,125 @@
 
   paste(c(tc$setup, helpers, tc$design, head, pass0, fit, robust, tabc, km, value), collapse = "\n")
 }
+
+# ---- RMST (P1e.2 Task 7, rulings S13, S14, S15, S17 and S18) --------------------------------------------------
+#
+# .sr_rmst_compile() returns .sr_rmst_compile_stream(spec) when spec$engine is "stream". One counting pass
+# (progress max 1) reads the time, status and exposure columns in chunks of stream_chunk rows, runs the R8
+# snippets on each (.h_num / .h_bin of sr_outcome_code, the complete cases of time, status and exposure) and
+# keeps: n, n_total, events, the raw time range, the exact distinct exposure values (S14, so the stop text
+# of more than 8 values is the memory one) and the Kaplan-Meier counts keyed by (exposure as text, raw time)
+# (S13; not kept once a ninth value shows, because the run then stops). Afterwards the stops of the memory
+# code run in its order, each group's RMST uses the near-tie map of that group's own raw times (survfit on
+# one group), and the KM figure data use the map of all times. n, events, at_risk and max_time are raw.
+
+#' The stream body of rmst@1: one code string.
+.sr_rmst_compile_stream <- function(spec) {
+  ch <- spec[["stream_chunk"]]
+  if (is.null(ch)) stop("a stream spec needs stream_chunk (set by the run)", call. = FALSE)
+  q <- function(x) as.character(DBI::dbQuoteIdentifier(DBI::ANSI(), x))
+  cols <- unique(c(spec[["time"]], spec[["status"]], spec[["exposure"]]))
+  ref <- spec[["exposure_ref"]]
+  has_ref <- length(ref) == 1L && !is.na(ref) && nzchar(as.character(ref))
+  sql <- sprintf("paste0(%s, sr_src)", .sr_lit(paste0("SELECT ", paste(q(cols), collapse = ", "), " FROM ")))
+  helpers <- c(
+    .sr_inline(.h_levels, ".h_levels"),
+    .sr_inline(.h_st_pass, ".h_st_pass"),
+    .sr_inline(.h_st_progress, ".h_st_progress"),
+    .sr_inline(.h_st_count, ".h_st_count"),
+    .sr_inline(.h_st_timefix_map, ".h_st_timefix_map"),
+    .sr_inline(.h_st_timefix_apply, ".h_st_timefix_apply"),
+    .sr_inline(.h_st_km_add, ".h_st_km_add"),
+    .sr_inline(.h_st_km_counts, ".h_st_km_counts"),
+    .sr_inline(.h_st_km_finish, ".h_st_km_finish"),
+    .sr_inline(.h_st_rmst, ".h_st_rmst"))
+  code <- c(
+    sprintf(".miss <- setdiff(%s, names(DBI::dbGetQuery(.sr_con, paste(\"SELECT * FROM\", sr_src, \"LIMIT 0\"))))",
+            .sr_lit(cols)),
+    "if (length(.miss)) stop(\"column(s) not in the data: \", paste(.miss, collapse = \", \"))",
+    helpers,
+    sprintf(".sr_chunk <- %s", .sr_lit(as.integer(ch))),
+    sprintf(".sr_sql <- %s", sql),
+    sprintf(".tau <- %s", .sr_lit(spec[["tau"]])),
+    ".prep <- function(df) {",
+    "  sr_data <- df",
+    sprintf("  des <- as.data.frame(sr_data)[%s]", .sr_lit(cols)),
+    sr_outcome_code(spec, "surv"),
+    sprintf("  des[[\".ex\"]] <- des[[%s]]", .sr_lit(spec[["exposure"]])),
+    "  .keep <- stats::complete.cases(des[c(\".time\", \".event\", \".ex\")])",
+    "  list(des = des[.keep, , drop = FALSE], n = nrow(df))",
+    "}",
+    ".pg <- new.env(parent = emptyenv())",
+    ".pg$k <- 0L",
+    ".pg$m <- 1L",
+    ".pg_tick <- function() {",
+    "  .pg$k <- .pg$k + 1L",
+    "  if (exists(\"sr_progress_file\")) .h_st_progress(sr_progress_file, .pg$k, .pg$m)",
+    "  invisible(NULL)",
+    "}",
+    ".A <- new.env(parent = emptyenv())",
+    ".A$n_total <- 0",
+    ".A$n <- 0",
+    ".A$events <- 0",
+    ".A$tlo <- Inf",
+    ".A$thi <- -Inf",
+    ".A$km <- NULL",
+    ".A$ex <- NULL",
+    ".A$many <- FALSE",
+    ".h_st_pass(.sr_con, .sr_sql, .sr_chunk, NULL, function(g, df) {",
+    "  pr <- .prep(df)",
+    "  .A$n_total <- .A$n_total + pr$n",
+    "  d <- pr$des",
+    "  if (!nrow(d)) return(g)",
+    "  .A$n <- .A$n + nrow(d)",
+    "  .A$events <- .A$events + sum(d[[\".event\"]])",
+    "  .A$tlo <- min(.A$tlo, d[[\".time\"]])",
+    "  .A$thi <- max(.A$thi, d[[\".time\"]])",
+    "  .A$ex <- unique(c(.A$ex, unique(d[[\".ex\"]])))",
+    "  if (!.A$many) {",
+    "    if (length(.A$ex) > 8L) {",
+    "      .A$many <- TRUE",
+    "      .A$km <- NULL",
+    "    } else {",
+    "      .A$km <- .h_st_km_add(.A$km, d[[\".time\"]], d[[\".event\"]], as.character(d[[\".ex\"]]))",
+    "    }",
+    "  }",
+    "  g",
+    "}, order = FALSE)",
+    ".pg_tick()",
+    "if (.A$n < 1) stop(\"no complete rows: every row has a missing value in the model\")",
+    ".n <- .h_st_count(.A$n)",
+    "if (.A$events == 0) {",
+    "  stop(\"the outcome has no events among the \", .n, \" rows analysed\")",
+    "}",
+    sprintf(".exn <- %s", .sr_lit(spec[["exposure"]])),
+    ".nlv <- length(.A$ex)",
+    "if (.nlv > 8L) {",
+    "  stop(\"RMST compares groups: exposure '\", .exn, \"' has \", .nlv, \" distinct values; categorise it first\")",
+    "}",
+    sprintf(".lv <- .h_levels(.A$ex, %s)", if (has_ref) .sr_lit(as.character(ref)) else "NULL"),
+    ".raw <- .h_st_km_counts(.A$km, NULL)",
+    ".mx <- vapply(.lv, function(l) max(.raw$t[.raw$g == l]), numeric(1))",
+    ".far <- which(.mx < .tau)",
+    "if (length(.far)) {",
+    paste0("  stop(\"tau = \", .tau, \" exceeds the follow-up of group '\", .lv[.far[1L]], \"' (max time \", ",
+           ".mx[.far[1L]], \")\")"),
+    "}",
+    ".rows <- lapply(.lv, function(l) {",
+    "  cg <- .raw[.raw$g == l, , drop = FALSE]",
+    "  m <- cg$d + cg$c",
+    # the group's own near-tie map (S13), as survfit on this group alone
+    "  cm <- .h_st_km_counts(list(parts = list(cg), n = 1L), .h_st_timefix_map(cg$t))",
+    "  r <- .h_st_rmst(cm, .tau)",
+    paste0("  data.frame(level = l, rmst = r[[\"rmst\"]], se = r[[\"se\"]], n = .h_st_count(sum(m)), ",
+           "events = .h_st_count(sum(cg$d)), at_risk = .h_st_count(sum(m[cg$t >= .tau])), ",
+           "max_time = max(cg$t), stringsAsFactors = FALSE)"),
+    "})",
+    "groups <- do.call(rbind, .rows)",
+    ".map <- .h_st_timefix_map(.raw$t)",
+    ".kmo <- .h_st_km_finish(.h_st_km_counts(.A$km, .map), .lv, c(.A$tlo, .A$thi))",
+    paste0("list(groups = groups, tau = .tau, n = .n, n_total = .h_st_count(.A$n_total), ",
+           "events = .h_st_count(.A$events), level = 0.95, km = .kmo$km, km_risk = .kmo$risk, ",
+           "engine = \"stream\", chunk = .sr_chunk, passes = .pg$k)"))
+  paste(code, collapse = "\n")
+}
