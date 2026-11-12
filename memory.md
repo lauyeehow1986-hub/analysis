@@ -342,8 +342,15 @@ Gotchas:
 - **NaN in a column**: DuckDB keeps NaN as a value that sorts last, memory drops it; the knots CTE and the SQL Table 1 filter `isnan`.
 - **Knot refusal at 5% end share.** Hmisc's fractied rule makes the SQL quantile unusable when an end value holds 5% or more of the rows; the (value, count) path is refused above `stream_knot_rows` (default 5e7).
 - **Step-halving is replaced by a "refit in memory" stop** (Poisson eta overflow only); see the spec section 12 R23.
-- **Engine reason text shows "0 GB budget"** for a tiny forced `SR_RAM_BUDGET_GB` (two-decimal rounding); cosmetic.
-- **A cancelled or killed stream fit restarts from pass 1** (no per-pass checkpoint); the progress file is not atomic and old ones stay in `data/tmp`.
+- **Engine reason text** prints the budget to three significant digits (fixed in PR 14; it used to show "0 GB").
+- **A cancelled or killed stream fit restarts from pass 1** (no per-pass checkpoint); the progress file is written through a `.part` file and renamed (PR 14); old progress files stay in `data/tmp`.
+
+### P1e.1 open items (parked 2026-11-12; come back later)
+- **"Two profile sources (M9)"**: a deferred minor from the P1e.1 review whose details were lost in a context compaction and are not in the docs. Re-derive it from the P1e.1 final-review notes or ask the user before touching it.
+- **Table 1 exact-sum mean speed**: see the gotcha above; remedy is a vectorised pairwise two-sum or SQL-side exact sum.
+- **Laptop-profile 20M-row smoke** (`tools/scale_fit.R`): run after everything else is done, on the laptop.
+- Done in PR 13 / PR 14: every engine switch kept, stale `.tmp-*.parquet` sweep, full `.h_st_open` lockdown, atomic progress file, cluster 0/-0 key, `cat` / `file.rename` confined to `.h_st_progress`, write functions banned, reason wording.
+- **Next phase:** P1e.2 (streaming Cox and RMST), then P1e.3.
 
 ## DQ thresholds (calibrated on the synthetic cardiac twins, `tools/dq_calibrate.R`)
 - **unit_mix min share 0.3% -> 0.155%** (`SR_DQ_UNIT_MIX_MIN_SHARE`; min n stays 3). Recall of the planted
