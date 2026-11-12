@@ -104,6 +104,18 @@ S1 to S9 are probe facts (survival 3.8.3). S10 to S21 are design rulings made wh
   - **Accept:** halving = 0, lbest = newlk, beta = newbeta, step = chsolve2(I, U), newbeta = beta + step.
   - **Exhaustion** (20 iterations without convergence): evaluate once more at beta (the best), flag 1000.
   - There is no clamp on beta.
+- **S5a Corrections found in Task 4 (checked against coxph traces and coxfit6.c; they win over S5/S7).**
+  - The loop has no break at iter.max, so a fit that does not converge reports iter = maxit + 1.
+  - When maxit > 1, the exhaustion pass runs chinv2 on information that was never factored, so V is diagonal
+    (1/I_jj). This matches coxph.
+  - On convergence the flag is -2 if step-halving has run since the last accepted step.
+  - The "Loglik converged before variable" text uses `paste` with its default separator:
+    `"Loglik converged before variable  2 ; coefficient may be infinite. "` (two spaces before the number, a
+    space before the semicolon, a trailing space).
+  - The infinite-coefficient test uses the signed `max(lp) > 500`, where a {-1,0,1} column is not centred in
+    lp. Task 5's `passfn` must return that value as `max_eta`.
+  - Warnings need maxit > 1. `scale` may be a function of the first pass (built from `sumabs`). The fit also
+    returns `maxit`.
 - **S6 cholesky2.** It works on the scaled I. thr = toler.chol * max(diag). A pivot that is non-finite or
   below thr gets diagonal 0, and its column is skipped. chsolve2 gives 0 for singular coordinates, and chinv2
   gives zero rows and columns there.
