@@ -399,5 +399,5 @@ Not verified: Table 1 as a streaming analysis (a3 resolved to memory, so the bro
 equivalence comparison for a3 are memory against memory; the streaming Table 1 is covered by
 `tests/testthat/test-scale-table1.R`, `test-scale-run.R` and the `tools/scale_equiv.R` check, not by this
 walk). The Switch engine dialog, Cancel of a streaming run, and a table large enough for a real spill were
-not exercised. The cosmetic "0 GB budget" in the reason text comes from rounding the tiny forced budget to
-two decimals.
+not exercised. The reason text used to show a tiny forced budget as "0 GB"; it now prints the budget to
+three significant digits.

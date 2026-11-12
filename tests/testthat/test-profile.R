@@ -536,3 +536,16 @@ test_that("a blind sample's row order ignores the dropped outcome column", {
   expect_identical(names(u), c("out", "uid", "grp"))
   expect_identical(as.integer(u$uid), as.integer(by_outcome_first$uid))
 })
+
+test_that("the memory reason of table 1 names no model matrix and a small budget is not printed as 0", {
+  p <- .pf_cardiac()
+  cols <- c("age", "sbp", "sex")
+  t1 <- sr_mem_estimate(p, "cardiac", cols, "table1", profile = "locked16", override_rows = 5e8)
+  expect_false(grepl("3 x model matrix", t1$reason, fixed = TRUE))
+  expect_match(t1$reason, "no model matrix")
+  g <- sr_mem_estimate(p, "cardiac", cols, "glm", profile = "locked16", override_rows = 5e8)
+  expect_match(g$reason, "3 x model matrix", fixed = TRUE)
+  withr::local_envvar(SR_RAM_BUDGET_GB = "0.4")
+  small <- sr_mem_estimate(p, "cardiac", cols, "glm", profile = "locked16")
+  expect_match(small$reason, "of the 0.4 GB budget", fixed = TRUE)
+})

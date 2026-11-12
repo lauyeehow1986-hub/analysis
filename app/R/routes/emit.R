@@ -76,10 +76,13 @@
   "file.remove", "file.rename", "file.copy", "download.file", "url", "socketConnection", "source",
   "sys.source", "library", "require", "requireNamespace", "attachNamespace", "loadNamespace",
   "dyn.load", "eval", "evalq", "parse", "get", "assign", "q", "quit", "saveRDS", "writeLines",
-  "writeBin", "sink",
+  "writeBin", "sink", "write", "write.table", "write.csv", "write.csv2", "writeChar",
   "get0", "mget", "match.fun", "getExportedValue", "getFromNamespace", "asNamespace",
   "getNamespace", "baseenv", "as.environment"
 )
+# Writing to a file by another route: cat(file =) and file.rename. Callable (and usable as a value) only
+# inside the body of the function literal bound to .h_st_progress, which writes the progress file.
+.sr_emit_progress_only <- c("cat", "file.rename")
 # Callable only from the prologue (which reads the hashed extract).
 .sr_emit_prologue_only <- c("readBin", "readRDS", "file.size")
 # Higher-order callers: a forbidden name handed to one of these as a symbol or string is a call by
@@ -226,12 +229,19 @@
 
   # TRUE while the walk is inside the function literal bound to .h_st_open
   in_open <- FALSE
+  # TRUE while the walk is inside the function literal bound to .h_st_progress
+  in_progress <- FALSE
   # a name used as a function, bare or namespaced
   check_fn <- function(fn, e) {
     if (fn %in% .sr_emit_open_only && !in_open) {
       bad(e, sprintf("'%s' is allowed inside .h_st_open only", fn))
     }
-    if (fn %in% .sr_emit_forbidden) bad(e, sprintf("call to forbidden function '%s'", fn))
+    if (fn %in% .sr_emit_progress_only && !in_progress) {
+      bad(e, sprintf("'%s' is allowed inside .h_st_progress only", fn))
+    }
+    if (fn %in% .sr_emit_forbidden && !(in_progress && fn %in% .sr_emit_progress_only)) {
+      bad(e, sprintf("call to forbidden function '%s'", fn))
+    }
     if (fn %in% .sr_emit_prologue_only && !isTRUE(prologue)) {
       bad(e, sprintf("'%s' is allowed in the prologue only", fn))
     }
@@ -248,7 +258,10 @@
     if (is.symbol(e)) {
       s <- as.character(e)
       check_pname(s, e)
-      if (!fm && s %in% barred_values) {
+      if (!fm && s %in% .sr_emit_progress_only && !in_progress) {
+        bad(e, sprintf("'%s' is allowed inside .h_st_progress only", s))
+      }
+      if (!fm && s %in% barred_values && !(in_progress && s %in% .sr_emit_progress_only)) {
         bad(e, sprintf("forbidden function '%s' used as a value", s))
       }
       if (!fm && s %in% .sr_emit_open_only && !in_open) {
@@ -361,6 +374,13 @@
         in_open <<- TRUE
         walk(a, child_fm)
         in_open <<- FALSE
+        next
+      }
+      if (!is.na(hs) && hs == "<-" && i == 3L && identical(e[[2L]], as.name(".h_st_progress")) &&
+          is.call(a) && identical(a[[1L]], as.name("function"))) {
+        in_progress <<- TRUE
+        walk(a, child_fm)
+        in_progress <<- FALSE
         next
       }
       walk(a, child_fm)
