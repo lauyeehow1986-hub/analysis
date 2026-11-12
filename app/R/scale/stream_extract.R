@@ -52,6 +52,9 @@ sr_extract_stream <- function(project, table, cols, drive_info = .sr_drive_info)
   }
 
   dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+  # a killed run leaves its .tmp-*.parquet behind; sweep the ones too old to belong to a live run
+  old <- list.files(dir, pattern = "^[.]tmp-[0-9a-f]+[.]parquet$", full.names = TRUE, all.files = TRUE)
+  if (length(old)) unlink(old[difftime(Sys.time(), file.mtime(old), units = "hours") > 24])
   sr_store_view(project, table)
   con <- sr_duck(project)
   q <- DBI::dbQuoteIdentifier(con, cols)

@@ -482,3 +482,23 @@ test_that("the SAP_v1 of a pre-P1e lock (fixture) has no engine table", {
                                          names(state$analyses))
   expect_true(grepl("Computational engine", .seq_sapdoc_text(st2), fixed = TRUE))
 })
+
+test_that(".h_st_open locks the extension repositories as .sr_duck_setup does", {
+  path <- tempfile(fileext = ".parquet")
+  withr::defer(unlink(path))
+  c0 <- DBI::dbConnect(duckdb::duckdb())
+  DBI::dbExecute(c0, sprintf("COPY (SELECT 1 AS \".sr_row\") TO '%s' (FORMAT PARQUET)", gsub("'", "''", path)))
+  DBI::dbDisconnect(c0, shutdown = TRUE)
+  tmp <- tempfile("sropen")
+  withr::defer(unlink(tmp, recursive = TRUE))
+  con <- .h_st_open(path, "1GB", 1L, tmp)
+  withr::defer(try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE))
+  ext <- normalizePath(file.path(tmp, "ext-empty"), winslash = "/", mustWork = FALSE)
+  got <- DBI::dbGetQuery(con, paste("SELECT current_setting('custom_extension_repository') AS r,",
+                                    "current_setting('autoinstall_extension_repository') AS a,",
+                                    "current_setting('lock_configuration') AS l"))
+  expect_identical(got$r, ext)
+  expect_identical(got$a, ext)
+  expect_true(as.logical(got$l))
+  expect_error(DBI::dbExecute(con, "SET custom_extension_repository = 'http://example.invalid'"))
+})

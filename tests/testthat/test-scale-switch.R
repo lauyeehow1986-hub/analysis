@@ -56,3 +56,15 @@ test_that("switch is refused before the SAP lock and works after it", {
   expect_identical(evs[[length(evs)]]$type, "engine.switched")
   expect_identical(.sr_engine_effective(p2, "a1"), "stream")
 })
+
+test_that("a second switch is kept beside the first", {
+  p <- .sc_locked(.scw_spec(), env = environment())
+  p <- sr_engine_switch(p, "a1", "stream", "moved to locked16")
+  p <- sr_engine_switch(p, "a1", "memory", "back on the laptop")
+  expect_identical(.sr_engine_effective(p, "a1"), "memory")
+  r <- sr_deviations(p)
+  r <- r[r$kind == "computational", , drop = FALSE]
+  expect_identical(r$reason, c(
+    "engine changed from memory to stream: moved to locked16; estimator unchanged",
+    "engine changed from stream to memory: back on the laptop; estimator unchanged"))
+})
