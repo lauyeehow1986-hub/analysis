@@ -514,3 +514,34 @@ with the text above, the ruling wins.
   fragment for a stream value; every `present` call site uses it.
 - **R18** After the lock the SAP hash reads the frozen `lock$engines`. Before the lock it resolves
   the engines now, and a resolution error counts as not stream.
+
+### Rulings made during the build (added at Task 16)
+
+- **R19** (Task 9) A non-binary numeric exposure with the marginal effect on needs the exact count of
+  distinct values for the in-memory "N distinct values" stop or note. The exact count needs a sort, so the
+  stream run makes one **extra sorted distinct-count pass** that R15's maximum did not include. The progress
+  maximum is raised when the pass happens, so the progress file never shows a pass above its maximum.
+- **R20** (Task 11) The Methods engine sentence depends on how the engine was chosen. When the engine was
+  resolved from `auto`, the sentence uses the wording of section 7 ("exceeded the in-memory budget"). When
+  the analysis asked for `stream` explicitly, the sentence says "as requested" instead, because the budget
+  claim would be false for a table that fits. Numbers are plain digits (no thousands mark) so the writer can
+  lift them into placeholders.
+- **R21** (Task 10) The Table 1 fragment's "over all N rows" uses N = the overall n plus the rows excluded
+  for a missing group, which matches the two counts in `table1_note`. The Table 1 mean is an exact
+  (Shewchuk) sum accumulated in R with one correctly rounded division, so the strings equal the in-memory
+  strings; the loop costs about 2.4 microseconds per value per continuous variable (a known limit at 1e8
+  rows and more; see docs/scale.md).
+- **R22** (Task 5) Knots use the SQL quantile only when Hmisc's default rule applies unchanged: at least 100
+  values, more than nk + 2 distinct values, distinct quantiles, and no end value holding 5% or more of the
+  rows (Hmisc's fractied rule, which section 6.3 did not mention). Otherwise the (value, count) table is
+  fetched and `.h_knots` runs on it. A column with 5% or more at an end and more than `stream_knot_rows`
+  (default 5e7) values is **refused**. A NaN is missing, as in memory.
+- **R23** (Task 7) `glm.fit` step-halving (non-finite deviance or invalid mu) is **replaced by a stop**:
+  "the streaming fit met a non-finite working value; refit in memory". With the clipped canonical links the
+  only way to reach it is a Poisson eta overflow.
+- **R24** (Task 15) The `exclude_rows` predicate is a hybrid, replacing R13. Up to 1000 rows are literals in a
+  `NOT IN (...)`, which DuckDB pushes into the Parquet scan and which keeps the order of `.sr_row`. Above
+  1000 the rows are registered as `sr_excl` and the predicate is a hash anti-join, which DuckDB plans as a
+  parallel join whose output is **not** in `.sr_row` order over several row groups (found by
+  `tools/scale_equiv.R` at 1M rows: "extract read out of order"). Reads that need file order therefore add
+  `ORDER BY ".sr_row"` for that predicate. The cost of the 1e8-row ORDER BY spill is not measured.
