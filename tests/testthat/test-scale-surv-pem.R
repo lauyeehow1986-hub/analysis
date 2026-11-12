@@ -9,7 +9,7 @@
 
 # Two streamed PEM values at different chunk sizes: the counts exactly, the coefficient table at 1e-10. The
 # TSQR fold of the IRLS sums in chunk order, and with the many baseline columns of strata the table moves
-# by a few 1e-12 between chunk sizes (plan correction: 1e-12 holds for the exact Cox, not here).
+# by up to a few 1e-12 relative between chunk sizes (measured 5e-12; the exact Cox holds 1e-12, not here).
 .pe_chunks_eq <- function(a, b, info = "") {
   for (f in c("est", "se", "lo", "hi", "p")) {
     expect_equal(a$coef[[f]], b$coef[[f]], tolerance = 1e-10, info = paste(info, f))
@@ -179,4 +179,20 @@ test_that("stream pem value names, progress and the emit check", {
     expect_false(grepl("survSplit", body, fixed = TRUE))
     expect_true(grepl("the piecewise-exponential model needs every time above zero", body, fixed = TRUE))
   }
+})
+
+test_that("a perfectly separating exposure stops the streamed PEM with the Poisson likelihood wording", {
+  set.seed(3)
+  d <- data.frame(time = stats::rexp(200, 1) + 0.1, sex = rep(0:1, each = 100))
+  d$status <- ifelse(d$sex == 1, 1, 2)   # exposure 1 never has an event
+  spec <- list(purpose = "explain-causal", time = "time", status = "status", status_event = 2, exposure = "sex",
+               cox_method = "pem", layers = .ssc_layers(), seed = 7L, pem_cuts = list(rule = "explicit", at = c(0.5, 1)))
+  e <- .ssc_err(.ssc_stream(d, spec, "cox", 50L))
+  if (is.na(e)) {
+    # the stop may come from the route's present(), as in memory
+    v <- .ssc_stream(d, spec, "cox", 50L)
+    e <- tryCatch({ r <- sr_route_get("cox", 1L); r$present(v, spec); NA_character_ },
+                  error = function(err) conditionMessage(err))
+  }
+  expect_match(e, "Poisson likelihood", fixed = TRUE)
 })

@@ -188,7 +188,7 @@ test_that("no file is written", {
   expect_true(.sr_emit_check(body, "analysis", stream = TRUE))
   expect_false(grepl("[^\\x01-\\x7F]", body, perl = TRUE))
   expect_false(grepl("parquet", body, fixed = TRUE))
-  expect_true(grepl("CREATE TEMP TABLE sr_et AS SELECT * FROM sr_et_chunk", body, fixed = TRUE))
+  expect_true(grepl("CREATE OR REPLACE TEMP TABLE sr_et AS SELECT * FROM sr_et_chunk", body, fixed = TRUE))
   expect_true(grepl("INSERT INTO sr_et SELECT * FROM sr_et_chunk", body, fixed = TRUE))
   expect_true(grepl("ASOF LEFT JOIN sr_et_cum", body, fixed = TRUE))
 })
@@ -202,4 +202,17 @@ test_that("a clustered stream spec compiles (the Task 5 stop is gone)", {
   # without the cluster layer the body has no event-time table
   b0 <- .sr_cox_compile_stream(utils::modifyList(.ssc_surv_spec("cox"), list(engine = "stream", stream_chunk = 100)))
   expect_false(grepl("sr_et", b0, fixed = TRUE))
+})
+
+test_that("a character cluster column gives the memory robust SE on the stream", {
+  df <- .ssc_surv_frame(300L, 27L)
+  df$pid <- sprintf("p%03d", as.integer(df$pid))
+  spec <- .cl_spec()
+  mem <- .ssc_memory(df, spec, "cox")
+  expect_identical(mem$se_type, "cluster")
+  for (ch in c(7L, 100000L)) {
+    st <- .ssc_stream(df, spec, "cox", ch)
+    .ssc_surv_expect(st, mem, as.character(ch))
+    expect_identical(st$n_clusters, mem$n_clusters, info = as.character(ch))
+  }
 })

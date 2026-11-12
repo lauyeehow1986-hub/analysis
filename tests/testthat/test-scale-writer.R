@@ -91,12 +91,14 @@ test_that("manuscript Methods carry the engine sentence through placeholders", {
   expect_match(dt, "fitted by streaming iteratively reweighted least squares", fixed = TRUE)
 })
 
-test_that("every stream-capable route has an engine sentence kind; Cox and RMST have none", {
+test_that("every stream-capable route has an engine sentence kind, survival routes included", {
   for (r in c("lm", "lm_describe", "logistic", "logistic_describe", "modpois", "table1")) {
     expect_false(is.null(.sr_engine_kind(r)), info = r)
   }
   expect_identical(.sr_engine_kind("lm_describe"), "lm")
-  for (r in c("cox", "cox_describe", "rmst")) expect_null(.sr_engine_kind(r), info = r)
+  expect_identical(.sr_engine_kind("cox"), "cox")
+  expect_identical(.sr_engine_kind("cox_describe"), "cox")
+  expect_identical(.sr_engine_kind("rmst"), "rmst")
 })
 
 test_that("a streamed lm_describe carries the engine sentence through placeholders", {
