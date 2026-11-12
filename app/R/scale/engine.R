@@ -1,7 +1,7 @@
 # scale/engine.R - the engine field (auto | memory | stream), its refusals and its resolution (P1e.1).
 #
-# `engine` is an optional spec field of lm, logistic, logistic_describe, modpois and table1 (cox and rmst
-# take `engine` only, and refuse "stream" until P1e.2). "auto" (the default) runs in memory when the analysis
+# `engine` is an optional spec field of lm, logistic, logistic_describe, modpois, table1, cox, cox_describe and
+# rmst (P1e.2 gave the survival routes the streaming engine too). "auto" (the default) runs in memory when the analysis
 # fits the profile's RAM budget and streams when it does not; "memory" never switches (a table that does not
 # fit is a block); "stream" always streams. The engine is resolved from the sizes, never from the data
 # values, and is frozen at the SAP lock.
@@ -12,10 +12,6 @@ SR_ENGINES <- c("auto", "memory", "stream")
 #' the spec only. A route's cross-field validator calls it when engine = "stream"; sr_engine_resolve calls it
 #' when "auto" resolves to stream.
 .sr_engine_refusal <- function(route_id, spec) {
-  id <- as.character(route_id)[1L]
-  if (!is.na(id) && (startsWith(id, "cox") || startsWith(id, "rmst"))) {
-    return("the streaming engine for Cox / RMST arrives in P1e.2")
-  }
   L <- spec[["layers"]]
   if (identical(L[["missing"]], "mi")) return("multiple imputation at scale arrives in P1e.3")
   if (identical(L[["resampling"]], "bootstrap")) return("the bag of little bootstraps arrives in P1e.3")
@@ -198,11 +194,11 @@ sr_engine_switch <- function(project, analysis_id, engine, reason) {
   if (identical(as.character(route_id), "table1")) 1L else NULL
 }
 
-#' The kind of engine Methods sentence a route gets ("lm", "glm" or "table1"), or NULL for a route that
-#' has no streaming engine (the six routes whose schema carries `engine` and `stream_chunk`).
+#' The kind of engine Methods sentence a route gets ("lm", "glm", "table1", "cox" or "rmst"), or NULL for a
+#' route that has no streaming engine (the routes whose schema carries `engine` and `stream_chunk`).
 .sr_engine_kind <- function(route_id) {
   kinds <- c(lm = "lm", lm_describe = "lm", logistic = "glm", logistic_describe = "glm", modpois = "glm",
-             table1 = "table1")
+             table1 = "table1", cox = "cox", cox_describe = "cox", rmst = "rmst")
   id <- as.character(route_id)[1L]
   if (is.na(id) || !(id %in% names(kinds))) return(NULL)
   kinds[[id]]
@@ -230,7 +226,17 @@ sr_engine_switch <- function(project, analysis_id, engine, reason) {
     return(paste0("Descriptive statistics were computed exactly by SQL aggregation over all ", num(tot),
                   " rows."))
   }
-  how <- if (identical(kind, "lm")) "least squares" else "iteratively reweighted least squares"
+  if (identical(kind, "rmst")) {
+    return(paste0("The restricted mean survival times were computed exactly from Kaplan-Meier counts ",
+                  "accumulated over all ", num(value$n), " rows in chunks of ", num(value$chunk), " rows."))
+  }
+  how <- if (identical(kind, "lm")) {
+    "least squares"
+  } else if (identical(kind, "cox") && !identical(value$method, "pem")) {
+    "Newton-Raphson iteration on the partial likelihood"
+  } else {
+    "iteratively reweighted least squares"
+  }
   tail <- paste0("This gives the same maximum-likelihood estimates and standard errors as standard software ",
                  "within numerical precision.")
   if (identical(requested, "stream")) {

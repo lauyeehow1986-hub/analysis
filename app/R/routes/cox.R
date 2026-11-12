@@ -42,6 +42,64 @@
 
 .sr_cox_ties_of <- function(spec) if (is.null(spec[["ties"]])) "efron" else spec[["ties"]]
 
+# The fitting method: "exact" (the partial likelihood, the default and what every spec without the field
+# means) or "pem" (the piecewise-exponential Poisson model, P1e.2).
+.sr_cox_method_of <- function(spec) if (is.null(spec[["cox_method"]])) "exact" else spec[["cox_method"]]
+
+# The cut-point rule of a PEM fit: spec$pem_cuts, or ten event-time quantile intervals.
+.sr_pem_cuts_of <- function(spec) {
+  if (is.null(spec[["pem_cuts"]])) list(rule = "quantile", k = 10) else spec[["pem_cuts"]]
+}
+
+# The method sentence the SAP records for a cox analysis.
+.sr_cox_method_text <- function(spec) {
+  if (!identical(.sr_cox_method_of(spec), "pem")) {
+    ties <- if (identical(.sr_cox_ties_of(spec), "breslow")) "Breslow" else "Efron"
+    return(paste0("Hazard ratios were estimated by a Cox proportional hazards model (partial likelihood, ", ties,
+                  " ties)."))
+  }
+  cu <- .sr_pem_cuts_of(spec)
+  if (identical(cu[["rule"]], "explicit")) {
+    at <- vapply(as.numeric(cu[["at"]]), function(x) format(x, digits = 15, trim = TRUE), "")
+    return(paste0("Hazard ratios were estimated by a piecewise-exponential Poisson model (rule explicit: ",
+                  paste(at, collapse = ", "), "); listed cuts at or beyond the longest observed time are dropped."))
+  } else {
+    k <- cu[["k"]]
+  }
+  paste0("Hazard ratios were estimated by a piecewise-exponential Poisson model with ", format(k, trim = TRUE),
+         " intervals at event-time quantiles.")
+}
+
+# The PEM field checks of .sr_cox_check: pem_cuts needs the pem method, the rule and its values are valid, and
+# neither multiple imputation nor the bootstrap is combined with PEM yet. Stops with the reason.
+.sr_pem_check <- function(spec) {
+  pem <- identical(.sr_cox_method_of(spec), "pem")
+  cu <- spec[["pem_cuts"]]
+  if (!is.null(cu) && !pem) stop("pem_cuts needs cox_method = \"pem\"", call. = FALSE)
+  if (!pem) return(invisible(TRUE))
+  L <- spec[["layers"]]
+  if (identical(L[["missing"]], "mi") || identical(L[["resampling"]], "bootstrap")) {
+    stop("PEM with multiple imputation / bootstrap arrives in P1e.3", call. = FALSE)
+  }
+  if (is.null(cu)) return(invisible(TRUE))
+  rule <- cu[["rule"]]
+  if (!(is.character(rule) && length(rule) == 1L && !is.na(rule) && rule %in% c("quantile", "explicit"))) {
+    stop("pem_cuts$rule must be \"quantile\" or \"explicit\"", call. = FALSE)
+  }
+  if (identical(rule, "quantile")) {
+    k <- cu[["k"]]
+    if (!(is.numeric(k) && length(k) == 1L && is.finite(k) && k == floor(k) && k >= 2 && k <= 50)) {
+      stop("pem_cuts$k must be a whole number from 2 to 50", call. = FALSE)
+    }
+  } else {
+    at <- cu[["at"]]
+    ok <- is.numeric(at) && length(at) >= 1L && all(is.finite(at)) && all(at > 0) &&
+      (length(at) == 1L || all(diff(at) > 0))
+    if (!ok) stop("pem_cuts$at must be increasing, finite numbers above zero", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # Whether the fit uses cluster(): layers$clustered = TRUE (and then spec$cluster is required).
 .sr_cox_clustered <- function(spec) isTRUE(spec[["layers"]][["clustered"]])
 
@@ -68,6 +126,7 @@
   .sr_surv_check(spec)
   .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
+  .sr_pem_check(spec)
   .sr_engine_check(spec, "cox")
   base <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   cl <- spec[["cluster"]]
@@ -90,7 +149,9 @@
   .sr_cox_check(spec)
   st <- .sr_spec_chr(spec[["strata"]])
   mi <- identical(spec[["layers"]][["missing"]], "mi")
-  summary <- if (length(spec[["terms"]]) > 0L) {
+  summary <- if (identical(.sr_cox_method_of(spec), "pem")) {
+    "hazard ratio from a piecewise-constant baseline hazard (piecewise-exponential model)"
+  } else if (length(spec[["terms"]]) > 0L) {
     "adjusted hazard ratio"
   } else if (length(st)) {
     paste0("hazard ratio stratified by ", paste(st, collapse = ", "), " (no other model terms)")
@@ -136,8 +197,10 @@
 .sr_cox_compile <- function(spec) {
   .sr_cox_check(spec)
   .sr_glm_layers_check(spec, "cox")   # the layer stack is the one of the other model routes
+  if (identical(spec[["engine"]], "stream")) return(.sr_cox_compile_stream(spec))
   if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_cox_compile, "cox", "cox"))
   if (.sr_mi_on(spec)) return(.sr_cox_mi_compile(spec))
+  if (identical(.sr_cox_method_of(spec), "pem")) return(.sr_cox_pem_compile(spec))
   tc <- sr_terms_code(spec)
   plan <- .sr_term_plan(spec)
   ties <- .sr_cox_ties_of(spec)
@@ -248,6 +311,114 @@
            "mi = .mi_info)"))
   paste(code, collapse = "\n")
 }
+# ---- piecewise-exponential method (cox_method = "pem", P1e.2 S16) -------------------------------
+
+# The emitted lines that set .cuts from the analysed rows `des` (the columns .time and .event): the cut
+# points of the piecewise-exponential model, 0 and Inf included, so the intervals are (c[j-1], c[j]].
+# quantile: the unique event-time quantiles (type 7, raw times); explicit: the listed times below the
+# longest analysed time. Shared by the memory compile and the streamed one.
+.sr_pem_cut_code <- function(spec) {
+  cu <- .sr_pem_cuts_of(spec)
+  if (identical(cu[["rule"]], "explicit")) {
+    c(sprintf(".at <- %s", .sr_lit(as.numeric(cu[["at"]]))),
+      ".cuts <- c(0, .at[.at < max(des[[\".time\"]])], Inf)")
+  } else {
+    k <- as.integer(cu[["k"]])
+    sprintf(paste0(".cuts <- c(0, unique(stats::quantile(des[[\".time\"]][des[[\".event\"]] == 1], ",
+                   "probs = (1:(%d - 1)) / %d, type = 7, names = FALSE)), Inf)"), k, k)
+  }
+}
+
+# The compile of the piecewise-exponential Cox on the memory engine: the rows are split at the cut points
+# (survSplit), the event indicator is modelled by Poisson regression with a log exposure-time offset and
+# one baseline hazard per interval (per stratum and interval with strata). The hazard ratios are the
+# exponentiated covariate coefficients; the baseline indicators are not reported. The SE is the model one
+# (dispersion 1) or the cluster-robust one (HC1) of the expanded rows. The Kaplan-Meier data come from the
+# unsplit rows.
+.sr_cox_pem_compile <- function(spec) {
+  tc <- sr_terms_code(spec)
+  plan <- .sr_term_plan(spec)
+  cl <- if (.sr_cox_clustered(spec)) spec[["cluster"]] else NULL
+  st <- .sr_spec_chr(spec[["strata"]])
+  st_names <- if (length(st)) paste0(".s", seq_along(st)) else character()
+  rhs_vars <- all.vars(stats::as.formula(paste("~", tc$rhs)))
+  used <- unique(c(".time", ".event", rhs_vars, st_names, if (!is.null(cl)) ".cl"))
+  base <- if (length(st)) {
+    sprintf(".sp[[\".bs\"]] <- interaction(factor(.sp[[\".int\"]]), %s, drop = TRUE)",
+            paste(sprintf(".sp[[%s]]", vapply(st_names, .sr_lit, "")), collapse = ", "))
+  } else {
+    ".sp[[\".bs\"]] <- factor(.sp[[\".int\"]])"
+  }
+  km_group <- if (identical(plan[[1L]]$type, "factor")) {
+    "des[[\"t1f\"]]"
+  } else {
+    "if (length(unique(des[[\"t1\"]])) <= 8L) des[[\"t1\"]] else NULL"
+  }
+  copy <- c(
+    vapply(seq_along(st), function(i) sprintf("des[[%s]] <- des[[%s]]", .sr_lit(st_names[i]), .sr_lit(st[i])),
+           character(1)),
+    if (!is.null(cl)) sprintf("des[[\".cl\"]] <- des[[%s]]", .sr_lit(cl)))
+  code <- c(
+    tc$setup,
+    .sr_inline(.sr_h_vcov, ".h_vcov"),
+    .sr_inline(.sr_h_coef_table, ".h_coef_table"),
+    .sr_inline(.sr_h_km, ".h_km"),
+    tc$design,
+    "des <- .h_design(sr_data)",
+    sr_outcome_code(spec, "surv"),
+    copy,
+    sprintf(".keep <- stats::complete.cases(des[%s])", .sr_lit(used)),
+    "if (!any(.keep)) stop(\"no complete rows: every row has a missing value in the model\")",
+    "des <- des[.keep, , drop = FALSE]",
+    "if (sum(des[[\".event\"]]) == 0L) {",
+    "  stop(\"the outcome has no events among the \", nrow(des), \" rows analysed\")",
+    "}",
+    "if (any(des[[\".time\"]] <= 0)) {",
+    "  stop(\"the piecewise-exponential model needs every time above zero (found \", sum(des[[\".time\"]] <= 0), ",
+    "       \" rows with time <= 0)\")",
+    "}",
+    .sr_pem_cut_code(spec),
+    ".ncl <- NA_real_",
+    if (!is.null(cl)) c(
+      ".ncl <- length(unique(des[[\".cl\"]]))",
+      "if (.ncl < 2L) stop(\"layers$clustered needs at least two clusters (found \", .ncl, \")\")"
+    ),
+    "Surv <- survival::Surv",
+    ".sp <- survival::survSplit(Surv(.time, .event) ~ ., data = des, cut = .cuts[-c(1L, length(.cuts))], episode = \".int\")",
+    ".sp[[\".pt\"]] <- .sp[[\".time\"]] - .sp[[\"tstart\"]]",
+    base,
+    ".wrn <- character()",
+    # one baseline indicator per (stratum,) interval; a single one is the intercept (a lone factor level has no contrasts)
+    sprintf(".fm <- if (nlevels(.sp[[\".bs\"]]) > 1L) %s else %s",
+            .sr_lit(sprintf(".event ~ 0 + .bs + %s + offset(log(.pt))", tc$rhs)),
+            .sr_lit(sprintf(".event ~ %s + offset(log(.pt))", tc$rhs))),
+    "fit <- withCallingHandlers(stats::glm(stats::as.formula(.fm), data = .sp, family = stats::poisson()),",
+    "  warning = function(w) {",
+    "    .wrn <<- c(.wrn, conditionMessage(w))",
+    "    invokeRestart(\"muffleWarning\")",
+    "  })",
+    ".cf <- stats::coef(fit)",
+    ".cf <- .cf[!(startsWith(names(.cf), \".bs\") | names(.cf) == \"(Intercept)\")]",
+    ".ok <- !is.na(.cf)",
+    ".nm <- names(.cf)[.ok]",
+    if (is.null(cl)) {
+      ".V <- .h_vcov(fit, \"model\", NULL)[.nm, .nm, drop = FALSE]"
+    } else {
+      ".V <- .h_vcov(fit, \"cluster\", .sp[[\".cl\"]])[.nm, .nm, drop = FALSE]"
+    },
+    "tab <- .h_coef_table(.cf[.ok], .V, df = Inf)",
+    sprintf(".kmg <- %s", km_group),
+    ".kmo <- .h_km(des[[\".time\"]], des[[\".event\"]], .kmg)",
+    paste0("list(coef = tab, aliased = names(.cf)[!.ok], n = nrow(des), n_total = nrow(sr_data), ",
+           "events = sum(des[[\".event\"]]), level = 0.95, se_type = ",
+           .sr_lit(if (is.null(cl)) "model" else "cluster"), ", n_clusters = .ncl, ties = NA_character_",
+           ", strata = ", .sr_lit(st), ", levels = .sr_fixed$levels, warnings = .wrn, ",
+           "km_by = if (is.null(.kmg)) \"overall\" else \"exposure\", km = .kmo$km, km_risk = .kmo$risk, ",
+           "method = \"pem\", cuts = .cuts, k = length(.cuts) - 1L)")
+  )
+  paste(code, collapse = "\n")
+}
+
 
 # ---- present ------------------------------------------------------------------------------------
 
@@ -300,7 +471,7 @@
   rownames(effects) <- NULL
   prim_rows <- effects[effects$role == "primary", , drop = FALSE]
   if (!nrow(prim_rows) || !all(is.finite(c(prim_rows$est, prim_rows$lo, prim_rows$hi)))) {
-    stop("The estimate or interval for the exposure \"", exposure, "\" is not finite: the partial likelihood has no ",
+    stop("The estimate or interval for the exposure \"", exposure, "\" is not finite: the ", if (identical(value$method, "pem")) "Poisson" else "partial", " likelihood has no ",
          "finite maximum for it (for example because it perfectly separates the events), so the hazard ratio cannot be reported.",
          call. = FALSE)
   }
@@ -331,13 +502,28 @@
     "unadjusted (no model terms besides the exposure)"
   }
   st_suffix <- if (length(strata) && n_other > 0L) paste0("; baseline hazard stratified by ", st_text) else ""
-  frag <- list(cox_note = sprintf(
-    paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
-           "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
-    spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
-    as.integer(round(value$n_total - value$n)),
-    st_suffix,
-    .sr_cox_se_text(value)))
+  pem <- identical(value$method, "pem")
+  frag <- list()
+  if (!pem) {
+    frag$cox_note <- sprintf(
+      paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
+             "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
+      spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
+      as.integer(round(value$n_total - value$n)),
+      st_suffix,
+      .sr_cox_se_text(value))
+  } else {
+    frag$cox_note <- sprintf(
+      paste0("Hazard ratios from piecewise-exponential Poisson regression of time to %s on %s, %s; ",
+             "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
+      spec[["status"]], exposure, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
+      as.integer(round(value$n_total - value$n)), st_suffix, .sr_cox_se_text(value))
+    cuts <- value$cuts[-c(1L, length(value$cuts))]
+    frag$pem_method <- sprintf(paste0("Hazard ratios were estimated with a piecewise-exponential (Poisson) model ",
+                                      "with %d intervals of constant baseline hazard (cut points at %s); ",
+                                      "this approximates the Cox model."),
+                               as.integer(value$k), paste(vapply(cuts, format, "", digits = 6, trim = TRUE), collapse = ", "))
+  }
   frag$exclude_rows <- .sr_exclude_fragment(spec)
   if (mi) {
     tables$model_fit <- data.frame(
@@ -399,6 +585,9 @@
     ties = list(type = "chr", required = FALSE, values = c("efron", "breslow")),
     exclude_rows = list(type = "num", required = FALSE),
     engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
+    cox_method = list(type = "chr", required = FALSE, values = c("exact", "pem")),
+    pem_cuts = list(type = "list", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )
