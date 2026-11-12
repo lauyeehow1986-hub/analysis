@@ -502,3 +502,31 @@ test_that(".h_st_open locks the extension repositories as .sr_duck_setup does", 
   expect_true(as.logical(got$l))
   expect_error(DBI::dbExecute(con, "SET custom_extension_repository = 'http://example.invalid'"))
 })
+
+test_that("the cluster key of 0 and -0 is one key", {
+  X <- matrix(1, 4, 1)
+  st <- .h_st_cluster_step(NULL, X, rep(1, 4), c(0, -0, 1, 1))
+  st <- .h_st_cluster_flush(st)
+  expect_identical(st$G, 2L)
+})
+
+test_that("cat and file.rename are allowed in .h_st_progress only; write functions are never allowed", {
+  for (code in c("cat('x', file = 'a')", "y <- cat", "file.rename('a', 'b')", "write('x', 'a')",
+                 "write.csv(d, 'a')", "f <- function() cat('x', file = 'a')")) {
+    expect_error(.sr_emit_check(code, "analysis", stream = TRUE), "allowed inside .h_st_progress only|forbidden",
+                 info = code)
+  }
+  expect_silent(.sr_emit_check(".h_st_progress <- function(f) { cat('x', file = f); file.rename(f, f) }",
+                               "analysis", stream = TRUE))
+})
+
+test_that(".h_st_progress writes through a .part file and leaves only the final file", {
+  d <- tempfile("srprog")
+  dir.create(d)
+  withr::defer(unlink(d, recursive = TRUE))
+  f <- file.path(d, "progress-j.json")
+  .h_st_progress(f, 2L, 5L)
+  .h_st_progress(f, 3L, 5L)
+  expect_identical(readLines(f), "{\"pass\": 3, \"max\": 5}")
+  expect_identical(list.files(d), "progress-j.json")
+})

@@ -449,10 +449,15 @@ sr_mem_estimate <- function(project, table, cols, method = c("glm", "lm", "cox",
   budget <- .sr_ram_budget(caps$ram_budget_gb)
   fits <- need <= 0.8 * budget
   route <- if (fits) "in_memory" else switch(method, glm = , lm = , table1 = "stream", cox = "bam", ml = "subsample")
+  what <- if (identical(method, "table1")) {
+    sprintf("data %.2f GB, no model matrix", data_gb)
+  } else {
+    sprintf("data %.2f GB + 3 x model matrix %.2f GB", data_gb, mm_gb)
+  }
   reason <- sprintf(
-    "%s: about %.2f GB needed (data %.2f GB + 3 x model matrix %.2f GB) for %s rows and %s model columns, against %.2f GB usable (80%% of the %.0f GB budget on the %s profile)",
+    "%s: about %.2f GB needed (%s) for %s rows and %s model columns, against %.2f GB usable (80%% of the %s GB budget on the %s profile)",
     if (fits) "fits in memory" else sprintf("does not fit in memory, route to %s", route),
-    need, data_gb, mm_gb, format(rows, big.mark = ",", scientific = FALSE), format(round(p_use)), 0.8 * budget,
-    budget, profile)
+    need, what, format(rows, big.mark = ",", scientific = FALSE), format(round(p_use)), 0.8 * budget,
+    format(signif(budget, 3)), profile)
   list(need_gb = need, budget_gb = budget, fits = fits, route = route, reason = reason, rows = rows, p = p_use)
 }

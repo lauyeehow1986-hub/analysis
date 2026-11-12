@@ -92,10 +92,13 @@
 
 #' Write {"pass": k, "max": m} to `file` for the Analyses panel. A failed write is ignored.
 .h_st_progress <- function(file, k, m) {
-  tryCatch(
-    suppressWarnings(cat(sprintf("{\"pass\": %d, \"max\": %d}\n", as.integer(k), as.integer(m)), file = file)),
-    error = function(e) NULL
-  )
+  # written beside the file and renamed over it, so a reader never sees a half-written file
+  tryCatch({
+    txt <- sprintf("{\"pass\": %d, \"max\": %d}\n", as.integer(k), as.integer(m))
+    tmp <- paste0(file, ".part")
+    suppressWarnings(cat(txt, file = tmp))
+    if (!isTRUE(suppressWarnings(file.rename(tmp, file)))) suppressWarnings(cat(txt, file = file))
+  }, error = function(e) NULL)
   invisible(NULL)
 }
 

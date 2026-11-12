@@ -31,6 +31,7 @@
   }
   m <- length(g)
   if (!m) return(st)
+  if (is.double(g)) g <- g + 0   # -0 + 0 is 0: one cluster key for the zero id
   key <- paste0("k", if (is.double(g)) sprintf("%.17g", g) else as.character(g))
   brk <- c(TRUE, key[-1L] != key[-m])
   rk <- key[brk]
