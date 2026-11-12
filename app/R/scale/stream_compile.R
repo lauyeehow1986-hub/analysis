@@ -7,7 +7,8 @@
 # sr_src) and returns a value list with exactly the names of the in-memory value (lm: fig = NULL, ruling
 # R3), plus engine = "stream", chunk, passes and iter (NA for lm).
 #
-# The body reads `SELECT <cols>, ".sr_row" FROM <sr_src> WHERE (<.sr_where>)` in chunks of stream_chunk
+# The body reads `SELECT <cols>, ".sr_row" FROM <sr_src> WHERE (<.sr_where>)` (plus ORDER BY ".sr_row" when
+# .sr_where is the hash anti-join of a large exclude_rows, .h_st_order_by) in chunks of stream_chunk
 # rows (.h_st_pass, order = TRUE). Each chunk is bound as `sr_data` inside the step function and goes
 # through the in-memory snippets (R8): .h_design, the outcome coding and the complete-case filter, so a
 # row is fitted on the stream exactly when it is fitted in memory. The passes:
@@ -132,8 +133,9 @@
     sprintf(".sr_chunk <- %s", .sr_lit(as.integer(ch))),
     sprintf(".sr_cols <- %s", .sr_lit(needed)),
     sprintf(".sr_fcols <- %s", .sr_lit(fcols)),
-    paste0(".sr_sql <- paste0(\"SELECT \", paste(c(as.character(DBI::dbQuoteIdentifier(.sr_con, .sr_cols)), ",
+    paste0(".sr_base <- paste0(\"SELECT \", paste(c(as.character(DBI::dbQuoteIdentifier(.sr_con, .sr_cols)), ",
            "\"\\\".sr_row\\\"\"), collapse = \", \"), \" FROM \", sr_src, \" WHERE (\", .sr_where, \")\")"),
+    ".sr_sql <- paste0(.sr_base, .h_st_order_by(.sr_where))",
     sprintf(".tt <- stats::delete.response(stats::terms(~ %s))", rhs),
     ".X <- function(d) stats::model.matrix(.tt, stats::model.frame(.tt, d, na.action = stats::na.pass))",
     # the in-memory snippets on one chunk (R8): design, outcome, complete cases (and the rows to
@@ -304,7 +306,7 @@
     cluster = c(
       ".S$cl <- NULL",
       ".S$cn <- 0",
-      sprintf(".sr_csql <- paste0(.sr_sql, \" ORDER BY \", DBI::dbQuoteIdentifier(.sr_con, %s), \", \\\".sr_row\\\"\")",
+      sprintf(".sr_csql <- paste0(.sr_base, \" ORDER BY \", DBI::dbQuoteIdentifier(.sr_con, %s), \", \\\".sr_row\\\"\")",
               .sr_lit(cl)),
       ".h_st_pass(.sr_con, .sr_csql, .sr_chunk, NULL, function(st, df) {",
       "  d <- .prep(df)$des",
@@ -340,7 +342,7 @@
       }, character(1), USE.NAMES = FALSE)
     }
     distinct <- if (!fac) c(
-      sprintf(".sr_esql <- paste0(.sr_sql, \" ORDER BY \", DBI::dbQuoteIdentifier(.sr_con, %s), \", \\\".sr_row\\\"\")",
+      sprintf(".sr_esql <- paste0(.sr_base, \" ORDER BY \", DBI::dbQuoteIdentifier(.sr_con, %s), \", \\\".sr_row\\\"\")",
               .sr_lit(plan[[1L]]$var)),
       ".S$dk <- 0",
       ".S$dl <- NULL",

@@ -39,14 +39,26 @@
   con
 }
 
-#' The SQL predicate that drops the excluded rows (ruling R13). With no rows it is "TRUE"; otherwise
-#' it is a NOT IN over the row numbers as literals. A literal list is pushed into the Parquet scan as a
-#' filter, so the scan keeps the order of .sr_row; a NOT IN (SELECT ...) subquery is planned as a
-#' parallel join whose output is not in .sr_row order once the extract has several row groups (Task 15).
-.h_st_excl <- function(con, rows) {
+#' The SQL predicate that drops the excluded rows (ruling R13). With no rows it is "TRUE".
+#' Up to `lit_max` rows it is a NOT IN over the row numbers as literals. A literal list is pushed into
+#' the Parquet scan as a filter, so the scan keeps the order of .sr_row, but it costs O(n x k).
+#' Above `lit_max` the rows are registered as the table sr_excl and the predicate is the hash
+#' anti-join NOT IN (SELECT r FROM sr_excl). DuckDB plans that as a parallel join whose output is not
+#' in .sr_row order once the extract has several row groups (Task 15), so that predicate carries
+#' attr(, "sort") = TRUE and a read that needs file order adds .h_st_order_by(where).
+.h_st_excl <- function(con, rows, lit_max = 1000L) {
   if (!length(rows)) return("TRUE")
-  paste0("\".sr_row\" NOT IN (", paste(sprintf("%.0f", sort(unique(as.numeric(rows)))), collapse = ", "), ")")
+  rows <- sort(unique(as.numeric(rows)))
+  if (length(rows) <= lit_max) {
+    return(paste0("\".sr_row\" NOT IN (", paste(sprintf("%.0f", rows), collapse = ", "), ")"))
+  }
+  duckdb::duckdb_register(con, "sr_excl", data.frame(r = rows), overwrite = TRUE)
+  structure("\".sr_row\" NOT IN (SELECT r FROM sr_excl)", sort = TRUE)
 }
+
+#' The ORDER BY clause a file-order read over `where` needs: "" when the predicate keeps the scan
+#' order, else ' ORDER BY ".sr_row"' (the hash anti-join of .h_st_excl).
+.h_st_order_by <- function(where) if (isTRUE(attr(where, "sort"))) " ORDER BY \".sr_row\"" else ""
 
 #' Fold step(state, df) over the result of `sql` in chunks of `chunk` rows. With order = TRUE the
 #' column .sr_row must be strictly increasing within and across chunks, else it stops with "extract

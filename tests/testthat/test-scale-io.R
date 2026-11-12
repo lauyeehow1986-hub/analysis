@@ -42,7 +42,7 @@ test_that("pass reads in file order and detects disorder", {
   expect_equal(r2$state, n)
 })
 
-test_that("stream predicate lists the excluded rows as literals", {
+test_that("stream predicate: literals up to lit_max, then the sr_excl anti-join", {
   df <- .sc_frame(50L)
   path <- .sc_parquet(df)
   con <- .sc_con(path)
@@ -51,6 +51,13 @@ test_that("stream predicate lists the excluded rows as literals", {
   expect_identical(w, "\".sr_row\" NOT IN (3, 10, 50)")
   got <- DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s WHERE %s", .sci_src(path), w))$n
   expect_equal(got, 47)
+  # above lit_max: the registered sr_excl anti-join, flagged for ORDER BY .sr_row
+  expect_identical(.h_st_order_by(w), "")
+  w2 <- .h_st_excl(con, c(3L, 10L, 50L, 10L), lit_max = 2L)
+  expect_identical(as.character(w2), "\".sr_row\" NOT IN (SELECT r FROM sr_excl)")
+  expect_identical(.h_st_order_by(w2), " ORDER BY \".sr_row\"")
+  got2 <- DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s WHERE %s", .sci_src(path), w2))$n
+  expect_equal(got2, 47)
 })
 
 test_that("stream progress writes json and ignores a failed write", {

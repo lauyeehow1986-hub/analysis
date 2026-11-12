@@ -108,7 +108,7 @@
   for (f in names(em)) {
     if (is.numeric(em[[f]])) {
       tol <- if (grepl("se", f, fixed = TRUE)) se_tol else 1e-8
-      expect_equal(es[[f]], em[[f]], tolerance = max(tol, se_tol), info = paste(info, f))
+      expect_equal(es[[f]], em[[f]], tolerance = tol, info = paste(info, f))
     } else {
       expect_identical(es[[f]], em[[f]], info = paste(info, f))
     }
@@ -246,6 +246,12 @@ test_that("edge: an NA cluster id", {
   for (id in c("lm", "logistic", "modpois")) {
     r <- .seq_both(df, .ssc_spec(id, se = "cluster"), id, info = id)
     # neither engine stops: .seq_both compared the two values (n, n_clusters, coefficients and SEs)
+    # and the rows with no cluster id are dropped as incomplete (spec 6.5): row 40 is otherwise complete
+    used <- c(if (identical(id, "lm")) "yc" else "y", "sex", "x1", "grp", "x2")
+    n_cc <- sum(stats::complete.cases(df[c(used, "pid")]))
+    expect_lt(n_cc, sum(stats::complete.cases(df[used])))
+    expect_identical(as.numeric(r$m$n), as.numeric(n_cc), info = id)
+    expect_identical(as.numeric(r$s$n), as.numeric(n_cc), info = id)
     expect_false(inherits(r$m, "seq_err"), info = id)
   }
 })
@@ -333,6 +339,37 @@ test_that("the exclude_rows predicate keeps .sr_row order over many row groups a
   r <- .h_st_pass(con, paste0("SELECT \".sr_row\" FROM ", src, " WHERE (", w, ")"), 50000L, 0,
                   function(st, df) st + nrow(df))
   expect_identical(r$rows, 600000 - length(ex))
+  expect_null(attr(w, "sort"))
+  # across the literal-list threshold (lit_max): the same 1001 rows as literals (lit_max 1001) and as the
+  # hash anti-join (lit_max 1000, read with ORDER BY .sr_row) give the same rows in the same order
+  ex2 <- round(seq(3, 599999, length.out = 1001L))
+  rows_of <- function(lit_max) {
+    w2 <- .h_st_excl(con, ex2, lit_max = lit_max)
+    sql <- paste0("SELECT \".sr_row\" FROM ", src, " WHERE (", w2, ")", .h_st_order_by(w2))
+    .h_st_pass(con, sql, 50000L, NULL, function(st, df) c(st, df$.sr_row))
+  }
+  lit <- rows_of(1001L)
+  hash <- rows_of(1000L)
+  expect_true(isTRUE(attr(.h_st_excl(con, ex2, lit_max = 1000L), "sort")))
+  expect_identical(as.numeric(lit$state), as.numeric(setdiff(seq_len(600000), ex2)))
+  expect_identical(hash$state, lit$state)
+  expect_identical(hash$rows, lit$rows)
+})
+
+test_that("exclude_rows just below and just above the literal-list threshold: stream = memory", {
+  df <- .ssc_data(3000L)
+  for (k in c(1000L, 1001L)) {
+    ex <- as.numeric(seq(2L, by = 2L, length.out = k))
+    for (id in c("lm", "logistic")) {
+      for (se in c("robust", "cluster")) {
+        s <- .ssc_spec(id, se = se)
+        s$exclude_rows <- ex
+        info <- paste(id, se, "k", k)
+        r <- .seq_both(df, s, id, chunk = 300L, info = info)
+        expect_identical(r$s$n_total, nrow(df) - k, info = info)
+      }
+    }
+  }
 })
 
 test_that("an infinite value in a chunk: the memory and stream error texts (pinned, they differ)", {
