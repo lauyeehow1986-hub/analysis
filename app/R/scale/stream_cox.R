@@ -8,6 +8,8 @@
 #   chol     .h_st_chol2(M, toler) / .h_st_chsolve2(ch, b) / .h_st_chinv2(ch): the generalised LDL' (S6)
 #   weights  .h_st_cox_wts(S0, E0, d, ties): the per-block Efron / Breslow weights (S8, S9, S12)
 #   step     .h_st_cox_new(p, ties), .h_st_cox_step(st, time, event, X, eta, strat), .h_st_cox_close(st)
+#   fit      .h_st_coxfit(passfn, p, nms, scale, maxit, eps): coxfit6's Newton loop (S5, Task 4)
+#   warn     .h_st_cox_warn(fit, eps): coxph.fit's warnings, verbatim (S7)
 #
 # Coordinates (S1): X is centred, not scaled; eta = X %*% beta. The rows arrive sorted by stratum, then
 # time DESC, so the risk set of a tie block (every row of the stratum with time >= t) is the running total
@@ -100,7 +102,7 @@
 
 #' The per-block weights of the tie blocks with risk totals S0 (block included), event risk sums E0 and
 #' event counts d, for ties "efron" or "breslow": a matrix with one row per block and the columns
-#'   w1 = sum_l 1/D_l (the hazard increment dLam, also the deferred S2 weight),
+#'   w1 = sum_l 1/D_l (the hazard increment dLam, also the carried S2 weight),
 #'   w2 = sum_l f/D_l, q1 = sum_l 1/D_l^2, q2 = sum_l f/D_l^2, q3 = sum_l f^2/D_l^2, lg = sum_l log D_l,
 #' with D_l = S0 - f E0, l = 0..d-1, f = l/d (Efron) or 0 (Breslow); all 0 when d = 0.
 #' The S9 score-residual terms of a block with S1 (block included) and E1 follow from them:
@@ -210,7 +212,7 @@
     }
     st$S0 <- S0[nc]
     st$S1 <- S1[nc, ]
-    st$Lam <- cumsum(c(st$Lam, w1))[nc + 1L]
+    st$Lam <- cumsum(c(st$Lam, w1))[nc + 1L]   # not used by the fit; kept for Task 6's baseline hazard
   }
   st
 }
@@ -271,4 +273,115 @@
                            list(E2 = pe$E2, S2 = pe$S2))
   }
   list(loglik = st$loglik, U = st$U, I = st$I)
+}
+
+#' The Newton-Raphson driver of the streamed Cox fit, as survival 3.8.3's coxfit6 (S4, S5, S6):
+#' list(coef, V, U, loglik, iter, flag, sing, passes, max_eta, maxit).
+#'   passfn(beta) runs one pass at beta and returns list(loglik, U, I, max_eta) in centred, unscaled
+#'     coordinates; max_eta is max(lp), coxph's signed linear predictor, at beta.
+#'   scale is the S1 vector, or a function of the first pass's result (beta = 0) returning it.
+#' Only the Cholesky runs in scaled coordinates: U_s = U s, I_s = I outer(s, s), step = step_s s, and
+#' V = chinv2(I_s) outer(s, s). Each iteration evaluates newbeta and runs cholesky2; the convergence
+#' test (all finite, |1 - lbest / newlk| <= eps) runs before the reject test; a rejected (or non-finite)
+#' step is pulled toward the best beta with newbeta = (newbeta + h beta) / (h + 1), an accepted one takes
+#' the next Newton step. There is no break at the last iteration, so without convergence iter is
+#' maxit + 1 and flag 1000; when maxit > 1 the best beta is then evaluated once more (loglik and U at it)
+#' and coxfit6 runs chinv2 on that raw information without a new cholesky2, which leaves V diagonal:
+#' 1 / I_jj where I_jj > 0. With maxit = 1 the iteration's own score and factored information are kept.
+#' On convergence flag is the rank of the information, or -2 when step-halving ran since the last
+#' accepted step. loglik is c(at the start, at the final beta); passes counts the passfn calls. When
+#' flag < p, a coordinate with diag(V) = 0 is singular and gets an NA coefficient.
+.h_st_coxfit <- function(passfn, p, nms, scale, maxit = 20L, eps = 1e-9) {
+  p <- as.integer(p)
+  maxit <- as.integer(maxit)
+  toler <- .Machine$double.eps^0.75
+  passes <- 0L
+  run <- function(b) {
+    passes <<- passes + 1L
+    passfn(b)
+  }
+  scl <- function(r) matrix(r$I, p, p) * outer(s, s)
+  beta <- numeric(p)
+  res <- run(beta)
+  s <- as.numeric(if (is.function(scale)) scale(res) else scale)
+  loglik0 <- res$loglik
+  ch <- .h_st_chol2(scl(res), toler)
+  newbeta <- beta + .h_st_chsolve2(ch, res$U * s) * s
+  lbest <- loglik0
+  atbeta <- res                          # the pass at the current best beta (its max_eta)
+  iter <- 0L
+  conv <- maxit == 0L
+  halving <- 0L
+  Vs <- NULL
+  if (maxit > 0L) {
+    for (iter in seq_len(maxit)) {
+      res <- run(newbeta)
+      ch <- .h_st_chol2(scl(res), toler)
+      newlk <- res$loglik
+      notfinite <- !all(is.finite(c(res$U, res$I, newlk)))
+      if (!notfinite && isTRUE(abs(1 - lbest / newlk) <= eps)) {
+        beta <- newbeta
+        lbest <- newlk
+        atbeta <- res
+        conv <- TRUE
+        break
+      }
+      if (notfinite || isTRUE(newlk < lbest)) {   # a C comparison with NaN is false
+        halving <- halving + 1L
+        newbeta <- (newbeta + halving * beta) / (halving + 1)
+      } else {
+        halving <- 0L
+        lbest <- newlk
+        beta <- newbeta
+        atbeta <- res
+        newbeta <- beta + .h_st_chsolve2(ch, res$U * s) * s
+      }
+    }
+    if (!conv) {
+      iter <- maxit + 1L
+      if (maxit > 1L) {
+        res <- run(beta)
+        lbest <- res$loglik
+        atbeta <- res
+        d <- diag(scl(res))
+        v <- d
+        pos <- !is.na(d) & d > 0
+        v[pos] <- 1 / d[pos]
+        Vs <- diag(v, p, p)
+      }
+    }
+  }
+  if (!is.finite(lbest)) stop("the streamed Cox fit gave a non-finite log-likelihood at every step-halving")
+  if (is.null(Vs)) Vs <- .h_st_chinv2(ch)
+  V <- Vs * outer(s, s)
+  flag <- if (!conv) 1000L else if (halving > 0L) -2L else sum(!ch$sing)
+  sing <- if (flag < p) diag(V) == 0 else rep(FALSE, p)
+  coef <- beta
+  if (maxit > 0L) coef[sing] <- NA
+  U <- as.numeric(res$U)
+  names(coef) <- names(U) <- names(sing) <- nms
+  dimnames(V) <- list(nms, nms)
+  list(coef = coef, V = V, U = U, loglik = c(loglik0, lbest), iter = as.integer(iter), flag = as.integer(flag),
+       sing = sing, passes = passes, max_eta = atbeta$max_eta, maxit = maxit)
+}
+
+#' The warnings of survival:::coxph.fit for a fit from .h_st_coxfit, in order (S7), with control eps:
+#' none when maxit <= 1. Flag 1000 gives "Ran out of iterations and did not converge", followed by "one or
+#' more coefficients may be infinite" when max_eta > 500 or abs(U V) is not finite. Otherwise a column j
+#' with a non-finite score, or abs(U V)_j > eps and > sqrt(eps) |coef_j|, is listed (design columns,
+#' singular ones included) in coxph's paste() text, whose default sep puts spaces around the indices.
+.h_st_cox_warn <- function(fit, eps = 1e-9) {
+  if (fit$maxit <= 1L) return(character())
+  cf <- as.numeric(fit$coef)
+  cf[is.na(cf)] <- 0
+  infs <- abs(as.numeric(fit$U) %*% fit$V)
+  if (fit$flag == 1000L) {
+    w <- "Ran out of iterations and did not converge"
+    if (fit$max_eta > 500 || any(!is.finite(infs))) w <- c(w, "one or more coefficients may be infinite")
+    return(w)
+  }
+  infs <- !is.finite(fit$U) | (infs > eps & infs > sqrt(eps) * abs(cf))
+  if (!any(infs)) return(character())
+  paste("Loglik converged before variable ", paste(which(infs), collapse = ","),
+        "; coefficient may be infinite. ")
 }

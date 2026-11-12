@@ -10,6 +10,20 @@
 # cox_ref(beta, df, xcols, ties = "efron", strata = NULL)
 #   The reference: survival::coxph(..., init = beta, control = coxph.control(iter.max = 0)), giving
 #   list(loglik = fit$loglik[1], V = vcov(fit)) at beta.
+#
+# .cs_data(n, seed, ntime): the Task 3 fixture (integer times with one heavy tie block, x1 normal, x2 0/1,
+#   yr around 2000), shared by test-scale-surv-coxstep.R and test-scale-surv-coxfit.R.
+
+.cs_data <- function(n = 120L, seed = 3L, ntime = 12L) {
+  set.seed(seed)
+  pt <- rep(1, ntime)
+  pt[4L] <- 6                                  # one heavy tie block, many chunks long at chunk 7
+  data.frame(time = sample(seq_len(ntime), n, replace = TRUE, prob = pt) * 1.0,
+             status = rbinom(n, 1L, 0.7),
+             x1 = rnorm(n),
+             x2 = rbinom(n, 1L, 0.4),
+             yr = 2000 + sample(-6:6, n, replace = TRUE) + rnorm(n, sd = 0.1))
+}
 
 .cox_sorted <- function(df, strata = NULL) {
   s <- if (is.null(strata)) rep(1L, nrow(df)) else as.integer(factor(df[[strata]]))

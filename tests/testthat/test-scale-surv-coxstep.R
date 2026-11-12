@@ -2,16 +2,7 @@
 # blocks and strata carried across chunk boundaries. The reference is survival::coxph at a fixed beta
 # (init = beta, iter.max = 0). cox_eval and cox_ref live in helper-surv.R. Synthetic data only.
 
-.cs_data <- function(n = 120L, seed = 3L, ntime = 12L) {
-  set.seed(seed)
-  pt <- rep(1, ntime)
-  pt[4L] <- 6                                  # one heavy tie block, many chunks long at chunk 7
-  data.frame(time = sample(seq_len(ntime), n, replace = TRUE, prob = pt) * 1.0,
-             status = rbinom(n, 1L, 0.7),
-             x1 = rnorm(n),
-             x2 = rbinom(n, 1L, 0.4),
-             yr = 2000 + sample(-6:6, n, replace = TRUE) + rnorm(n, sd = 0.1))
-}
+# .cs_data (the shared fixture) lives in helper-surv.R.
 
 # step vs coxph at beta (1e-10), and chunks 1 and 7 vs 1e5 (1e-12)
 .cs_check <- function(df, xcols, beta, ties, strata = NULL, info = "") {
@@ -118,7 +109,7 @@ test_that("cox step loglik, score and information equal coxph at beta", {
   list(loglik = ll, U = U, I = I)
 }
 
-test_that("the deferred S2 identity holds", {
+test_that("the positive-weight S2 carry equals the direct risk-set sums", {
   d <- .cs_data(200L, 21L, ntime = 25L)
   d$s <- rep(c("a", "b"), c(91L, 109L))
   xc <- c("x1", "x2", "yr")
