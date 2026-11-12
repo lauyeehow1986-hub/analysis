@@ -18,9 +18,19 @@
 # intercept column (S2), so a factor level absent from the analysed rows is an all-zero column that the
 # cholesky declares singular (NA coefficient, `aliased`), as coxph. The warnings are .h_st_cox_warn(fit),
 # the texts coxph.fit gives. The value has the memory names, then engine, chunk, passes and iter (S18).
-# Progress {"pass": k, "max": m}: m = 1 + 22 (S15), lowered to the passes run once the fit ends.
+# Cluster-robust SE (layers$clustered, Task 6, S9, S20, S22). The cluster column is copied to .cl and is
+# part of the complete-case filter, as in memory; pass 0 also notes whether two clusters exist, so one
+# cluster stops where memory stops. After the fit two passes run:
+#   et       a pass at the final beta (.h_st_et_step) that writes the event-time table of each chunk into
+#            the TEMP table sr_et of the run connection (no file); the view sr_et_cum adds the cumulative
+#            lam and b_j per stratum (columns prefixed .sr_et_, so they cannot clash with a data column)
+#   cluster  the S22 query: the S10 rows ASOF LEFT JOINed to sr_et_cum on stratum and raw time, sorted by
+#            the cluster; each chunk re-runs the R8 snippets and eta, and .h_st_cox_resid(...) %*% V goes
+#            to .h_st_cluster_step. V_robust = D'D, with no small-sample factor, as coxph.
+# Progress {"pass": k, "max": m}: m = 1 + 22 (S15), + 2 when clustered, lowered to the passes run once the
+# fit ends.
 #
-# Cluster-robust SE (layers$clustered) is Task 6; PEM (cox_method = "pem") is .sr_pem_compile_stream, Task 9.
+# PEM (cox_method = "pem") is .sr_pem_compile_stream, Task 9.
 
 #' The S10 query of the streamed Cox as R code: a paste0() expression that evaluates, in the emitted body,
 #' to `SELECT <cols>, <rank> AS ".sr_stratum", ".sr_row" FROM <sr_src> WHERE (<.sr_where>)` plus, with
@@ -48,21 +58,22 @@
   if (identical(.sr_cox_method_of(spec), "pem")) return(.sr_pem_compile_stream(spec))
   ch <- spec[["stream_chunk"]]
   if (is.null(ch)) stop("a stream spec needs stream_chunk (set by the run)", call. = FALSE)
-  if (.sr_cox_clustered(spec)) stop("the streamed cluster-robust Cox SE is not available yet", call. = FALSE)
+  cl <- if (.sr_cox_clustered(spec)) spec[["cluster"]] else NULL
   tc <- sr_terms_code(spec, "stream")
   plan <- .sr_term_plan(spec)
   ties <- .sr_cox_ties_of(spec)
   st <- .sr_spec_chr(spec[["strata"]])
   st_names <- if (length(st)) paste0(".s", seq_along(st)) else character()
   rhs_vars <- all.vars(stats::as.formula(paste("~", tc$rhs)))
-  used <- unique(c(".time", ".event", rhs_vars, st_names))
+  used <- unique(c(".time", ".event", rhs_vars, st_names, if (!is.null(cl)) ".cl"))
   fac <- identical(plan[[1L]]$type, "factor")
+  # the columns read; the cluster column is among them (only clustered specs have one, .sr_cox_check)
   needed <- unique(c(spec[["time"]], spec[["status"]], .sr_spec_chr(spec[["cluster"]]), st,
                      vapply(plan, function(i) i$var, character(1))))
-  copy <- vapply(seq_along(st), function(i) {
+  copy <- c(vapply(seq_along(st), function(i) {
     sprintf("  des[[%s]] <- des[[%s]]", .sr_lit(st_names[i]), .sr_lit(st[i]))
-  }, character(1))
-  m_max <- 1L + 22L
+  }, character(1)), if (!is.null(cl)) sprintf("  des[[\".cl\"]] <- des[[%s]]", .sr_lit(cl)))
+  m_max <- 1L + 22L + if (is.null(cl)) 0L else 2L
 
   helpers <- c(
     .sr_inline(.sr_h_coef_table, ".h_coef_table"),
@@ -84,7 +95,14 @@
     .sr_inline(.h_st_cox_step, ".h_st_cox_step"),
     .sr_inline(.h_st_cox_close, ".h_st_cox_close"),
     .sr_inline(.h_st_coxfit, ".h_st_coxfit"),
-    .sr_inline(.h_st_cox_warn, ".h_st_cox_warn")
+    .sr_inline(.h_st_cox_warn, ".h_st_cox_warn"),
+    if (!is.null(cl)) c(
+      .sr_inline(.h_st_et_rows, ".h_st_et_rows"),
+      .sr_inline(.h_st_et_step, ".h_st_et_step"),
+      .sr_inline(.h_st_et_close, ".h_st_et_close"),
+      .sr_inline(.h_st_cox_resid, ".h_st_cox_resid"),
+      .sr_inline(.h_st_cluster_step, ".h_st_cluster_step"),
+      .sr_inline(.h_st_cluster_flush, ".h_st_cluster_flush"))
   )
 
   head <- c(
@@ -103,7 +121,7 @@
     sr_outcome_code(spec, "surv"),
     copy,
     sprintf("  .keep <- stats::complete.cases(des[%s])", .sr_lit(used)),
-    "  list(des = des[.keep, , drop = FALSE], s = df[[\".sr_stratum\"]][.keep], n = nrow(df))",
+    "  list(des = des[.keep, , drop = FALSE], s = df[[\".sr_stratum\"]][.keep], n = nrow(df), keep = .keep)",
     "}",
     # progress (R15, S15)
     ".pg <- new.env(parent = emptyenv())",
@@ -146,6 +164,7 @@
     ".A$km <- NULL",
     ".A$kmv <- numeric()",
     ".A$km_many <- FALSE",
+    if (!is.null(cl)) c(".A$cl1 <- NULL", ".A$cl2 <- FALSE"),
     ".h_st_pass(.sr_con, .sr_sql, .sr_chunk, NULL, function(g, df) {",
     "  pr <- .prep(df)",
     "  .A$n_total <- .A$n_total + pr$n",
@@ -165,6 +184,11 @@
     "  .A$tlo <- min(.A$tlo, d[[\".time\"]])",
     "  .A$thi <- max(.A$thi, d[[\".time\"]])",
     km_add,
+    if (!is.null(cl)) c(
+      "  if (!.A$cl2) {",
+      "    if (is.null(.A$cl1)) .A$cl1 <- d[[\".cl\"]][1L]",
+      "    .A$cl2 <- any(d[[\".cl\"]] != .A$cl1)",
+      "  }"),
     "  g",
     "}, order = FALSE)",
     ".pg_tick()",
@@ -173,6 +197,7 @@
     "if (.A$events == 0) {",
     "  stop(\"the outcome has no events among the \", .n, \" rows analysed\")",
     "}",
+    if (!is.null(cl)) "if (!.A$cl2) stop(\"layers$clustered needs at least two clusters (found 1)\")",
     ".p <- length(.A$cols)",
     ".mu <- .A$sx / .A$n",
     ".z1 <- .A$z1",
@@ -206,14 +231,94 @@
     ".scale <- function(r) ifelse(.z1 | r$sumabs == 0, 1, .A$n / r$sumabs)",
     ".fit <- .h_st_coxfit(.passfn, .p, .A$cols, .scale)",
     ".wrn <- .h_st_cox_warn(.fit)",
-    ".pg$m <- .pg$k",
+    sprintf(".pg$m <- .pg$k%s", if (is.null(cl)) "" else " + 2L"),
     "if (exists(\"sr_progress_file\")) .h_st_progress(sr_progress_file, .pg$k, .pg$m)",
     ".cf <- .fit$coef",
     ".ok <- !is.na(.cf)",
     ".nm <- names(.cf)[.ok]",
     ".V <- .fit$V[.nm, .nm, drop = FALSE]",
-    "tab <- .h_coef_table(.cf[.ok], .V, df = Inf)"
+    ".ncl <- NA_real_"
   )
+
+  robust <- if (!is.null(cl)) {
+    q <- function(x) as.character(DBI::dbQuoteIdentifier(DBI::ANSI(), x))
+    c(
+      # the event-time table at the final beta (S20): a TEMP table of the run connection, no file
+      ".beta <- .fit$coef",
+      ".beta[is.na(.beta)] <- 0",
+      ".A$et_n <- 0",
+      r"{.et_put <- function(rows) {}",
+      r"{  if (is.null(rows) || !nrow(rows)) return(invisible(NULL))}",
+      r"{  duckdb::duckdb_register(.sr_con, "sr_et_chunk", rows)}",
+      r"{  if (.A$et_n == 0) {}",
+      r"{    DBI::dbExecute(.sr_con, "CREATE TEMP TABLE sr_et AS SELECT * FROM sr_et_chunk")}",
+      r"{  } else {}",
+      r"{    DBI::dbExecute(.sr_con, "INSERT INTO sr_et SELECT * FROM sr_et_chunk")}",
+      r"{  }}",
+      r"{  duckdb::duckdb_unregister(.sr_con, "sr_et_chunk")}",
+      r"{  .A$et_n <- .A$et_n + nrow(rows)}",
+      r"{  invisible(NULL)}",
+      r"{}}",
+      sprintf(".r <- .h_st_pass(.sr_con, .sr_sql, .sr_chunk, list(g = NULL, cx = .h_st_cox_new(.p, %s)), function(st, df) {",
+              .sr_lit(ties)),
+      r"{  pr <- .prep(df)}",
+      r"{  d <- pr$des}",
+      r"{  if (!nrow(d)) return(st)}",
+      r"{  st$g <- .h_st_time_guard(st$g, d[[".time"]], pr$s)}",
+      r"{  X <- .X(d)}",
+      r"{  X <- X - rep(.mu, each = nrow(X))}",
+      r"{  st$cx <- .h_st_et_step(st$cx, .h_st_timefix_apply(d[[".time"]], .map), d[[".event"]], X,}",
+      r"{                         drop(X %*% .beta), pr$s)}",
+      r"{  .et_put(st$cx$et)}",
+      r"{  st$cx$et <- NULL}",
+      r"{  st}",
+      r"{}, order = FALSE)$state}",
+      ".et_put(.h_st_et_close(.r$cx))",
+      ".pg_tick()",
+      # the view of the cumulative lam and b_j (S20), its columns prefixed .sr_et_
+      ".j <- seq_len(.p)",
+      r"{.vsql <- paste0("CREATE TEMP VIEW sr_et_cum AS SELECT stratum, time, ",}",
+      r"{  paste(c("SUM(dlam) OVER w AS \".sr_et_lam\"", "c1 AS \".sr_et_c1\"",}",
+      r"{          sprintf("xbm_%d AS \".sr_et_xbm_%d\"", .j, .j),}",
+      r"{          sprintf("SUM(db_%d) OVER w AS \".sr_et_b_%d\"", .j, .j),}",
+      r"{          sprintf("c2_%d AS \".sr_et_c2_%d\"", .j, .j)), collapse = ", "),}",
+      r"{  " FROM sr_et WINDOW w AS (PARTITION BY stratum ORDER BY time ROWS UNBOUNDED PRECEDING)")}",
+      ".nv <- DBI::dbExecute(.sr_con, .vsql)",
+      r"{.etc <- c(".sr_et_lam", ".sr_et_c1", paste0(".sr_et_", rep(c("xbm_", "b_", "c2_"), each = .p), .j))}",
+      # the cluster pass (S22): the S10 rows with their event-time terms, sorted by the cluster
+      sprintf(".sr_csql <- paste0(%s, %s, %s)",
+              .sr_lit(paste0("SELECT ", paste(c(paste0("s.", q(needed)), "s.\".sr_stratum\"", "s.\".sr_row\"",
+                                                 "et.* EXCLUDE (stratum, time)"), collapse = ", "), " FROM (")),
+              .sr_cox_sql(spec, needed, order = FALSE),
+              .sr_lit(paste0(") s ASOF LEFT JOIN sr_et_cum et ON s.\".sr_stratum\" = et.stratum AND s.",
+                             q(spec[["time"]]), " >= et.time ORDER BY s.", q(cl), ", s.\".sr_row\""))),
+      ".S <- new.env(parent = emptyenv())",
+      ".S$cl <- NULL",
+      ".S$cn <- 0",
+      r"{.h_st_pass(.sr_con, .sr_csql, .sr_chunk, NULL, function(st, df) {}",
+      r"{  pr <- .prep(df)}",
+      r"{  d <- pr$des}",
+      r"{  if (!nrow(d)) return(st)}",
+      r"{  X <- .X(d)}",
+      r"{  X <- X - rep(.mu, each = nrow(X))}",
+      r"{  et <- df[pr$keep, .etc, drop = FALSE]}",
+      r"{  names(et) <- sub("^[.]sr_et_", "", names(et))}",
+      r"{  res <- .h_st_cox_resid(X, exp(drop(X %*% .beta)), d[[".event"]], et)}",
+      r"{  .S$cl <- .h_st_cluster_step(.S$cl, res %*% .fit$V, 1, d[[".cl"]])}",
+      r"{  .S$cn <- .S$cn + nrow(d)}",
+      r"{  st}",
+      r"{}, order = FALSE)}",
+      ".pg_tick()",
+      ".S$cl <- .h_st_cluster_flush(.S$cl)",
+      r"{if (.S$cn != .A$n) stop("the cluster pass read ", .h_st_count(.S$cn), " rows, the fit used ", .n)}",
+      ".ncl <- .S$cl$G",
+      r"{if (.ncl < 2L) stop("layers$clustered needs at least two clusters (found ", .ncl, ")")}",
+      ".Vr <- .S$cl$S",
+      "dimnames(.Vr) <- dimnames(.fit$V)",
+      ".V <- .Vr[.nm, .nm, drop = FALSE]"
+    )
+  }
+  tabc <- "tab <- .h_coef_table(.cf[.ok], .V, df = Inf)"
 
   km <- c(
     if (fac) ".kml <- .sr_fixed$levels[[\"t1\"]]" else ".kml <- if (.A$km_many) \"All\" else levels(factor(.A$kmv))",
@@ -223,10 +328,11 @@
 
   value <- paste0(
     "list(coef = tab, aliased = names(.cf)[!.ok], n = .n, n_total = .h_st_count(.A$n_total), ",
-    "events = .h_st_count(.A$events), level = 0.95, se_type = \"model\", n_clusters = NA_real_, ties = ",
+    "events = .h_st_count(.A$events), level = 0.95, se_type = ", .sr_lit(if (is.null(cl)) "model" else "cluster"),
+    ", n_clusters = .ncl, ties = ",
     .sr_lit(ties), ", strata = ", .sr_lit(st), ", levels = .sr_fixed$levels, warnings = .wrn, ",
     "km_by = .kmb, km = .kmo$km, km_risk = .kmo$risk, engine = \"stream\", chunk = .sr_chunk, ",
     "passes = .pg$k, iter = .fit$iter)")
 
-  paste(c(tc$setup, helpers, tc$design, head, pass0, fit, km, value), collapse = "\n")
+  paste(c(tc$setup, helpers, tc$design, head, pass0, fit, robust, tabc, km, value), collapse = "\n")
 }

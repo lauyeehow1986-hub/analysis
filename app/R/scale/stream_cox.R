@@ -8,6 +8,8 @@
 #   chol     .h_st_chol2(M, toler) / .h_st_chsolve2(ch, b) / .h_st_chinv2(ch): the generalised LDL' (S6)
 #   weights  .h_st_cox_wts(S0, E0, d, ties): the per-block Efron / Breslow weights (S8, S9, S12)
 #   step     .h_st_cox_new(p, ties), .h_st_cox_step(st, time, event, X, eta, strat), .h_st_cox_close(st)
+#   et       .h_st_et_step(st, ...), .h_st_et_close(st): the event-time table of the cluster SE (S9, Task 6)
+#   resid    .h_st_cox_resid(X, r, event, et): coxph's score residuals from the joined event-time terms
 #   guard    .h_st_time_guard(st, time, strat): the S10 time-order check, carried across chunks
 #   fit      .h_st_coxfit(passfn, p, nms, scale, maxit, eps): coxfit6's Newton loop (S5, Task 4)
 #   warn     .h_st_cox_warn(fit, eps): coxph.fit's warnings, verbatim (S7)
@@ -211,11 +213,77 @@
         st$I <- st$I - crossprod(Xe, (rr[e] * w[lb[e], "w2"]) * Xe)
       }
     }
+    if (isTRUE(st$keep_et)) st$et <- rbind(st$et, .h_st_et_rows(s, ag$t[kc], S1, E1, ag$d[kc], w))
     st$S0 <- S0[nc]
     st$S1 <- S1[nc, ]
-    st$Lam <- cumsum(c(st$Lam, w1))[nc + 1L]   # not used by the fit; kept for Task 6's baseline hazard
+    st$Lam <- cumsum(c(st$Lam, w1))[nc + 1L]   # not used by the fit or the event-time table
   }
   st
+}
+
+#' Internal to the step: the event-time rows (S9) of complete blocks of stratum s with times t, risk sums
+#' S1 (block included) and event sums E1 (one row per block), event counts d and weights w from
+#' .h_st_cox_wts: data.frame(stratum, time, dlam, c1, xbm_1..p, db_1..p, c2_1..p), one row per block with
+#' an event; NULL when none has one.
+.h_st_et_rows <- function(s, t, S1, E1, d, w) {
+  e <- which(d > 0)
+  if (!length(e)) return(NULL)
+  p <- ncol(S1)
+  S1 <- S1[e, , drop = FALSE]
+  E1 <- E1[e, , drop = FALSE]
+  w <- w[e, , drop = FALSE]
+  xbm <- (S1 * w[, "w1"] - E1 * w[, "w2"]) / d[e]
+  db <- S1 * w[, "q1"] - E1 * w[, "q2"]
+  c2 <- S1 * w[, "q2"] - E1 * w[, "q3"]
+  m <- cbind(xbm, db, c2)
+  colnames(m) <- paste0(rep(c("xbm_", "db_", "c2_"), each = p), rep(seq_len(p), 3L))
+  data.frame(stratum = rep(as.numeric(s), length(e)), time = as.numeric(t[e]), dlam = as.numeric(w[, "w1"]),
+             c1 = as.numeric(w[, "w2"]), m, check.names = FALSE)
+}
+
+#' One chunk of the event-time pass (S9, S20), at the final beta: the Cox step of .h_st_cox_step (the same
+#' tie blocks, carries and .h_st_cox_wts weights) that also keeps, in the returned state's `et`, the rows
+#' of the event-time table for the blocks completed in this chunk: data.frame(stratum, time, dlam, c1,
+#' xbm_1..p, db_1..p, c2_1..p), NULL when none. For a block with d events, dlam is the hazard increment,
+#' c1 and c2_j the Efron terms of its own events (0 for Breslow), xbm_j the mean of its event-time means
+#' and db_j the increment of B_j. The pending block's row comes from .h_st_et_close.
+.h_st_et_step <- function(st, time, event, X, eta, strat) {
+  st$keep_et <- TRUE
+  st$et <- NULL
+  .h_st_cox_step(st, time, event, X, eta, strat)
+}
+
+#' The event-time row of the pending block of an event-time pass (NULL when it has no event).
+.h_st_et_close <- function(st) {
+  st$keep_et <- TRUE
+  st$et <- NULL
+  pe <- st$pend
+  if (!is.null(pe)) {
+    st <- .h_st_cox_blocks(st, pe, 1L, matrix(0, 0L, st$p), numeric(), numeric(), integer(),
+                           list(E2 = pe$E2, S2 = pe$S2))
+  }
+  st$et
+}
+
+#' The score residuals of coxph (S9, survival's coxscore2) as an n x p matrix: X the centred design rows,
+#' r = exp(eta), event 0/1 and et the row's joined event-time terms (lam, c1, xbm_1..p, b_1..p, c2_1..p:
+#' the cumulative hazard and B at the row's raw time in its stratum, and its own block's terms). A missing
+#' term (no event time at or before the row) counts as 0.
+#'   resid = event (x - xbm) - r (x lam - b) + event r (x c1 - c2)
+.h_st_cox_resid <- function(X, r, event, et) {
+  X <- as.matrix(X)
+  storage.mode(X) <- "double"
+  n <- nrow(X)
+  p <- ncol(X)
+  z <- function(v) {
+    v <- as.numeric(v)
+    v[is.na(v)] <- 0
+    v
+  }
+  mt <- function(pre) matrix(z(unlist(et[paste0(pre, seq_len(p))], use.names = FALSE)), n, p)
+  ev <- as.numeric(event)
+  r <- as.numeric(r)
+  ev * (X - mt("xbm_")) - r * (X * z(et[["lam"]]) - mt("b_")) + (ev * r) * (X * z(et[["c1"]]) - mt("c2_"))
 }
 
 #' One chunk of the streamed Cox step. time is the mapped time (DESC within each stratum), event 0/1, X
