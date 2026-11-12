@@ -187,12 +187,9 @@ test_that("a perfectly separating exposure stops the streamed PEM with the Poiss
   d$status <- ifelse(d$sex == 1, 1, 2)   # exposure 1 never has an event
   spec <- list(purpose = "explain-causal", time = "time", status = "status", status_event = 2, exposure = "sex",
                cox_method = "pem", layers = .ssc_layers(), seed = 7L, pem_cuts = list(rule = "explicit", at = c(0.5, 1)))
-  e <- .ssc_err(.ssc_stream(d, spec, "cox", 50L))
-  if (is.na(e)) {
-    # the stop may come from the route's present(), as in memory
-    v <- .ssc_stream(d, spec, "cox", 50L)
-    e <- tryCatch({ r <- sr_route_get("cox", 1L); r$present(v, spec); NA_character_ },
-                  error = function(err) conditionMessage(err))
-  }
+  # the stream value is a finite fit; the route's present() stops, as in memory
+  v <- .ssc_stream(d, spec, "cox", 50L)
+  e <- tryCatch({ sr_route_get("cox", 1L)$present(v, spec); NA_character_ },
+                error = function(err) conditionMessage(err))
   expect_match(e, "Poisson likelihood", fixed = TRUE)
 })

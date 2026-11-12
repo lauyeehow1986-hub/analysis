@@ -263,7 +263,7 @@
     "  lo <- df[[\".sr_lo\"]][pr$keep]",
     "  hi <- df[[\".sr_hi\"]][pr$keep]",
     "  tm <- d[[\".time\"]]",
-    "  if (any(tm <= lo)) stop(\"the streamed PEM needs .time to equal the time column\")",
+    "  if (anyNA(tm) || any(tm <= lo)) stop(\"the streamed PEM needs .time to equal the time column\")",
     "  pt <- pmin(tm, hi) - lo",
     "  ev <- d[[\".event\"]] * (tm <= hi)",
     "  bc <- .cmb[cbind(match(as.character(pr$s), .sk), df[[\".sr_j\"]][pr$keep])]",

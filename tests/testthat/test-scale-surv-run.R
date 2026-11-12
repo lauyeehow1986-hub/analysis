@@ -185,6 +185,36 @@ test_that("engine switch on cox is computational, cox_method amendment is method
   expect_identical(d3$kind[d3$analysis == "s1"], "unplanned_sensitivity")
   expect_identical(sum(d3$kind == "computational"), 1L)
   expect_identical(p3$state$analyses$s1$spec$cox_method, "pem")
+  # the locked analysis itself cannot be edited into PEM: sr_sap_add refuses after the lock
+  expect_error(sr_sap_add(p, "a1", "cox", .sv_spec(cox_method = "pem"), "t", label = "primary"),
+               "the SAP is locked; use sr_analysis_add", fixed = TRUE)
+})
+
+.sv_docx_text <- function(path) {
+  s <- officer::docx_summary(officer::read_docx(path), remove_fields = TRUE)
+  s$text[!is.na(s$text)]
+}
+
+test_that("the SAP text names the cox method only when the spec stores one", {
+  pem <- .sv_locked(.sv_spec(cox_method = "pem", pem_cuts = list(rule = "quantile", k = 10)), "cox",
+                    env = environment())
+  b <- .sr_sd_analysis_blocks(pem$state$analyses$a1)
+  tb <- b[[2L]]$data %||% b[[2L]]$df
+  expect_true(is.data.frame(tb))
+  expect_identical(tb$Value[tb$Field == "Method"],
+                   "Hazard ratios were estimated by a piecewise-exponential Poisson model with 10 intervals (rule quantile).")
+  pem <- sr_sap_docx(pem)
+  txt <- .sv_docx_text(file.path(pem$paths$out, "sap", "SAP_v1.docx"))
+  expect_true(any(grepl("piecewise-exponential Poisson model with 10 intervals (rule quantile)", txt, fixed = TRUE)))
+  # no cox_method stored (the form never stores the default): no Method row, the table is as before
+  ex <- .sv_locked(.sv_spec(), "cox", env = environment())
+  b0 <- .sr_sd_analysis_blocks(ex$state$analyses$a1)
+  tb0 <- b0[[2L]]$data %||% b0[[2L]]$df
+  expect_false("Method" %in% tb0$Field)
+  ex <- sr_sap_docx(ex)
+  txt0 <- .sv_docx_text(file.path(ex$paths$out, "sap", "SAP_v1.docx"))
+  expect_false("Method" %in% txt0)
+  expect_false(any(grepl("Hazard ratios were estimated", txt0, fixed = TRUE)))
 })
 
 test_that("old cox project reopens unchanged", {

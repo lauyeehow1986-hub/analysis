@@ -152,6 +152,11 @@
     Value = c(a$id, a$label, a$route, a$route_version, if (is.null(r)) "" else r$purpose, a$table,
               .sr_sd_outcome(spec), spec[["exposure"]] %||% "", .sr_sd_terms(spec),
               est[["population"]], est[["variables"]], est[["intercurrent"]], est[["summary"]], est[["level"]], fam))
+  # the fitting method of a cox analysis that stores one (the default "exact" is never stored, so such a SAP
+  # reads as before P1e.2)
+  if (identical(as.character(a$route), "cox") && !is.null(spec[["cox_method"]])) {
+    df <- rbind(df, .sr_sd_df(Field = "Method", Value = .sr_cox_method_text(spec)))
+  }
   list(.sr_sd_head(paste("Analysis", a$id), 2L), .sr_sd_table(df, paste("Specification of", a$id)))
 }
 
