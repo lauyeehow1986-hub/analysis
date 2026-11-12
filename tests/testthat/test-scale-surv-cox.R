@@ -188,8 +188,9 @@ test_that("emitted stream code passes the emit check and is ASCII", {
       expect_true(grepl(txt, body, fixed = TRUE), info = paste(i, txt))
     }
   }
-  # PEM on the stream is a stub until Task 9
-  expect_error(.sr_cox_compile_stream(utils::modifyList(.ssc_surv_spec("cox", cox_method = "pem"),
-                                                        list(engine = "stream", stream_chunk = 100))),
-               "PEM", fixed = TRUE)
+  # PEM on the stream (Task 9) compiles through the same entry and passes the emit check
+  pb <- .sr_cox_compile_stream(utils::modifyList(.ssc_surv_spec("cox", cox_method = "pem"),
+                                                 list(engine = "stream", stream_chunk = 100)))
+  expect_true(.sr_emit_check(pb, "analysis", stream = TRUE))
+  expect_false(grepl("[^\\x01-\\x7F]", pb, perl = TRUE))
 })

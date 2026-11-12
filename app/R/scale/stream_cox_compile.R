@@ -30,7 +30,7 @@
 # Progress {"pass": k, "max": m}: m = 1 + 22 (S15), + 2 when clustered, lowered to the passes run once the
 # fit ends.
 #
-# PEM (cox_method = "pem") is .sr_pem_compile_stream, Task 9.
+# PEM (cox_method = "pem") is .sr_pem_compile_stream, below.
 
 #' The S10 query of the streamed Cox as R code: a paste0() expression that evaluates, in the emitted body,
 #' to `SELECT <cols>, <rank> AS ".sr_stratum", ".sr_row" FROM <sr_src> WHERE (<.sr_where>)` plus, with
@@ -48,9 +48,306 @@
   sprintf("paste0(%s, sr_src, \" WHERE (\", .sr_where, %s)", .sr_lit(head), .sr_lit(paste0(")", tail)))
 }
 
-#' The stream body of the piecewise-exponential Cox (cox_method = "pem"): Task 9.
+# ---- PEM (P1e.2 Task 9, rulings S15, S16 and S18) ---------------------------------------------------------
+#
+# .sr_pem_compile_stream(spec) is the stream body of cox_method = "pem". Pass 0 reads the S10 rows (no
+# ORDER BY) through the R8 snippets and keeps n, n_total, events, the count of rows with time <= 0, the
+# analysed event times (raw), the longest time per stratum, the fitted levels of every factor column (for
+# the glm column set, .h_st_mm_cols), the Kaplan-Meier counts (S13) and, when clustered, whether two
+# clusters exist. The memory stops then run in the memory order, and the cut points come from
+# .sr_pem_cut_code (Task 8) on a frame holding the event times and the longest time. The fit passes read
+# the S10 rows cross-joined with the intervals, (VALUES (1, 0, c1), (2, c1, c2), ...) AS sr_int(j, lo, hi),
+# keeping time > lo and sorted by .sr_row and j; per chunk the R8 snippets run, then pt = pmin(.time, hi) -
+# lo and ev = .event * (.time <= hi) (S16), the baseline indicator of the row's (stratum, interval)
+# combination (one column per combination with the stratum's longest time above lo; a single one is the
+# intercept of the memory model) and the covariate columns the memory glm has go into the IRLS with the
+# offset log(pt). The SE is the model one (dispersion 1) or, after a pass over the expanded rows sorted by
+# the cluster, the HC1 cluster one on the expanded rows (vcovCL, as memory). The warnings are the glm.fit
+# texts of a fit that did not converge and of fitted rates numerically 0. Progress: m = 1 + 26 (+ 1 with
+# the cluster pass), S15, lowered to the passes run once the fit ends.
+
+#' The stream body of the piecewise-exponential Cox (cox_method = "pem"): one code string.
 .sr_pem_compile_stream <- function(spec) {
-  stop("the streamed PEM fit is not available yet", call. = FALSE)
+  ch <- spec[["stream_chunk"]]
+  if (is.null(ch)) stop("a stream spec needs stream_chunk (set by the run)", call. = FALSE)
+  q <- function(x) as.character(DBI::dbQuoteIdentifier(DBI::ANSI(), x))
+  cl <- if (.sr_cox_clustered(spec)) spec[["cluster"]] else NULL
+  tc <- sr_terms_code(spec, "stream")
+  plan <- .sr_term_plan(spec)
+  st <- .sr_spec_chr(spec[["strata"]])
+  st_names <- if (length(st)) paste0(".s", seq_along(st)) else character()
+  rhs_vars <- all.vars(stats::as.formula(paste("~", tc$rhs)))
+  used <- unique(c(".time", ".event", rhs_vars, st_names, if (!is.null(cl)) ".cl"))
+  fac <- identical(plan[[1L]]$type, "factor")
+  ids <- vapply(plan, function(i) if (identical(i$type, "factor")) i$id else NA_character_, character(1))
+  ids <- ids[!is.na(ids)]
+  fcols <- if (length(ids)) paste0(ids, "f") else character()
+  needed <- unique(c(spec[["time"]], spec[["status"]], .sr_spec_chr(spec[["cluster"]]), st,
+                     vapply(plan, function(i) i$var, character(1))))
+  copy <- c(vapply(seq_along(st), function(i) {
+    sprintf("  des[[%s]] <- des[[%s]]", .sr_lit(st_names[i]), .sr_lit(st[i]))
+  }, character(1)), if (!is.null(cl)) sprintf("  des[[\".cl\"]] <- des[[%s]]", .sr_lit(cl)))
+  m_max <- 1L + 26L + if (is.null(cl)) 0L else 1L
+
+  helpers <- c(
+    .sr_inline(.sr_h_coef_table, ".h_coef_table"),
+    .sr_inline(.h_st_pass, ".h_st_pass"),
+    .sr_inline(.h_st_progress, ".h_st_progress"),
+    .sr_inline(.h_st_count, ".h_st_count"),
+    .sr_inline(.h_st_mm_cols, ".h_st_mm_cols"),
+    .sr_inline(.h_st_timefix_map, ".h_st_timefix_map"),
+    .sr_inline(.h_st_timefix_apply, ".h_st_timefix_apply"),
+    .sr_inline(.h_st_km_add, ".h_st_km_add"),
+    .sr_inline(.h_st_km_counts, ".h_st_km_counts"),
+    .sr_inline(.h_st_km_finish, ".h_st_km_finish"),
+    .sr_inline(.h_st_tsqr, ".h_st_tsqr"),
+    .sr_inline(.h_st_alias, ".h_st_alias"),
+    .sr_inline(.h_st_fam, ".h_st_fam"),
+    .sr_inline(.h_st_mustart, ".h_st_mustart"),
+    .sr_inline(.h_st_linkfun, ".h_st_linkfun"),
+    .sr_inline(.h_st_glm_eval, ".h_st_glm_eval"),
+    .sr_inline(.h_st_irls, ".h_st_irls"),
+    .sr_inline(.h_st_vcov_finish, ".h_st_vcov_finish"),
+    if (!is.null(cl)) c(
+      .sr_inline(.h_st_glm_scores, ".h_st_glm_scores"),
+      .sr_inline(.h_st_cluster_step, ".h_st_cluster_step"),
+      .sr_inline(.h_st_cluster_flush, ".h_st_cluster_flush"))
+  )
+
+  head <- c(
+    sprintf(".sr_chunk <- %s", .sr_lit(as.integer(ch))),
+    sprintf(".sr_fcols <- %s", .sr_lit(fcols)),
+    sprintf(".sr_sql <- %s", .sr_cox_sql(spec, needed, order = FALSE)),
+    sprintf(".tt <- stats::delete.response(stats::terms(~ %s))", tc$rhs),
+    # the covariate columns: model.matrix of the right-hand side without the intercept column
+    ".X <- function(d) {",
+    "  m <- stats::model.matrix(.tt, stats::model.frame(.tt, d, na.action = stats::na.pass))",
+    "  m[, colnames(m) != \"(Intercept)\", drop = FALSE]",
+    "}",
+    # the in-memory snippets on one chunk (R8): design, outcome, strata copies, complete cases
+    ".prep <- function(df) {",
+    "  sr_data <- df",
+    "  des <- .h_design(sr_data)",
+    sr_outcome_code(spec, "surv"),
+    copy,
+    sprintf("  .keep <- stats::complete.cases(des[%s])", .sr_lit(used)),
+    "  list(des = des[.keep, , drop = FALSE], s = df[[\".sr_stratum\"]][.keep], n = nrow(df), keep = .keep)",
+    "}",
+    # progress (R15, S15)
+    ".pg <- new.env(parent = emptyenv())",
+    ".pg$k <- 0L",
+    sprintf(".pg$m <- %s", .sr_lit(m_max)),
+    ".pg_tick <- function() {",
+    "  .pg$k <- .pg$k + 1L",
+    "  if (.pg$k > .pg$m) .pg$m <- .pg$k",
+    "  if (exists(\"sr_progress_file\")) .h_st_progress(sr_progress_file, .pg$k, .pg$m)",
+    "  invisible(NULL)",
+    "}"
+  )
+
+  km_add <- if (fac) {
+    "  .A$km <- .h_st_km_add(.A$km, d[[\".time\"]], d[[\".event\"]], as.character(d[[\"t1f\"]]))"
+  } else {
+    c("  if (!.A$km_many) {",
+      "    .A$kmv <- sort(unique(c(.A$kmv, d[[\"t1\"]])))",
+      "    if (length(.A$kmv) > 8L) {",
+      "      .A$km_many <- TRUE",
+      "      if (!is.null(.A$km)) .A$km$parts <- lapply(.A$km$parts, function(pt) {",
+      "        pt$g <- rep(\"All\", nrow(pt))",
+      "        pt",
+      "      })",
+      "    }",
+      "  }",
+      "  .A$km <- .h_st_km_add(.A$km, d[[\".time\"]], d[[\".event\"]], if (.A$km_many) rep(\"All\", nrow(d)) else d[[\"t1\"]])")
+  }
+
+  pass0 <- c(
+    ".A <- new.env(parent = emptyenv())",
+    ".A$n_total <- 0",
+    ".A$n <- 0",
+    ".A$events <- 0",
+    ".A$nle0 <- 0",
+    ".A$et <- list()",
+    ".A$smax <- numeric()",
+    ".A$cols <- NULL",
+    ".A$proto <- NULL",
+    ".A$cnt <- list()",
+    ".A$tlo <- Inf",
+    ".A$thi <- -Inf",
+    ".A$km <- NULL",
+    ".A$kmv <- numeric()",
+    ".A$km_many <- FALSE",
+    "for (.fc in .sr_fcols) .A$cnt[[.fc]] <- 0",
+    if (!is.null(cl)) c(".A$cl1 <- NULL", ".A$cl2 <- FALSE"),
+    ".h_st_pass(.sr_con, .sr_sql, .sr_chunk, NULL, function(g, df) {",
+    "  pr <- .prep(df)",
+    "  .A$n_total <- .A$n_total + pr$n",
+    "  d <- pr$des",
+    "  if (!nrow(d)) return(g)",
+    "  if (is.null(.A$cols)) {",
+    "    .A$cols <- colnames(.X(d))",
+    "    .A$proto <- d[1L, , drop = FALSE]",
+    "  }",
+    "  tm <- d[[\".time\"]]",
+    "  .A$n <- .A$n + nrow(d)",
+    "  .A$events <- .A$events + sum(d[[\".event\"]])",
+    "  .A$nle0 <- .A$nle0 + sum(tm <= 0)",
+    "  .A$et[[length(.A$et) + 1L]] <- tm[d[[\".event\"]] == 1]",
+    "  .A$tlo <- min(.A$tlo, tm)",
+    "  .A$thi <- max(.A$thi, tm)",
+    "  mx <- tapply(tm, as.character(pr$s), max)",
+    "  for (k in names(mx)) .A$smax[k] <- if (is.na(.A$smax[k])) mx[[k]] else max(.A$smax[[k]], mx[[k]])",
+    "  for (.fc in .sr_fcols) .A$cnt[[.fc]] <- .A$cnt[[.fc]] + tabulate(as.integer(d[[.fc]]), nlevels(d[[.fc]]))",
+    km_add,
+    if (!is.null(cl)) c(
+      "  if (!.A$cl2) {",
+      "    if (is.null(.A$cl1)) .A$cl1 <- d[[\".cl\"]][1L]",
+      "    .A$cl2 <- any(d[[\".cl\"]] != .A$cl1)",
+      "  }"),
+    "  g",
+    "}, order = FALSE)",
+    ".pg_tick()",
+    # the memory stops, in the memory order
+    "if (.A$n < 1) stop(\"no complete rows: every row has a missing value in the model\")",
+    ".n <- .h_st_count(.A$n)",
+    "if (.A$events == 0) {",
+    "  stop(\"the outcome has no events among the \", .n, \" rows analysed\")",
+    "}",
+    "if (.A$nle0 > 0) {",
+    "  stop(\"the piecewise-exponential model needs every time above zero (found \", .h_st_count(.A$nle0), ",
+    "       \" rows with time <= 0)\")",
+    "}",
+    # the cut points (S16) from the analysed event times and the longest time, by the memory code
+    ".ev <- unlist(.A$et, use.names = FALSE)",
+    "des <- data.frame(.time = c(.ev, .A$thi), .event = c(rep(1L, length(.ev)), 0L))",
+    .sr_pem_cut_code(spec),
+    ".ncl <- NA_real_",
+    if (!is.null(cl)) "if (!.A$cl2) stop(\"layers$clustered needs at least two clusters (found 1)\")",
+    ".nk <- length(.cuts) - 1L",
+    ".lo <- .cuts[-length(.cuts)]",
+    ".hi <- .cuts[-1L]",
+    # one baseline column per present (stratum, interval) combination (S16)
+    ".sk <- names(.A$smax)",
+    ".cmb <- matrix(0L, length(.sk), .nk, dimnames = list(.sk, NULL))",
+    ".nb <- 0L",
+    "for (.i in seq_along(.sk)) for (.j in seq_len(.nk)) {",
+    "  if (.A$smax[[.i]] > .lo[.j]) {",
+    "    .nb <- .nb + 1L",
+    "    .cmb[.i, .j] <- .nb",
+    "  }",
+    "}",
+    # the covariate columns of the memory glm (unused factor levels dropped)
+    ".pres <- list()",
+    "for (.fc in .sr_fcols) .pres[[.fc]] <- levels(.A$proto[[.fc]])[.A$cnt[[.fc]] > 0]",
+    sprintf(".mc <- setdiff(.h_st_mm_cols(%s, .A$proto, .pres), \"(Intercept)\")", .sr_lit(tc$rhs)),
+    ".csel <- match(.mc, .A$cols)",
+    "if (anyNA(.csel)) stop(\"the streamed design does not hold the in-memory columns\")",
+    ".nms <- c(paste0(\".bs\", seq_len(.nb)), .mc)",
+    ".p <- length(.nms)",
+    # the fit query: the S10 rows cross-joined with the intervals, time > lo
+    ".dbl <- function(x) vapply(x, function(v) {",
+    "  if (is.finite(v)) paste0(\"CAST('\", format(v, digits = 17), \"' AS DOUBLE)\") else \"'Infinity'::DOUBLE\"",
+    "}, character(1))",
+    ".vals <- paste0(\"(\", seq_len(.nk), \", \", .dbl(.lo), \", \", .dbl(.hi), \")\", collapse = \", \")",
+    sprintf(".sr_fsql <- paste0(%s, %s, %s, .vals, %s)",
+            .sr_lit("SELECT s.*, sr_int.j AS \".sr_j\", sr_int.lo AS \".sr_lo\", sr_int.hi AS \".sr_hi\" FROM ("),
+            .sr_cox_sql(spec, needed, order = FALSE),
+            .sr_lit(") s CROSS JOIN (VALUES "),
+            .sr_lit(paste0(") AS sr_int(j, lo, hi) WHERE s.", q(spec[["time"]]), " > sr_int.lo"))),
+    # the rows of one chunk of the fit query: design with the baseline columns, y, offset
+    ".rows <- function(df) {",
+    "  pr <- .prep(df)",
+    "  d <- pr$des",
+    "  m <- nrow(d)",
+    "  if (!m) return(NULL)",
+    "  lo <- df[[\".sr_lo\"]][pr$keep]",
+    "  hi <- df[[\".sr_hi\"]][pr$keep]",
+    "  tm <- d[[\".time\"]]",
+    "  pt <- pmin(tm, hi) - lo",
+    "  ev <- d[[\".event\"]] * (tm <= hi)",
+    "  bc <- .cmb[cbind(match(as.character(pr$s), .sk), df[[\".sr_j\"]][pr$keep])]",
+    "  if (anyNA(bc) || any(bc == 0L)) stop(\"the streamed PEM met a row outside its baseline intervals\")",
+    "  B <- matrix(0, m, .nb)",
+    "  B[cbind(seq_len(m), bc)] <- 1",
+    "  X <- cbind(B, .X(d)[, .csel, drop = FALSE])",
+    "  colnames(X) <- .nms",
+    "  list(X = X, y = ev, off = log(pt), d = d)",
+    "}"
+  )
+
+  fit <- c(
+    ".sr_fsql_o <- paste0(.sr_fsql, \" ORDER BY s.\\\".sr_row\\\", sr_int.j\")",
+    ".A$mumin <- Inf",
+    ".passfn <- function(beta, wls) {",
+    "  .A$mumin <- Inf",
+    "  .h_st_pass(.sr_con, .sr_fsql_o, .sr_chunk, NULL, function(st, df) {",
+    "    r <- .rows(df)",
+    "    if (is.null(r)) return(st)",
+    "    wls(r$X, r$y, r$off)",
+    "    if (!is.null(beta)) .A$mumin <- min(.A$mumin, pmax(exp(drop(r$X %*% beta) + r$off), .Machine$double.eps))",
+    "    st",
+    "  }, order = FALSE)",
+    "  .pg_tick()",
+    "  invisible(NULL)",
+    "}",
+    ".fit <- .h_st_irls(.passfn, \"poisson\", .p, .nms)",
+    sprintf(".pg$m <- .pg$k%s", if (is.null(cl)) "" else " + 1L"),
+    "if (exists(\"sr_progress_file\")) .h_st_progress(sr_progress_file, .pg$k, .pg$m)",
+    # the glm.fit warnings
+    ".wrn <- character()",
+    "if (!.fit$converged) .wrn <- c(.wrn, \"glm.fit: algorithm did not converge\")",
+    "if (.A$mumin < 10 * .Machine$double.eps) .wrn <- c(.wrn, \"glm.fit: fitted rates numerically 0 occurred\")",
+    ".cf <- .fit$beta[.mc]",
+    ".ok <- !is.na(.cf)",
+    ".nm <- names(.cf)[.ok]",
+    ".nsp <- .fit$n"
+  )
+
+  se_code <- if (is.null(cl)) {
+    ".V <- .h_st_vcov_finish(\"model\", .fit$B, 1, .nsp, .fit$rank, NA)[.nm, .nm, drop = FALSE]"
+  } else {
+    c(
+      ".b <- .fit$beta[.fit$keep]",
+      sprintf(".sr_csql <- paste0(.sr_fsql, %s)",
+              .sr_lit(paste0(" ORDER BY s.", q(cl), ", s.\".sr_row\", sr_int.j"))),
+      ".S <- new.env(parent = emptyenv())",
+      ".S$cl <- NULL",
+      ".S$cn <- 0",
+      ".h_st_pass(.sr_con, .sr_csql, .sr_chunk, NULL, function(st, df) {",
+      "  r <- .rows(df)",
+      "  if (is.null(r)) return(st)",
+      "  Xk <- r$X[, .fit$keep, drop = FALSE]",
+      "  ep <- if (is.null(.fit$beta_prev)) NULL else drop(r$X %*% .fit$beta_prev) + r$off",
+      "  sc <- .h_st_glm_scores(Xk, r$y, drop(Xk %*% .b) + r$off, ep, \"poisson\")",
+      "  .S$cl <- .h_st_cluster_step(.S$cl, sc, 1, r$d[[\".cl\"]])",
+      "  .S$cn <- .S$cn + nrow(Xk)",
+      "  st",
+      "}, order = FALSE)",
+      ".pg_tick()",
+      ".S$cl <- .h_st_cluster_flush(.S$cl)",
+      "if (.S$cn != .nsp) stop(\"the cluster pass read \", .h_st_count(.S$cn), \" rows, the fit used \", .h_st_count(.nsp))",
+      ".ncl <- .S$cl$G",
+      "if (.ncl < 2L) stop(\"layers$clustered needs at least two clusters (found \", .ncl, \")\")",
+      ".V <- .h_st_vcov_finish(\"cluster\", .fit$B, .S$cl$S, .nsp, .fit$rank, .ncl)[.nm, .nm, drop = FALSE]"
+    )
+  }
+  tabc <- "tab <- .h_coef_table(.cf[.ok], .V, df = Inf)"
+
+  km <- c(
+    ".map <- .h_st_timefix_map(.h_st_km_counts(.A$km, NULL)$t)",
+    if (fac) ".kml <- .sr_fixed$levels[[\"t1\"]]" else ".kml <- if (.A$km_many) \"All\" else levels(factor(.A$kmv))",
+    ".kmo <- .h_st_km_finish(.h_st_km_counts(.A$km, .map), .kml, c(.A$tlo, .A$thi))",
+    sprintf(".kmb <- %s", if (fac) "\"exposure\"" else "if (.A$km_many) \"overall\" else \"exposure\"")
+  )
+
+  value <- paste0(
+    "list(coef = tab, aliased = names(.cf)[!.ok], n = .n, n_total = .h_st_count(.A$n_total), ",
+    "events = .h_st_count(.A$events), level = 0.95, se_type = ", .sr_lit(if (is.null(cl)) "model" else "cluster"),
+    ", n_clusters = .ncl, ties = NA_character_, strata = ", .sr_lit(st), ", levels = .sr_fixed$levels, ",
+    "warnings = .wrn, km_by = .kmb, km = .kmo$km, km_risk = .kmo$risk, method = \"pem\", cuts = .cuts, ",
+    "k = length(.cuts) - 1L, engine = \"stream\", chunk = .sr_chunk, passes = .pg$k, iter = .fit$iter)")
+
+  paste(c(tc$setup, helpers, tc$design, head, pass0, fit, se_code, tabc, km, value), collapse = "\n")
 }
 
 #' The stream body of exact Cox (cox@1, cox_describe@1): one code string.

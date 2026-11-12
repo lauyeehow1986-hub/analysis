@@ -153,6 +153,9 @@
 #' Streamed IRLS. passfn(beta_or_NULL, wls_fun) runs one data pass and calls wls_fun(X, y) per chunk
 #' (X the p design columns named nms, y the outcome); beta is NULL on the first pass (mu = mustart),
 #' else the working coefficients (0 for an aliased column). family is a family object or its name.
+#' wls_fun(X, y, offset) takes an optional offset, as glm.fit: the first pass starts from
+#' linkfun(mustart) without it, later passes use eta = X beta + offset, and the working response is
+#' z = eta - offset + (y - mu) / mu.eta. With no offset the code path is the P1e.1 one, unchanged.
 #' Returns list(beta (named, NA for an aliased column), beta_prev (the working coefficients the kept
 #' pass's weights came from; NULL when they came from mustart), R (rank x rank, pivot order), keep, rank,
 #' B = chol2inv(R) in keep order named by the kept columns, iter, converged, deviance (at beta),
@@ -177,19 +180,27 @@
     acc$n <- 0
     acc$sep <- FALSE
     acc$rab <- FALSE
-    wls <- function(X, y) {
+    wls <- function(X, y, offset = NULL) {
       X <- as.matrix(X)
       storage.mode(X) <- "double"
       y <- as.numeric(y)
       m <- length(y)
       if (!m) return(invisible(NULL))
       eta <- if (is.null(beta)) .h_st_linkfun(.h_st_mustart(y, fam), fam) else drop(X %*% beta)
+      if (!is.null(offset)) {
+        offset <- as.numeric(offset)
+        if (!is.null(beta)) eta <- eta + offset
+      }
       fe <- .h_st_glm_eval(eta, y, fam)
       dev <- sum(fe$dev)
       if (!is.finite(dev)) stop("the streaming fit met a non-finite deviance; refit in memory")
       good <- fe$mu_eta != 0
       me <- fe$mu_eta[good]
-      z <- eta[good] + (y[good] - fe$mu[good]) / me
+      z <- if (is.null(offset)) {
+        eta[good] + (y[good] - fe$mu[good]) / me
+      } else {
+        (eta - offset)[good] + (y[good] - fe$mu[good]) / me
+      }
       w <- sqrt((1 * me^2) / fe$var[good])
       A <- cbind(X[good, , drop = FALSE] * w, z * w)
       if (!all(is.finite(A))) stop("the streaming fit met a non-finite working value; refit in memory")
