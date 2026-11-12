@@ -42,6 +42,63 @@
 
 .sr_cox_ties_of <- function(spec) if (is.null(spec[["ties"]])) "efron" else spec[["ties"]]
 
+# The fitting method: "exact" (the partial likelihood, the default and what every spec without the field
+# means) or "pem" (the piecewise-exponential Poisson model, P1e.2).
+.sr_cox_method_of <- function(spec) if (is.null(spec[["cox_method"]])) "exact" else spec[["cox_method"]]
+
+# The cut-point rule of a PEM fit: spec$pem_cuts, or ten event-time quantile intervals.
+.sr_pem_cuts_of <- function(spec) {
+  if (is.null(spec[["pem_cuts"]])) list(rule = "quantile", k = 10) else spec[["pem_cuts"]]
+}
+
+# The method sentence the SAP records for a cox analysis.
+.sr_cox_method_text <- function(spec) {
+  if (!identical(.sr_cox_method_of(spec), "pem")) {
+    return("Hazard ratios were estimated by a Cox proportional hazards model (partial likelihood, Efron/Breslow ties).")
+  }
+  cu <- .sr_pem_cuts_of(spec)
+  if (identical(cu[["rule"]], "explicit")) {
+    at <- vapply(as.numeric(cu[["at"]]), function(x) format(x, digits = 15, trim = TRUE), "")
+    k <- length(at) + 1L
+    rule <- paste0("rule explicit: ", paste(at, collapse = ", "))
+  } else {
+    k <- cu[["k"]]
+    rule <- "rule quantile"
+  }
+  paste0("Hazard ratios were estimated by a piecewise-exponential Poisson model with ", format(k, trim = TRUE),
+         " intervals (", rule, ").")
+}
+
+# The PEM field checks of .sr_cox_check: pem_cuts needs the pem method, the rule and its values are valid, and
+# neither multiple imputation nor the bootstrap is combined with PEM yet. Stops with the reason.
+.sr_pem_check <- function(spec) {
+  pem <- identical(.sr_cox_method_of(spec), "pem")
+  cu <- spec[["pem_cuts"]]
+  if (!is.null(cu) && !pem) stop("pem_cuts needs cox_method = \"pem\"", call. = FALSE)
+  if (!pem) return(invisible(TRUE))
+  L <- spec[["layers"]]
+  if (identical(L[["missing"]], "mi") || identical(L[["resampling"]], "bootstrap")) {
+    stop("PEM with multiple imputation / bootstrap arrives in P1e.3", call. = FALSE)
+  }
+  if (is.null(cu)) return(invisible(TRUE))
+  rule <- cu[["rule"]]
+  if (!(is.character(rule) && length(rule) == 1L && !is.na(rule) && rule %in% c("quantile", "explicit"))) {
+    stop("pem_cuts$rule must be \"quantile\" or \"explicit\"", call. = FALSE)
+  }
+  if (identical(rule, "quantile")) {
+    k <- cu[["k"]]
+    if (!(is.numeric(k) && length(k) == 1L && is.finite(k) && k == floor(k) && k >= 2 && k <= 50)) {
+      stop("pem_cuts$k must be a whole number from 2 to 50", call. = FALSE)
+    }
+  } else {
+    at <- cu[["at"]]
+    ok <- is.numeric(at) && length(at) >= 1L && all(is.finite(at)) && all(at > 0) &&
+      (length(at) == 1L || all(diff(at) > 0))
+    if (!ok) stop("pem_cuts$at must be increasing, finite numbers above zero", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 # Whether the fit uses cluster(): layers$clustered = TRUE (and then spec$cluster is required).
 .sr_cox_clustered <- function(spec) isTRUE(spec[["layers"]][["clustered"]])
 
@@ -68,6 +125,7 @@
   .sr_surv_check(spec)
   .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
+  .sr_pem_check(spec)
   .sr_engine_check(spec, "cox")
   base <- c(spec[["time"]], spec[["status"]], spec[["exposure"]])
   cl <- spec[["cluster"]]
@@ -90,7 +148,9 @@
   .sr_cox_check(spec)
   st <- .sr_spec_chr(spec[["strata"]])
   mi <- identical(spec[["layers"]][["missing"]], "mi")
-  summary <- if (length(spec[["terms"]]) > 0L) {
+  summary <- if (identical(.sr_cox_method_of(spec), "pem")) {
+    "hazard ratio from a piecewise-constant baseline hazard (piecewise-exponential model)"
+  } else if (length(spec[["terms"]]) > 0L) {
     "adjusted hazard ratio"
   } else if (length(st)) {
     paste0("hazard ratio stratified by ", paste(st, collapse = ", "), " (no other model terms)")
@@ -399,6 +459,9 @@
     ties = list(type = "chr", required = FALSE, values = c("efron", "breslow")),
     exclude_rows = list(type = "num", required = FALSE),
     engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
+    cox_method = list(type = "chr", required = FALSE, values = c("exact", "pem")),
+    pem_cuts = list(type = "list", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

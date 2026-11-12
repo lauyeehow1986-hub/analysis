@@ -49,17 +49,16 @@ test_that("engine field validates against SR_ENGINES", {
   }
 })
 
-test_that("cox and rmst refuse the stream engine at validation", {
-  msg <- "the streaming engine for Cox / RMST arrives in P1e.2"
+test_that("cox and rmst accept the stream engine at validation (P1e.2)", {
   for (r in c("cox", "rmst")) {
     v <- .sce_val(.sce_spec(r, engine = "stream"), r)
-    expect_false(v$ok, info = r)
-    expect_match(.sce_err(v), msg, fixed = TRUE)
+    expect_true(v$ok, info = paste(r, .sce_err(v)))
+    expect_false(grepl("arrives in P1e.2", .sce_err(v), fixed = TRUE), info = r)
     expect_true(.sce_val(.sce_spec(r, engine = "memory"), r)$ok, info = r)
     expect_true(.sce_val(.sce_spec(r, engine = "auto"), r)$ok, info = r)
   }
-  expect_identical(.sr_engine_refusal("cox", list(engine = "stream")), msg)
-  expect_identical(.sr_engine_refusal("rmst", list()), msg)
+  expect_null(.sr_engine_refusal("cox", list(engine = "stream")))
+  expect_null(.sr_engine_refusal("rmst", list()))
   expect_null(.sr_engine_refusal("lm", list(engine = "stream", layers = .sce_layers())))
 })
 

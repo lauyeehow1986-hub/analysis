@@ -4,10 +4,10 @@
 # A minimal lm form fill (the layers are left out: the collect keeps what is given) plus extra values.
 .sui_fill <- function(r, ...) c(list(outcome = "age", exposure = "grp", exposure_ref = "A", seed = "42"), list(...))
 
-test_that("Engine select appears for the five routes and is limited for cox/rmst", {
+test_that("Engine select appears for every streaming route (P1e.2: cox, cox_describe and rmst too)", {
   p <- .fx_ui_project()
   all3 <- c("Auto" = "auto", "In memory" = "memory", "Streaming" = "stream")
-  for (r in c("lm", "logistic", "logistic_describe", "modpois", "table1")) {
+  for (r in c("lm", "logistic", "logistic_describe", "modpois", "table1", "cox", "cox_describe", "rmst")) {
     f <- sr_spec_form(r, "t", p)
     e <- f[["engine"]]
     expect_false(is.null(e), info = r)
@@ -16,16 +16,12 @@ test_that("Engine select appears for the five routes and is limited for cox/rmst
     expect_identical(e$value, "auto", info = r)
     expect_false("stream_chunk" %in% names(f), info = r)
   }
-  for (r in c("cox", "rmst")) {
-    e <- sr_spec_form(r, "t", p)[["engine"]]
-    expect_identical(e$choices, c("Auto" = "auto", "In memory" = "memory"), info = r)
-  }
   # the renderer offers exactly the choices, with the labels
   html <- paste(.sr_ui_spec_inputs(sr_spec_form("lm", "t", p)["engine"], shiny::NS("x")))
   expect_match(html, "value=\"stream\"", fixed = TRUE)
   expect_match(html, "Streaming", fixed = TRUE)
   html2 <- paste(.sr_ui_spec_inputs(sr_spec_form("cox", "t", p)["engine"], shiny::NS("x")))
-  expect_false(grepl("stream", html2, fixed = TRUE))
+  expect_true(grepl("value=\"stream\"", html2, fixed = TRUE))   # P1e.2: cox offers streaming too
   # collect: auto is the default and stays out of the spec (hash-stable); the others are kept
   expect_false("engine" %in% names(sr_spec_collect("lm", .sui_fill("lm", engine = "auto"))))
   expect_identical(sr_spec_collect("lm", .sui_fill("lm", engine = "stream"))$engine, "stream")

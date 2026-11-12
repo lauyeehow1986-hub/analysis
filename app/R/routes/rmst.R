@@ -327,6 +327,7 @@
     exposure = list(type = "chr", required = TRUE),
     tau = list(type = "num", required = TRUE),
     engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

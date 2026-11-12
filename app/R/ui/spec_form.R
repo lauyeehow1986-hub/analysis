@@ -22,18 +22,19 @@ SR_FORM_KINDS <- c(
   terms = "terms",
   interactions = "interactions",
   layers = "layers",
-  se = "enum", standardize_over = "enum", ties = "enum", penalty = "enum",
+  se = "enum", standardize_over = "enum", ties = "enum", penalty = "enum", cox_method = "enum",
   marginal = "logical",
   seed = "number", tau = "number",
   event_value = "text",
   status_event = "event",
   exclude_rows = "hidden",
   engine = "engine",
-  stream_chunk = "hidden"                      # set by the engine, never typed (sr_opt stream_chunk_rows)
+  stream_chunk = "hidden",                     # set by the engine, never typed (sr_opt stream_chunk_rows)
+  pem_cuts = "hidden"                          # built from the pem_* extras below
 )
 
 # The engine choices of the form (label = value). Streaming is offered only to a route whose schema carries
-# stream_chunk (the five routes of P1e.1); Cox and RMST run in memory until P1e.2.
+# stream_chunk (the routes of P1e.1 and, since P1e.2, cox, cox_describe and rmst).
 .SR_FORM_ENGINES <- c("Auto" = "auto", "In memory" = "memory", "Streaming" = "stream")
 .sr_form_engine_choices <- function(schema) {
   if ("stream_chunk" %in% names(schema)) .SR_FORM_ENGINES else .SR_FORM_ENGINES[c("Auto", "In memory")]
@@ -48,7 +49,12 @@ SR_FORM_KINDS <- c(
                                 framework = c("bayesian", "both"))
 
 # Form defaults of fields whose schema gives none.
-.SR_FORM_DEFAULTS <- list(seed = 42, engine = "auto")
+.SR_FORM_DEFAULTS <- list(seed = 42, engine = "auto", cox_method = "exact")
+
+# The shown text of the choices of an enum field (value -> label), where the value is not a fit label.
+.SR_FORM_CHOICE_TEXTS <- list(
+  cox_method = c("Cox (exact partial likelihood)" = "exact", "Piecewise-exponential (Poisson)" = "pem")
+)
 
 .SR_FORM_LABELS <- c(
   outcome = "Outcome column", exposure = "Exposure column", cluster = "Cluster column",
@@ -56,6 +62,7 @@ SR_FORM_KINDS <- c(
   by = "Group by column", vars = "Variables", nonnormal = "Non-normal variables",
   terms = "Adjustment terms", interactions = "Interactions", se = "Standard errors",
   standardize_over = "Standardise over", ties = "Tie handling", penalty = "Penalty", engine = "Engine",
+  cox_method = "Method",
   marginal = "Report marginal effects", seed = "Random seed", tau = "Restriction time (tau)",
   event_value = "Outcome value counted as the event", status_event = "Status value counted as the event",
   layers_missing = "Missing data", layers_weights = "Weighting", layers_matching = "Matching",
@@ -93,7 +100,18 @@ SR_FORM_EXTRAS <- list(
        when = function(route_id, layers) {
          .sr_form_layer_is(layers, "missing", "mi") && .sr_form_layer_is(layers, "resampling", "bootstrap")
        },
-       to = c("choices", "mi_x_boot"), choices = c("boot_then_impute", "impute_then_boot"), default = NULL)
+       to = c("choices", "mi_x_boot"), choices = c("boot_then_impute", "impute_then_boot"), default = NULL),
+  list(id = "pem_rule", kind = "radio", label = "Cut points",
+       when = function(route_id, layers) "pem_cuts" %in% names(sr_route_get(route_id)$spec_schema),
+       to = c("pem_cuts", "rule"),
+       choices = c("K intervals at event-time quantiles" = "quantile", "explicit" = "explicit"),
+       default = "quantile"),
+  list(id = "pem_k", kind = "number", label = "Number of intervals (K, 2 to 50)",
+       when = function(route_id, layers) "pem_cuts" %in% names(sr_route_get(route_id)$spec_schema),
+       to = c("pem_cuts", "k"), choices = NULL, default = 10),
+  list(id = "pem_at", kind = "text", label = "Cut times (comma-separated, increasing)",
+       when = function(route_id, layers) "pem_cuts" %in% names(sr_route_get(route_id)$spec_schema),
+       to = c("pem_cuts", "at"), choices = NULL, default = NULL)
 )
 
 # The route and its schema; stops when a schema field has no form kind (purpose is the route's own).
@@ -272,7 +290,7 @@ sr_spec_form <- function(route_id, table, project, layers = NULL) {
 # A form value cast by kind (NULL when it is empty after the cast).
 .sr_form_cast <- function(kind, x) {
   v <- switch(kind,
-    column = , text = , enum = , engine = as.character(x)[1L],
+    column = , text = , enum = , engine = , radio = as.character(x)[1L],
     columns = as.character(unlist(x)),
     terms = .sr_form_terms(x),
     interactions = .sr_form_interactions(x),
@@ -288,6 +306,12 @@ sr_spec_form <- function(route_id, table, project, layers = NULL) {
   x <- trimws(as.character(x)[1L])
   n <- suppressWarnings(as.numeric(x))
   if (!is.na(n)) n else x
+}
+
+# The explicit PEM cut times from the form text: comma-separated numbers (a bad entry stays NA, for the core to refuse).
+.sr_form_pem_at <- function(x) {
+  v <- suppressWarnings(as.numeric(strsplit(as.character(x)[1L], ",", fixed = TRUE)[[1L]]))
+  if (length(v)) v else NULL
 }
 
 .sr_form_set_path <- function(spec, path, value) {
@@ -318,6 +342,7 @@ sr_spec_collect <- function(route_id, values) {
     if (.sr_form_empty(x)) next
     v <- .sr_form_cast(kind, x)
     if (identical(kind, "engine") && identical(v, "auto")) next   # the default: not stored (spec hash unchanged)
+    if (identical(f, "cox_method") && identical(v, "exact")) next  # the default: not stored (spec hash unchanged)
     if (!is.null(v)) spec[[f]] <- v
   }
   layers <- list()
@@ -331,6 +356,16 @@ sr_spec_collect <- function(route_id, values) {
     if (!isTRUE(x$when(route_id, layers))) next
     v <- values[[x$id]]
     if (.sr_form_empty(v)) next
+    if (x$id %in% c("pem_rule", "pem_k", "pem_at")) {
+      if (!identical(spec[["cox_method"]], "pem")) next
+      rule <- as.character(values[["pem_rule"]])[1L]
+      if (!(identical(rule, "explicit") || identical(rule, "quantile"))) rule <- "quantile"
+      if (identical(x$id, "pem_k") && !identical(rule, "quantile")) next
+      if (identical(x$id, "pem_at") && !identical(rule, "explicit")) next
+      v <- if (identical(x$id, "pem_at")) .sr_form_pem_at(v) else .sr_form_cast(x$kind, v)
+      if (!is.null(v)) spec <- .sr_form_set_path(spec, x$to, v)
+      next
+    }
     if (identical(x$id, "boot_cluster")) {
       if (isTRUE(as.logical(v)[1L])) spec$boot_type <- "cluster"
       next
@@ -455,7 +490,14 @@ SR_FORM_MAX_ROWS <- 30L
       column = .sr_ui_select(id, lab, c("", e$choices), .sr_ui_chr(v), disabled = disabled),
       columns = .sr_ui_off(shiny::selectInput(id, lab, choices = e$choices, selected = as.character(unlist(v)),
                                               multiple = TRUE, width = "100%"), "select", disabled),
-      enum = .sr_ui_select(id, lab, e$choices, .sr_ui_chr(if (is.null(v)) e$default else v), disabled = disabled),
+      enum = .sr_ui_select(id, lab, e$choices, .sr_ui_chr(if (is.null(v)) e$default else v), disabled = disabled,
+                           texts = if (e$id %in% names(.SR_FORM_CHOICE_TEXTS)) {
+                             tx <- .SR_FORM_CHOICE_TEXTS[[e$id]]
+                             stats::setNames(names(tx), unname(tx))
+                           }),
+      radio = .sr_ui_off(shiny::radioButtons(id, lab, choices = e$choices,
+                                             selected = .sr_ui_chr(if (is.null(v)) e$default else v)),
+                         "input", disabled),
       engine = .sr_ui_select(id, lab, unname(e$choices), .sr_ui_chr(if (is.null(v)) e$default else v),
                              disabled = disabled,
                              texts = stats::setNames(names(e$choices), unname(e$choices))),
@@ -475,5 +517,16 @@ SR_FORM_MAX_ROWS <- 30L
       interactions = .sr_ui_interaction_inputs(e, ns, disabled, .sr_ui_int_choices(exposure, terms_val)),
       stop("the form cannot render kind '", e$kind, "' (field '", e$id, "')", call. = FALSE))
   }
-  shiny::tagList(lapply(unname(form), one))
+  # The PEM cut fields show only for the piecewise-exponential method, and the K / explicit field by the rule.
+  pem <- function(e, tag) {
+    cond <- switch(e$id,
+      pem_rule = "input.f_cox_method == 'pem'",
+      pem_k = "input.f_cox_method == 'pem' && input.f_pem_rule != 'explicit'",
+      pem_at = "input.f_cox_method == 'pem' && input.f_pem_rule == 'explicit'")
+    shiny::conditionalPanel(condition = cond, ns = ns, tag)
+  }
+  shiny::tagList(lapply(unname(form), function(e) {
+    tag <- one(e)
+    if (e$id %in% c("pem_rule", "pem_k", "pem_at")) pem(e, tag) else tag
+  }))
 }
