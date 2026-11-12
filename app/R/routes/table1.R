@@ -163,7 +163,8 @@
 
 # ---- compile ------------------------------------------------------------------------------------
 
-.sr_t1_compile <- function(spec) {
+# The validated by, vars and nonnormal of a table1 spec (shared by the memory and the stream compile).
+.sr_t1_spec_args <- function(spec) {
   by <- spec[["by"]]
   if (!is.character(by) || length(by) != 1L || is.na(by) || !nzchar(by)) {
     stop("table1: 'by' must be a single column name", call. = FALSE)
@@ -183,6 +184,15 @@
     stop("table1: nonnormal names column(s) that are not in vars: ",
          paste(setdiff(nn, vars), collapse = ", "), call. = FALSE)
   }
+  list(by = by, vars = vars, nn = nn)
+}
+
+.sr_t1_compile <- function(spec) {
+  a <- .sr_t1_spec_args(spec)
+  if (identical(spec[["engine"]], "stream")) return(.sr_t1_compile_stream(spec))
+  by <- a$by
+  vars <- a$vars
+  nn <- a$nn
   helpers <- c(
     .sr_inline(.h_t1_ci, ".h_t1_ci"), .sr_inline(.h_t1_smd_cont, ".h_t1_smd_cont"),
     .sr_inline(.h_t1_smd_bin, ".h_t1_smd_bin"), .sr_inline(.h_t1_pinv, ".h_t1_pinv"),
@@ -283,16 +293,24 @@
 
 # ---- the route ----------------------------------------------------------------------------------
 
+# The estimand, a function of the spec so that the engine / stream_chunk fields are validated with it.
+.sr_t1_estimand <- function(spec) {
+  .sr_engine_check(spec, "table1")
+  sr_estimand(population = "analysed sample", variables = "the variables listed in the spec",
+              intercurrent = "not applicable (descriptive)",
+              summary = "baseline characteristics by group", level = "not-applicable")
+}
+
 .sr_table1_route <- function() {
   sr_route(
     id = "table1", version = 1L, family = "describe", purpose = "describe",
-    estimand = sr_estimand(population = "analysed sample", variables = "the variables listed in the spec",
-                           intercurrent = "not applicable (descriptive)",
-                           summary = "baseline characteristics by group", level = "not-applicable"),
+    estimand = .sr_t1_estimand,
     spec_schema = list(
       by = list(type = "chr", required = TRUE),
       vars = list(type = "chr", required = TRUE),
       nonnormal = list(type = "chr", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
       seed = list(type = "num", required = TRUE)
     ),
     compile = .sr_t1_compile, present = .sr_t1_present

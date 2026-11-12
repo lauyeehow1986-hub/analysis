@@ -30,7 +30,7 @@ SR_SAP_METHODS <- c("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "non
 SR_SAP_ACTIONS <- c("add_sensitivity", "replace_primary")
 
 #' The `method` argument of sr_mem_estimate for a route id: lm* -> "lm", logistic* / modpois* -> "glm",
-#' cox* / rmst* -> "cox", anything else (table1, stub routes) -> "lm". Vectorised over `route_id`.
+#' cox* / rmst* -> "cox", table1 -> "table1", anything else (stub routes) -> "lm". Vectorised over `route_id`.
 .sr_mem_method <- function(route_id) {
   id <- as.character(route_id)
   starts <- function(p) !is.na(id) & startsWith(id, p)
@@ -38,6 +38,7 @@ SR_SAP_ACTIONS <- c("add_sensitivity", "replace_primary")
   out[starts("logistic") | starts("modpois")] <- "glm"
   out[starts("cox") | starts("rmst")] <- "cox"
   out[starts("lm")] <- "lm"
+  out[starts("table1")] <- "table1"
   out
 }
 
@@ -145,10 +146,12 @@ sr_reducer_register("sap.locked", function(state, event) {
 }
 
 # Refuses a spec the route cannot compile (R19): an analysis that can never run is refused when it is
-# added, not at its first run. Shared by sr_sap_add and sr_analysis_add.
+# added, not at its first run. Shared by sr_sap_add and sr_analysis_add. The spec is compiled as it would
+# run (.sr_spec_for_engine): on the streaming engine when it asks for "stream" (stream_chunk filled as the
+# run fills it), else in memory.
 .sr_sap_compiles <- function(r, spec, id, route) {
   bad <- tryCatch({
-    sr_compile(r, spec)
+    sr_compile(r, .sr_spec_for_engine(spec, if (identical(spec[["engine"]], "stream")) "stream" else "memory"))
     NULL
   }, error = function(e) conditionMessage(e))
   if (!is.null(bad)) {
@@ -384,6 +387,8 @@ sr_sap_rule <- function(project, id, analysis, check, action = c("add_sensitivit
 #' P1c.1 keeps its hash. The router part (router/gate.R: the PICO and every current router decision,
 #' ordered by key) is part of it when there is one, so the question and the router's calls are frozen
 #' with the SAP; the element is absent for a project that never used the router.
+#' The engines part (scale/engine.R: id -> "stream" for every analysis whose engine is stream) is present only
+#' when there is one, so a SAP whose analyses all run in memory, or locked before P1e, keeps its hash.
 sr_sap_hash <- function(project) {
   by_id <- function(x) if (length(x)) unname(x[order(names(x), method = "radix")]) else list()
   as_locked <- function(a) {
@@ -401,6 +406,9 @@ sr_sap_hash <- function(project) {
   fe <- project$state$feasibility %||% list()
   fe <- fe[intersect(names(an), names(fe))]
   if (length(fe)) parts$feasibility <- by_id(fe)
+  eg <- .sr_sap_engines(project)
+  st <- vapply(eg, function(e) identical(e$engine, "stream"), logical(1))
+  if (any(st)) parts$engines <- stats::setNames(rep("stream", sum(st)), sort(names(eg)[st], method = "radix"))
   rp <- .sr_router_hash_part(project)
   if (!is.null(rp)) parts$router <- rp
   .sr_sha256(sr_canonical_json(parts))
@@ -459,22 +467,18 @@ sr_sap_check <- function(project) {
     }
   }
 
-  big <- FALSE
   for (id in names(an)) {
-    a <- an[[id]]
-    cols <- sr_spec_cols(a$spec)
-    if (!length(cols)) next
-    est <- tryCatch(sr_mem_estimate(project, a$table, cols, .sr_mem_method(a$route)), error = function(e) e)
-    if (inherits(est, "error")) {
-      big <- TRUE
-      add("fits in memory", "block", sprintf("%s: cannot size the analysis: %s", id, conditionMessage(est)))
-    } else if (!isTRUE(est$fits)) {
-      big <- TRUE
-      add("fits in memory", "block",
-          sprintf("%s: too large for an in-memory fit; big-data engines arrive in P1e (%s)", id, est$reason))
+    r <- .sr_sap_engine_one(project, id)
+    if (is.null(r)) next
+    if (inherits(r, "error")) {
+      add("engine", "block", sprintf("%s: cannot size the analysis: %s", id, conditionMessage(r)))
+    } else if (!is.null(r$block)) {
+      add("engine", "block", sprintf("%s: %s", id, r$block))
+    } else {
+      add("engine", "ok", sprintf("%s: %s (%s)", id,
+                                  if (identical(r$engine, "stream")) "stream engine" else "in memory", r$reason))
     }
   }
-  if (!big) add("fits in memory", "ok", "every analysis fits in memory")
 
   # sr_sap_add refuses this too; the data can change after the add (a re-import), so check it again.
   for (id in names(an)) {
@@ -537,5 +541,6 @@ sr_sap_lock <- function(project) {
   for (t in tabs) tables[[t]] <- list(store_hash = sr_store_hash(sr_store_manifest(project, t)))
   sr_project_append(project, "sap.locked", list(
     sap_hash = sr_sap_hash(project), tables = tables, libsnap_hash = sr_libsnap_hash(),
+    engines = .sr_sap_engines(project),
     locked_at = .sr_now(), router = list(frozen = TRUE, decisions = .sr_router_decision_records(project))))
 }

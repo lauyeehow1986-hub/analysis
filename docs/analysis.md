@@ -566,8 +566,9 @@ The phase that owns each item is in brackets.
   lock is refused.
 - Re-baselining under a changed library [P2]. P1c records the snapshot at the lock and flags a run
   made under a different one.
-- Big-data engines (SQL Table 1, bigglm, aggregated Poisson, piecewise-exponential Cox) [P1e scale].
-  P1c refuses a fit whose `sr_mem_estimate()$fits` is FALSE.
+- Big-data engines [P1e scale]. P1c refuses a fit whose `sr_mem_estimate()$fits` is FALSE. P1e.1 now
+  provides the streaming lm, logistic, modified Poisson and SQL Table 1 (section 15); Cox and RMST at
+  scale are P1e.2, and MI, the bootstrap, Firth and diagnostics at scale are P1e.3.
 - CR2 / Kenward-Roger few-cluster corrections, Fine-Gray and IPCW [P9]. P1c's few-cluster
   sensitivity is the cluster bootstrap.
 - Delta-adjusted tipping-point MI and rbmi; Little's test (descriptive only) [P5].
@@ -696,3 +697,18 @@ change does not redraw a card.
 | Fit fails | Recorded `ok = FALSE`; the queue continues; the error is shown in Card 2. |
 | Worker error outside the core | A `refused` with "worker error: ..." or "worker stopped unexpectedly (mirai error <code>)"; the queue stops. |
 | Import, Design or SAP edit during a run | Refused with `.sr_ui_busy_text` ("wait for the running import, analysis, archive operation or project import to finish"). |
+
+## 15. Analysis at scale (P1e.1)
+
+`lm`, `logistic`, `modpois` and `table1` analyses can run on a streaming engine that fits the model over
+fixed-size chunks of a Parquet extract, so the table never has to fit in RAM. The spec field `engine` is
+`auto` (default), `memory` or `stream`. `auto` is resolved from the memory estimate and **frozen at the SAP
+lock** (`lock$engines`); a project locked before P1e reopens with the same SAP hash and runs unchanged. After
+the lock the engine can be changed only with `sr_engine_switch()`, which is a recorded computational
+deviation and leaves the SAP hash alone.
+
+Cox and RMST stay in memory (P1e.2). MI, the bootstrap, Firth and diagnostics are refused for a streaming
+analysis (P1e.3). A streaming run shows a progress line and a Streaming badge in the Analyses panel, and its
+Methods text carries an engine sentence. The full guide, the limits, the options `stream_chunk_rows` and
+`stream_knot_rows`, `SR_RAM_BUDGET_GB`, and the known Table 1 performance limit are in
+[scale.md](scale.md). The evidence is in [validation.md](validation.md) section 4.

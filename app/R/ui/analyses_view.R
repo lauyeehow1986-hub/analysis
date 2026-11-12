@@ -22,6 +22,31 @@ SR_AN_ROLE_ORDER <- c("primary", "covariate", "descriptive")
 
 .sr_an_analyses <- function(p) p$state$analyses %||% list()
 
+#' "Streaming" when the latest ok run of analysis `id` ran on the streaming engine, else "". Read from the
+#' event-sourced run record (ok_engine), never from the spec (ruling R16).
+.sr_an_engine_badge <- function(p, id) {
+  oe <- tryCatch(p$state$runs[[id]]$ok_engine, error = function(e) NULL)
+  if (is.character(oe) && length(oe) == 1L && identical(oe, "stream")) "Streaming" else ""
+}
+
+#' The engine progress line of a streaming job from its progress file (data/tmp/progress-<job>.json, written
+#' by the worker as {"pass": k, "max": m}, not atomically): "pass 4 of at most 29". "" when the file is
+#' missing, empty, partial or not that JSON; this never errors (stale files stay in data/tmp).
+.sr_an_progress_text <- function(file) {
+  tryCatch({
+    if (!.sr_an_path_ok(file) || !file.exists(file)) return("")
+    x <- jsonlite::parse_json(paste(readLines(file, warn = FALSE), collapse = "\n"), simplifyVector = TRUE)
+    if (!is.list(x)) return("")
+    num <- function(v) {
+      if (is.numeric(v) && length(v) == 1L && is.finite(v) && v >= 0) as.integer(v) else NA_integer_
+    }
+    k <- num(x[["pass"]])
+    m <- num(x[["max"]])
+    if (is.na(k)) return("")
+    if (is.na(m)) sprintf("pass %d", k) else sprintf("pass %d of at most %d", k, m)
+  }, error = function(e) "", warning = function(w) "")
+}
+
 # ---- order and status ------------------------------------------------------------------------------
 
 #' The analyses in display order: data.frame(id, depth). Primary analyses then secondary (each by id),

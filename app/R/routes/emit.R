@@ -59,9 +59,16 @@
 
 # ---- the emitted-code checker ----------------------------------------------------------------
 
-# Namespaces emitted code may call into. openssl is added for the prologue only.
+# Namespaces emitted code may call into. openssl is added for the prologue only. DBI and duckdb
+# (.sr_emit_stream_pkgs) are added for streaming code only (P1e.1): its inlined .h_st_* helpers read the
+# Parquet extract through a connection that .h_st_open() has locked down (no extension can be installed or
+# loaded, no network). Memory code never reaches DuckDB.
 .sr_emit_pkgs <- c("base", "stats", "utils", "methods", "parallel", "survival", "mice", "sandwich",
                    "splines", "Hmisc", "logistf")
+.sr_emit_stream_pkgs <- c("DBI", "duckdb")
+# The functions that open a DuckDB connection: callable (and usable as a value) only inside the body of the
+# function literal bound to .h_st_open, so every connection gets its lockdown (spec section 6.1).
+.sr_emit_open_only <- c("dbConnect", "duckdb")
 # Never callable, bare or namespaced, and never usable as a value (alias). The second block is
 # indirection (look a function up by name, reach into an environment), which would defeat the checks.
 .sr_emit_forbidden <- c(
@@ -192,7 +199,10 @@
 #'   run, but no branch condition, subscript or && / || operand may depend on one)
 #' @param prologue TRUE for the fixed prologue, which may also read the extract (readBin, readRDS,
 #'   file.size) and call openssl
-.sr_emit_check <- function(code, kind = c("analysis", "diagnostic"), prologue = FALSE) {
+#' @param stream TRUE for streaming code (its prologue and body), which may also call DBI and duckdb.
+#'   Under either setting dbConnect and duckdb (.sr_emit_open_only) appear only inside the function
+#'   literal bound to .h_st_open.
+.sr_emit_check <- function(code, kind = c("analysis", "diagnostic"), prologue = FALSE, stream = FALSE) {
   kind <- match.arg(kind)
   if (!is.character(code) || length(code) != 1L || is.na(code)) {
     stop("emitted code must be one string", call. = FALSE)
@@ -201,7 +211,7 @@
     as.list(parse(text = code, keep.source = FALSE)),
     error = function(e) stop("emitted code does not parse: ", conditionMessage(e), call. = FALSE)
   )
-  pkgs <- c(.sr_emit_pkgs, if (isTRUE(prologue)) "openssl")
+  pkgs <- c(.sr_emit_pkgs, if (isTRUE(prologue)) "openssl", if (isTRUE(stream)) .sr_emit_stream_pkgs)
   diag <- .sr_emit_diag_names()
   diag_subscript <- setdiff(diag, "$p")
   tainted_vars <- if (kind == "diagnostic") .sr_emit_tainted(exprs) else character()
@@ -214,8 +224,13 @@
     any(at %in% names) || any(at %in% tainted_vars)
   }
 
+  # TRUE while the walk is inside the function literal bound to .h_st_open
+  in_open <- FALSE
   # a name used as a function, bare or namespaced
   check_fn <- function(fn, e) {
+    if (fn %in% .sr_emit_open_only && !in_open) {
+      bad(e, sprintf("'%s' is allowed inside .h_st_open only", fn))
+    }
     if (fn %in% .sr_emit_forbidden) bad(e, sprintf("call to forbidden function '%s'", fn))
     if (fn %in% .sr_emit_prologue_only && !isTRUE(prologue)) {
       bad(e, sprintf("'%s' is allowed in the prologue only", fn))
@@ -235,6 +250,9 @@
       check_pname(s, e)
       if (!fm && s %in% barred_values) {
         bad(e, sprintf("forbidden function '%s' used as a value", s))
+      }
+      if (!fm && s %in% .sr_emit_open_only && !in_open) {
+        bad(e, sprintf("'%s' is allowed inside .h_st_open only", s))
       }
       return(invisible())
     }
@@ -335,6 +353,14 @@
       # an assignment target is a binding, not a value
       if (!is.na(hs) && hs %in% c("<-", "=", "<<-") && i == 2L && is.symbol(a)) {
         check_pname(as.character(a), a)
+        next
+      }
+      # the body of `.h_st_open <- function(...) ...` may open the connection
+      if (!is.na(hs) && hs == "<-" && i == 3L && identical(e[[2L]], as.name(".h_st_open")) &&
+          is.call(a) && identical(a[[1L]], as.name("function"))) {
+        in_open <<- TRUE
+        walk(a, child_fm)
+        in_open <<- FALSE
         next
       }
       walk(a, child_fm)

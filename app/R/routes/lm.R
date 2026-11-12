@@ -61,6 +61,7 @@
   .sr_outcome_cov_refuse(spec)
   .sr_exclude_check(spec)
   .sr_cluster_se_check(spec, .sr_lm_se(spec))
+  .sr_engine_check(spec, "lm")
   invisible(TRUE)
 }
 
@@ -99,6 +100,7 @@
 .sr_lm_compile <- function(spec) {
   .sr_lm_check(spec)
   .sr_lm_layers_check(spec)
+  if (identical(spec[["engine"]], "stream")) return(.sr_lm_compile_stream(spec))
   if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, .sr_lm_compile, "lm", "lm"))
   if (.sr_mi_on(spec)) return(.sr_lm_mi_compile(spec))
   se <- .sr_lm_se(spec)
@@ -341,6 +343,8 @@
     marginal = list(type = "lgl", required = FALSE, default = FALSE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
     exclude_rows = list(type = "num", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

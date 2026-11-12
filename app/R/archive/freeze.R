@@ -120,7 +120,8 @@ sr_freeze_manifest <- function(project, label) {
       stop("the stored result of '", id, "' is missing; run it again", call. = FALSE)
     }
     sha <- .sr_freeze_chr1(runs[[id]]$ok_extract_sha)
-    if (is.na(sha) || !file.exists(file.path(project$paths$dir, "data", "extracts", paste0(sha, ".rds")))) {
+    if (is.na(sha) || !file.exists(file.path(project$paths$dir,
+                                             .sr_extract_rel(sha, runs[[id]]$ok_extract_kind)))) {
       stop("the extract of '", id, "' is missing; run it again", call. = FALSE)
     }
   }
@@ -164,7 +165,7 @@ sr_freeze_manifest <- function(project, label) {
   }
   for (id in ids) {
     r <- project$state$runs[[id]]
-    add(paste("data", "extracts", paste0(r$ok_extract_sha, ".rds"), sep = "/"), "extract")
+    add(.sr_extract_rel(r$ok_extract_sha, r$ok_extract_kind), "extract")
     add(paste("fits", paste0(r$ok_key, ".rds"), sep = "/"), "fit")
   }
   root <- file.path(project$paths$out, "exports")

@@ -12,7 +12,10 @@
 # drive reruns from its cache. No event holds an absolute path.
 #
 # State: state$runs[[analysis]] = list(analysis, key, extract_sha, ok, cached, error, elapsed,
-#        lib_changed, ok_key, ok_extract_sha, ok_lib_hash, ok_hw_fp, status, job, history).
+#        lib_changed, ok_key, ok_extract_sha, ok_lib_hash, ok_hw_fp, engine, extract_kind, chunk,
+#        ok_engine, ok_extract_kind, ok_chunk, status, job, history). engine ("memory" | "stream"),
+#        extract_kind ("rds" | "parquet") and chunk (NULL in memory) describe the attempt, the ok_ ones the
+#        latest ok run; a run.completed written before P1e reads as "memory", "rds" and NULL (ruling R5).
 #        run.started (written just before the worker starts), run.completed and run.cancelled all update
 #        it. ok_key and ok_extract_sha are the key and the extract of the latest ok run (kept across a
 #        later failed or cancelled run); sr_result() shows that run. status is "running", "ok",
@@ -97,6 +100,10 @@ sr_reducer_register("run.completed", function(state, event) {
   job <- .sr_sap_chr1(p$job)
   outcome <- if (ok) "ok" else "failed"
   ts <- .sr_sap_chr1(event$ts)
+  # run metadata (ruling R5): an event written before P1e reads as the memory engine on an rds extract
+  engine <- .sr_sap_chr1(p$engine %||% "memory")
+  kind <- .sr_sap_chr1(p$extract_kind %||% "rds")
+  chunk <- if (is.null(p$chunk) || is.na(p$chunk[[1L]])) NULL else as.numeric(p$chunk[[1L]])
   h <- runs[[id]]$history %||% list()
   closed <- .sr_run_hist_close(h, job, ts, outcome)
   if (is.null(closed)) {
@@ -109,6 +116,10 @@ sr_reducer_register("run.completed", function(state, event) {
                      ok_extract_sha = if (ok) .sr_sap_chr1(p$extract_sha) else (runs[[id]]$ok_extract_sha %||% NA_character_),
                      ok_lib_hash = if (ok) .sr_sap_chr1(p$lib_hash) else (runs[[id]]$ok_lib_hash %||% NA_character_),
                      ok_hw_fp = if (ok) .sr_sap_chr1(p$hw_fp) else (runs[[id]]$ok_hw_fp %||% NA_character_),
+                     engine = engine, extract_kind = kind, chunk = chunk,
+                     ok_engine = if (ok) engine else (runs[[id]]$ok_engine %||% NA_character_),
+                     ok_extract_kind = if (ok) kind else (runs[[id]]$ok_extract_kind %||% NA_character_),
+                     ok_chunk = if (ok) chunk else runs[[id]]$ok_chunk,
                      status = outcome, job = job, history = closed)
   state$runs <- runs
   state
@@ -151,8 +162,25 @@ sr_reducer_register("run.cancelled", function(state, event) {
   sr_store_view(project, table)
   con <- sr_duck(project)
   q <- DBI::dbQuoteIdentifier(con, cols)
-  sr_duck_query(con, sprintf("SELECT %s FROM %s ORDER BY %s", paste(q, collapse = ", "),
-                             DBI::dbQuoteIdentifier(con, table), paste(q, collapse = ", ")))
+  sr_duck_query(con, sprintf("SELECT %s FROM %s %s", paste(q, collapse = ", "),
+                             DBI::dbQuoteIdentifier(con, table), .sr_extract_order_sql(con, cols)))
+}
+
+#' The `ORDER BY <every col>` clause both extracts use, so that the stream extract's `.sr_row` equals
+#' the row position of `.sr_extract_frame` (the connection does not preserve insertion order).
+.sr_extract_order_sql <- function(con, cols) {
+  paste("ORDER BY", paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", "))
+}
+
+#' The project-relative path of the extract `sha` of `kind` ("rds", the in-memory extract, or "parquet",
+#' the stream extract; NULL or NA read as "rds", a run recorded before P1e, ruling R5):
+#' data/extracts/<sha>.<kind>. The script export, the freeze and the Archive panel name extracts with it.
+.sr_extract_rel <- function(sha, kind = "rds") {
+  if (is.null(kind) || (length(kind) == 1L && is.na(kind))) kind <- "rds"
+  if (!(is.character(kind) && length(kind) == 1L && kind %in% c("rds", "parquet"))) {
+    stop("the extract kind must be \"rds\" or \"parquet\"", call. = FALSE)
+  }
+  paste0("data/extracts/", sha, ".", kind)
 }
 
 #' Materialise `cols` of `table` (.sr_extract_frame()) serialised (version 3) to
@@ -197,6 +225,42 @@ sr_extract <- function(project, table, cols) {
   code
 }
 
+#' The fixed code that opens a streaming run (spec section 6.1): stop with "extract changed" unless the
+#' streaming SHA-256 of the Parquet extract at file.path(sr_project_dir, <rel>) is <sha>, open the locked-down
+#' connection `.sr_con` (inputs sr_duck_memory, sr_duck_threads and sr_duck_temp), close it when the code
+#' ends, and bind `sr_src`, the read_parquet() expression of the extract. It never binds `sr_data`. The
+#' text holds no absolute path.
+#' @param threads NULL (the worker input sr_duck_threads) or a whole number >= 1 emitted as an integer
+#'   literal (Table 1 opens on 1L, ruling R14; .sr_stream_threads).
+.sr_run_prologue_stream <- function(ex, threads = NULL) {
+  sha <- ex$sha
+  if (!is.character(sha) || length(sha) != 1L || !grepl("^[0-9a-f]{64}$", sha)) {
+    stop("the extract needs a 64-character lowercase hex sha", call. = FALSE)
+  }
+  if (!identical(ex$rel, paste0("data/extracts/", sha, ".parquet"))) {
+    stop("the extract path must be data/extracts/<sha>.parquet", call. = FALSE)
+  }
+  thr <- "sr_duck_threads"
+  if (!is.null(threads)) {
+    if (!(is.numeric(threads) && length(threads) == 1L && is.finite(threads) && threads >= 1 &&
+          threads == floor(threads) && threads <= .Machine$integer.max)) {
+      stop("threads must be NULL or a whole number >= 1", call. = FALSE)
+    }
+    thr <- .sr_lit(as.integer(threads))
+  }
+  code <- paste(c(
+    sprintf(".sr_xf <- file.path(sr_project_dir, %s)", .sr_lit(ex$rel)),
+    sprintf("if (paste(as.character(unclass(openssl::sha256(file(.sr_xf)))), collapse = \"\") != %s) stop(\"extract changed\")",
+            .sr_lit(sha)),
+    .sr_inline(.h_st_open, ".h_st_open"),
+    sprintf(".sr_con <- .h_st_open(.sr_xf, sr_duck_memory, %s, sr_duck_temp)", thr),
+    "on.exit(DBI::dbDisconnect(.sr_con, shutdown = TRUE), add = TRUE)",
+    "sr_src <- paste0(\"read_parquet('\", gsub(\"'\", \"''\", normalizePath(.sr_xf, winslash = \"/\", mustWork = FALSE), fixed = TRUE), \"')\")",
+    "rm(.sr_xf)"), collapse = "\n")
+  .sr_emit_check(code, "analysis", prologue = TRUE, stream = TRUE)
+  code
+}
+
 # ---- the run ---------------------------------------------------------------------------------------
 
 # `s` with every regular-expression metacharacter escaped, for a literal match.
@@ -232,7 +296,12 @@ sr_extract <- function(project, table, cols) {
 #' Run one analysis of the locked SAP and record run.completed. Refused (nothing is written) when the
 #' project is read-only, the analysis is unknown, the SAP is not locked, an analysis is decided stop
 #' (sr_project_stopped), the table changed after the lock, the spec or layer stack no longer passes,
-#' the analysis does not fit in memory or its compiled code is rejected. Otherwise the analysis runs in
+#' the analysis runs in memory (.sr_engine_effective) and no longer fits (it is never switched silently;
+#' the stop names sr_engine_switch), or its compiled code is rejected. Under the streaming engine the run
+#' spec carries engine = "stream" and stream_chunk (.sr_run_spec), the extract is the Parquet one
+#' (sr_extract_stream), and the worker gets the DuckDB limits and the progress file
+#' (.sr_progress_path) as inputs outside the cache key. run.completed records engine, extract_kind and
+#' (stream) chunk. Otherwise the analysis runs in
 #' the isolated worker behind the fits cache, and a failed fit (an error, a result that is not plain
 #' data, a presentation that breaks the result contract) is recorded with ok = FALSE and the project
 #' returned. `lib_changed` says that the library snapshot differs from the one recorded at the lock.
@@ -267,7 +336,9 @@ sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
   .sr_baseline_check(project, lib_hash)
 
   route <- sr_route_get(a$route, a$route_version)
-  spec <- .sr_spec_from_state(a$spec)
+  engine <- .sr_engine_effective(project, analysis_id)
+  stream <- identical(engine, "stream")
+  spec <- .sr_run_spec(project, analysis_id, engine = engine)
   v <- sr_spec_validate(spec, route)
   if (!v$ok) {
     stop("the spec of ", .sr_sap_q(analysis_id), " is not valid for route ", .sr_sap_q(a$route), ": ",
@@ -283,29 +354,46 @@ sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
   cols <- sr_spec_cols(spec)
   if (!length(cols)) stop("the spec of ", .sr_sap_q(analysis_id), " reads no data column", call. = FALSE)
 
-  est <- sr_mem_estimate(project, a$table, cols, .sr_mem_method(a$route))
-  if (!isTRUE(est$fits)) {
-    stop("analysis ", .sr_sap_q(analysis_id), " does not fit in memory: ", est$reason, call. = FALSE)
+  if (!stream) {
+    # the memory engine never switches silently (Review Focus 2): a lock that no longer fits refuses
+    est <- sr_mem_estimate(project, a$table, cols, .sr_mem_method(a$route))
+    if (!isTRUE(est$fits)) {
+      stop("analysis ", .sr_sap_q(analysis_id), " does not fit in memory: ", est$reason,
+           "; it can be switched to the streaming engine with sr_engine_switch()", call. = FALSE)
+    }
   }
 
   body <- sr_compile(route, spec)
-  .sr_emit_check(body, "analysis")
-  ex <- sr_extract(project, a$table, cols)
+  .sr_emit_check(body, "analysis", stream = stream)
+  ex <- if (stream) sr_extract_stream(project, a$table, cols) else sr_extract(project, a$table, cols)
   route_key <- .sr_route_key(a$route, a$route_version)
   hw_fp <- sr_hw_fingerprint()
   key <- sr_content_hash(ex$sha, list(route = route_key, spec = spec), spec$seed, lib_hash, hw_fp)
 
+  if (stream) {
+    # speed-only inputs (spec section 6.1, ruling R15): kept out of the cache key
+    caps <- sr_profile_caps(sr_profile())
+    tmp <- file.path(project$paths$dir, "data", "tmp")
+    dir.create(tmp, showWarnings = FALSE, recursive = TRUE)
+    code <- paste(.sr_run_prologue_stream(ex, threads = .sr_stream_threads(a$route)), body, sep = "\n")
+    inputs <- list(sr_project_dir = project$paths$dir,
+                   sr_duck_memory = paste0(format(caps$duckdb_memory_gb), "GB"),
+                   sr_duck_threads = as.integer(caps$duckdb_threads), sr_duck_temp = tmp,
+                   sr_progress_file = .sr_progress_path(project, job))
+  } else {
+    code <- paste(.sr_run_prologue(ex), body, sep = "\n")
+    inputs <- list(sr_project_dir = project$paths$dir)
+  }
   project <- sr_project_append(project, "run.started", list(analysis = analysis_id, key = key,
                                                             extract_sha = ex$sha, job = job))
-  res <- sr_exec_cached(project, key, paste(.sr_run_prologue(ex), body, sep = "\n"),
-                        inputs = list(sr_project_dir = project$paths$dir), seed = spec$seed,
+  res <- sr_exec_cached(project, key, code, inputs = inputs, seed = spec$seed,
                         cache_inputs = list(extract = ex$sha), timeout = timeout)
   ok <- isTRUE(res$ok)
   err <- if (ok) NA_character_ else .sr_run_scrub(res$error, project$paths$dir)
   if (ok) {
     bad <- tryCatch({
       if (!.sr_value_plain(res$value)) stop("the result is not plain data", call. = FALSE)
-      sr_result_check(route$present(res$value, spec), route)
+      sr_result_check(sr_present(route, res$value, spec, .sr_engine_requested(project, analysis_id)), route)
       NULL
     }, error = function(e) .sr_run_scrub(conditionMessage(e), project$paths$dir))
     if (!is.null(bad)) {
@@ -314,10 +402,12 @@ sr_run <- function(project, analysis_id, timeout = 3600, job = NULL) {
       unlink(file.path(project$paths$fits, paste0(key, ".rds")))   # a rejected value is not kept
     }
   }
-  sr_project_append(project, "run.completed", list(
+  sr_project_append(project, "run.completed", c(list(
     analysis = analysis_id, key = key, extract_sha = ex$sha, ok = ok, cached = isTRUE(res$cached),
     error = err, elapsed = res$elapsed, lib_changed = !identical(lib_hash, lock$libsnap_hash),
-    lib_hash = lib_hash, hw_fp = hw_fp, job = job))
+    lib_hash = lib_hash, hw_fp = hw_fp, job = job, engine = engine,
+    extract_kind = if (stream) "parquet" else "rds"),
+    if (stream) list(chunk = spec$stream_chunk)))
 }
 
 #' A fresh job id: "j", the time to the second, and the random tail of a temp file name. It draws from
@@ -361,5 +451,7 @@ sr_result <- function(project, analysis_id) {
     stop("the stored result of analysis ", .sr_sap_q(analysis_id), " is missing; run it again", call. = FALSE)
   }
   route <- sr_route_get(a$route, a$route_version)
-  sr_result_check(route$present(stored$value, .sr_spec_from_state(a$spec)), route)
+  # the spec the stored run ran with (its engine and chunk are event-sourced, ruling R5)
+  spec <- .sr_run_spec(project, analysis_id, engine = r$ok_engine %||% "memory", chunk = r$ok_chunk)
+  sr_result_check(sr_present(route, stored$value, spec, .sr_engine_requested(project, analysis_id)), route)
 }

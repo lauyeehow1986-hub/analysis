@@ -88,6 +88,7 @@
            call. = FALSE)
     }
   }
+  .sr_engine_check(spec, kind)
   invisible(TRUE)
 }
 
@@ -152,6 +153,7 @@
   f <- function(spec) {
     .sr_glm_check(spec, kind)
     .sr_glm_layers_check(spec, id)
+    if (identical(spec[["engine"]], "stream")) return(.sr_glm_compile_stream(spec, kind))
     if (.sr_boot_on(spec)) return(.sr_boot_compile(spec, f, id, "glm"))
     if (.sr_mi_on(spec)) return(.sr_glm_mi_compile(spec, kind))
     firth <- .sr_glm_firth(spec)
@@ -481,6 +483,8 @@
     marginal = list(type = "lgl", required = FALSE, default = TRUE),
     standardize_over = list(type = "chr", required = FALSE, values = c("analysis", "all")),
     exclude_rows = list(type = "num", required = FALSE),
+    engine = list(type = "chr", required = FALSE),
+    stream_chunk = list(type = "num", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )

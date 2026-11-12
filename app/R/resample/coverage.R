@@ -3,7 +3,7 @@
 # A cell is a data generator with a known true parameter plus one analysis spec of a model route. A
 # replication draws a dataset of n rows, runs the route's OWN compiled code on it exactly as sr_run
 # does (the RNG preamble of a seed, then the body of sr_compile(route, spec) evaluated with `sr_data`
-# bound in a fresh environment under the global env, then route$present(value, spec) checked by
+# bound in a fresh environment under the global env, then sr_present(route, value, spec) checked by
 # sr_result_check) and keeps the estimate and 95% interval of the route's primary effect row as
 # reported. Nothing here re-implements the statistics: the harness only generates data and scores.
 #
@@ -216,7 +216,7 @@ sr_coverage_cells <- function() {
 
 #' The primary row of `setup$measure` from the route's own compiled body run on `df`: the run preamble
 #' of `run_seed`, then setup$body evaluated in a fresh environment under the global env with sr_data
-#' bound (as the sr_exec worker does), then setup$route$present() checked by sr_result_check. Returns
+#' bound (as the sr_exec worker does), then sr_present(setup$route, ...) checked by sr_result_check. Returns
 #' c(est, lo, hi); stops when the value is not plain data, there is not exactly one primary row of the
 #' measure, or the row is not finite. Shared with resample/feas_sim.R.
 .sr_cov_primary <- function(df, run_seed, setup) {
@@ -224,7 +224,7 @@ sr_coverage_cells <- function() {
   env$sr_data <- df
   value <- eval(parse(text = paste(sr_rng_preamble(run_seed), setup$body, sep = "\n")), envir = env)
   if (!.sr_value_plain(value)) stop("the result is not plain data", call. = FALSE)
-  res <- sr_result_check(setup$route$present(value, setup$spec), setup$route)
+  res <- sr_result_check(sr_present(setup$route, value, setup$spec), setup$route)
   eff <- res$effects
   row <- eff[eff$role == "primary" & eff$measure == setup$measure, , drop = FALSE]
   if (nrow(row) != 1L) {

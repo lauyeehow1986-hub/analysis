@@ -27,8 +27,17 @@ SR_FORM_KINDS <- c(
   seed = "number", tau = "number",
   event_value = "text",
   status_event = "event",
-  exclude_rows = "hidden"
+  exclude_rows = "hidden",
+  engine = "engine",
+  stream_chunk = "hidden"                      # set by the engine, never typed (sr_opt stream_chunk_rows)
 )
+
+# The engine choices of the form (label = value). Streaming is offered only to a route whose schema carries
+# stream_chunk (the five routes of P1e.1); Cox and RMST run in memory until P1e.2.
+.SR_FORM_ENGINES <- c("Auto" = "auto", "In memory" = "memory", "Streaming" = "stream")
+.sr_form_engine_choices <- function(schema) {
+  if ("stream_chunk" %in% names(schema)) .SR_FORM_ENGINES else .SR_FORM_ENGINES[c("Auto", "In memory")]
+}
 
 # Layer defaults of the form (docs/analysis.md section 2) and the values P1 cannot run.
 .SR_FORM_LAYER_DEFAULTS <- list(missing = "cc", weights = "none", matching = FALSE, resampling = "none",
@@ -39,14 +48,14 @@ SR_FORM_KINDS <- c(
                                 framework = c("bayesian", "both"))
 
 # Form defaults of fields whose schema gives none.
-.SR_FORM_DEFAULTS <- list(seed = 42)
+.SR_FORM_DEFAULTS <- list(seed = 42, engine = "auto")
 
 .SR_FORM_LABELS <- c(
   outcome = "Outcome column", exposure = "Exposure column", cluster = "Cluster column",
   time = "Follow-up time column", status = "Event status column", strata = "Strata column",
   by = "Group by column", vars = "Variables", nonnormal = "Non-normal variables",
   terms = "Adjustment terms", interactions = "Interactions", se = "Standard errors",
-  standardize_over = "Standardise over", ties = "Tie handling", penalty = "Penalty",
+  standardize_over = "Standardise over", ties = "Tie handling", penalty = "Penalty", engine = "Engine",
   marginal = "Report marginal effects", seed = "Random seed", tau = "Restriction time (tau)",
   event_value = "Outcome value counted as the event", status_event = "Status value counted as the event",
   layers_missing = "Missing data", layers_weights = "Weighting", layers_matching = "Matching",
@@ -191,7 +200,8 @@ sr_spec_form <- function(route_id, table, project, layers = NULL) {
       has_layers <- TRUE
       next
     }
-    choices <- switch(kind, column = , columns = , terms = , interactions = cols, enum = d[["values"]], NULL)
+    choices <- switch(kind, column = , columns = , terms = , interactions = cols, enum = d[["values"]],
+                      engine = .sr_form_engine_choices(schema), NULL)
     default <- if (!is.null(d[["default"]])) d[["default"]] else .SR_FORM_DEFAULTS[[f]]
     add(.sr_form_entry(f, kind, .sr_form_label(f), isTRUE(d[["required"]]), choices, .sr_form_no_disabled(),
                        default, .sr_form_prefill(f, route_id, project, table, default)))
@@ -262,7 +272,7 @@ sr_spec_form <- function(route_id, table, project, layers = NULL) {
 # A form value cast by kind (NULL when it is empty after the cast).
 .sr_form_cast <- function(kind, x) {
   v <- switch(kind,
-    column = , text = , enum = as.character(x)[1L],
+    column = , text = , enum = , engine = as.character(x)[1L],
     columns = as.character(unlist(x)),
     terms = .sr_form_terms(x),
     interactions = .sr_form_interactions(x),
@@ -307,6 +317,7 @@ sr_spec_collect <- function(route_id, values) {
     x <- values[[f]]
     if (.sr_form_empty(x)) next
     v <- .sr_form_cast(kind, x)
+    if (identical(kind, "engine") && identical(v, "auto")) next   # the default: not stored (spec hash unchanged)
     if (!is.null(v)) spec[[f]] <- v
   }
   layers <- list()
@@ -445,6 +456,9 @@ SR_FORM_MAX_ROWS <- 30L
       columns = .sr_ui_off(shiny::selectInput(id, lab, choices = e$choices, selected = as.character(unlist(v)),
                                               multiple = TRUE, width = "100%"), "select", disabled),
       enum = .sr_ui_select(id, lab, e$choices, .sr_ui_chr(if (is.null(v)) e$default else v), disabled = disabled),
+      engine = .sr_ui_select(id, lab, unname(e$choices), .sr_ui_chr(if (is.null(v)) e$default else v),
+                             disabled = disabled,
+                             texts = stats::setNames(names(e$choices), unname(e$choices))),
       logical = .sr_ui_off(shiny::checkboxInput(id, lab, value = isTRUE(as.logical(v)[1L])), "input", disabled),
       number = .sr_ui_off(shiny::numericInput(id, lab, value = if (is.null(v)) NA_real_ else as.numeric(v)[1L],
                                               width = "100%"), "input", disabled),

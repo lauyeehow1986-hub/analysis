@@ -385,14 +385,37 @@ sr_profile_table <- function(project, table, sample_n = SR_PROFILE_SAMPLE_N, see
   8
 }
 
+.sr_budget_warned <- new.env(parent = emptyenv())
+
+#' The RAM budget in GB: the SR_RAM_BUDGET_GB / sr.ram_budget_gb override when it is a number > 0, else
+#' `default` (the profile's). An invalid override (not a number, NA, <= 0) falls back to `default` with a
+#' warning, once per session for each value, rather than an error, so a bad setting cannot stop a project
+#' from opening or an analysis from being added.
+.sr_ram_budget <- function(default) {
+  raw <- sr_opt("ram_budget_gb", NULL)
+  if (is.null(raw)) return(default)
+  b <- suppressWarnings(as.numeric(raw))
+  if (length(b) == 1L && !is.na(b) && b > 0) return(b)
+  src <- if (identical(sr_opt_source("ram_budget_gb"), "option")) "option sr.ram_budget_gb" else "SR_RAM_BUDGET_GB"
+  shown <- paste(format(raw), collapse = ", ")
+  key <- paste(src, shown)
+  if (!isTRUE(.sr_budget_warned[[key]])) {
+    assign(key, TRUE, envir = .sr_budget_warned)
+    warning(sprintf("ignoring %s = \"%s\": the RAM budget must be a number > 0 (GB); using the profile budget of %s GB",
+                    src, shown, format(default)), call. = FALSE)
+  }
+  default
+}
+
 #' Estimate whether an analysis of `cols` fits in memory and choose a route if it does not.
 #' data bytes = rows * sum(bytes per column); model matrix = rows * p * 8 where `p` defaults to the number of
 #' columns in `cols` (the outcome included, when it is listed) plus (distinct levels - 1) for each VARCHAR
 #' column; pass `p` to override that. GB means 1024^3 bytes throughout. need = data + 3 * model matrix. It fits when
-#' need <= 0.8 * the profile's RAM budget. When it does not: glm / lm -> "bigglm", cox -> "bam", ml ->
-#' "subsample". `override_rows` replaces the stored row count (tests). Returns list(need_gb, budget_gb,
+#' need <= 0.8 * the profile's RAM budget (`SR_RAM_BUDGET_GB` / option sr.ram_budget_gb overrides the budget;
+#' tests and the browser walk use it). For method "table1" need = data bytes only (no model matrix). When it does
+#' not fit: glm / lm / table1 -> "stream", cox -> "bam", ml -> "subsample". `override_rows` replaces the stored row count (tests). Returns list(need_gb, budget_gb,
 #' fits, route, reason, rows, p); the caller logs the decision.
-sr_mem_estimate <- function(project, table, cols, method = c("glm", "lm", "cox", "ml"), p = NULL,
+sr_mem_estimate <- function(project, table, cols, method = c("glm", "lm", "cox", "ml", "table1"), p = NULL,
                             profile = project$meta$profile, override_rows = NULL) {
   method <- match.arg(method)
   caps <- sr_profile_caps(profile)
@@ -422,10 +445,10 @@ sr_mem_estimate <- function(project, table, cols, method = c("glm", "lm", "cox",
   gb <- 1024^3
   data_gb <- rows * sum(bytes) / gb
   mm_gb <- rows * p_use * 8 / gb
-  need <- data_gb + 3 * mm_gb
-  budget <- caps$ram_budget_gb
+  need <- if (identical(method, "table1")) data_gb else data_gb + 3 * mm_gb   # Table 1 builds no model matrix
+  budget <- .sr_ram_budget(caps$ram_budget_gb)
   fits <- need <= 0.8 * budget
-  route <- if (fits) "in_memory" else switch(method, glm = , lm = "bigglm", cox = "bam", ml = "subsample")
+  route <- if (fits) "in_memory" else switch(method, glm = , lm = , table1 = "stream", cox = "bam", ml = "subsample")
   reason <- sprintf(
     "%s: about %.2f GB needed (data %.2f GB + 3 x model matrix %.2f GB) for %s rows and %s model columns, against %.2f GB usable (80%% of the %.0f GB budget on the %s profile)",
     if (fits) "fits in memory" else sprintf("does not fit in memory, route to %s", route),

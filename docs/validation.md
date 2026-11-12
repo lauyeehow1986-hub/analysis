@@ -1,6 +1,6 @@
 # StatRouter validation record
 
-This page records three kinds of evidence that the analysis engine gives correct numbers:
+This page records four kinds of evidence that the analysis engine gives correct numbers:
 
 1. A **confidence-interval coverage simulation**. Each cell simulates data with a known true effect,
    runs the route's own compiled analysis code on it, and counts how often the 95% interval contains
@@ -10,6 +10,8 @@ This page records three kinds of evidence that the analysis engine gives correct
 3. A **feasibility SE validation**. The standard errors that the outcome-blind feasibility verdict
    predicts before the lock (spec catalogue O) are compared with the empirical SD of the route's own
    estimates over simulated datasets, and checked for conservativeness on NHEFS.
+4. The **streaming engine** (P1e.1): memory versus stream equivalence at 1M rows, a 20M-row smoke, the
+   Table 1 performance limit and the browser walk (section 4).
 
 These are research-software checks, not a clinical validation. Results still need review by a
 qualified statistician.
@@ -316,3 +318,86 @@ The smoke test `tests/testthat/test-feas-sim-smoke.R` runs every cell with 20 re
 10). It checks the returned fields, that no replication fails, that the ratio is finite, and that one
 or two workers give identical results (md and rmst). It also checks that a prediction uses the engine
 seed it is given and that the stored hr_cl ICC agrees with the closed form. It does not check `pass`.
+
+## 4. Streaming engine (P1e.1)
+
+The streaming engine (see [scale.md](scale.md)) must give the in-memory estimates and standard errors within
+numerical precision. This section records the evidence. Synthetic data only; nothing here is a clinical
+validation.
+
+### 1M-row memory versus stream equivalence
+
+`Rscript tools/scale_equiv.R --rows 1000000 --chunk 200000` (development machine, laptop profile: DuckDB cap
+14 GB, 12 threads) printed `SCALE EQUIV PASS`.
+
+| Item | Result |
+|---|---|
+| Cells | 19: lm, logistic and modpois, each with model, robust and cluster SE (modpois has no model-SE cell: both engines refuse it), over two term sets (`x1 + grp + rcs(x2)` and `x1 + grp + quad(x2) + grp:x1`), plus one `exclude_rows` cell per route |
+| Comparison | every field of the value (coefficients, SEs, intervals, p values, effects, marginal effects, observed risk, fit statistics, flags) within the spec tolerances: 1e-8 for estimates, model SE and marginal effects; 1e-7 for robust and cluster SE |
+| Largest numeric absolute difference | 1.34e-11 |
+| Wall time per cell | memory 2.6-9.9 s, stream 1.6-9.6 s |
+
+The tool also found a real bug at this scale (the `exclude_rows` anti-join reordered the read over several
+row groups, spec section 12 R24), fixed before the pass. The smaller matrix in
+`tests/testthat/test-scale-equiv.R` (20,000 rows, routes x SE x terms, chunk sizes 1000, 7 and 25000) is part
+of the suite.
+
+### 20M-row smoke
+
+`Rscript tools/scale_fit.R` (2e7 rows, 2e6 patients, chunk 5e5): `SCALE FIT: PASS`. This ran on the
+**development machine** (the laptop profile hardware), not on a locked 16 GB machine. The limit is the DuckDB
+cap plus 2 GB, which is 16 GB.
+
+| Route (cluster SE on the patient) | Wall time | Passes | Peak RSS | Limit |
+|---|---|---|---|---|
+| logistic | 209.6 s | 7 | 4.90 GB | 16 GB |
+| lm | 100.2 s | 2 | 5.69 GB | 16 GB |
+
+Generating the Parquet extract took 12.5 s (0.69 GB); the total was 327 s. The logistic fit used 20,000,000
+rows and 2,000,000 clusters.
+
+| Profile | Status |
+|---|---|
+| laptop profile (the 20M-row smoke above) | pending (laptop): this was run on the development machine, with its DuckDB cap, not as a recorded run of the laptop hand-off; re-run `tools/scale_fit.R` there |
+| `locked16` | not run |
+
+### Table 1 performance (known limit)
+
+The exact-sum Table 1 mean is an interpreted Shewchuk loop. Measured per continuous variable: 2.10 s at 1e6
+values (2.10 us per value) and 23.8 s at 1e7 (2.38 us per value). Extrapolated: about 4 minutes at 1e8 and
+about 40 minutes at 1e9 rows, per continuous variable, on top of the SQL passes. It is linear and memory stays
+flat. Not changed; see scale.md section 7.
+
+### Browser walk (spec section 11)
+
+Run on synthetic data (5,000 rows from the test generator `.sc_frame`) in the in-app browser on port 7790 with
+`SR_RAM_BUDGET_GB=0.0005`, against a project prepared by a script (ingested, roles, DQ decisions, PICO and
+design decisions, feasibility decided, analyses a1 logistic with a factor, an RCS term and robust SE; a2 lm;
+a3 Table 1, all `engine = auto`, not locked). The import and DQ steps were done by the script, not in the
+browser.
+
+Verified in the browser:
+
+- The project opened from the Project tab. The SAP tab Lock checklist showed an **engine** row per analysis:
+  a1 and a2 "stream engine (auto -> stream: does not fit in memory ...)", a3 "in memory (auto -> memory:
+  fits ...)". (Table 1 needs only the data bytes, so it fits the tiny budget.)
+- The SAP locked (typed-word dialog) and wrote `SAP_v1.docx`; the docx has the "Computational engine of each
+  analysis" table with Streaming, Streaming and In memory.
+- Analyses panel: a1, a2 and a3 ran (Run all runs one analysis per press in this walk). The progress text "pass 6 of at most 27" was
+  captured from the page while a1 ran. The a1 result card showed the **Streaming** badge.
+- Write panel: Preview and Export manuscript. The preview and the exported `manuscript.docx` carry the engine
+  sentence ("The analysis dataset (5000 rows) exceeded the in-memory budget, so the models were fitted by
+  streaming iteratively reweighted least squares over fixed chunks of 250000 rows ..."; and the "least
+  squares" one for a2).
+
+Verified headless (not in the browser): a twin project from the same data and spec with `engine = memory`
+was locked and run with `sr_run`. a1 (logistic) and a2 (lm) effect tables agree with the streaming
+run: largest absolute difference 2.49e-11 (a1 upper limit of an OR of 270), 0 for n and events. The twin's
+`ok_engine` was memory for all three.
+
+Not verified: Table 1 as a streaming analysis (a3 resolved to memory, so the browser run and the
+equivalence comparison for a3 are memory against memory; the streaming Table 1 is covered by
+`tests/testthat/test-scale-table1.R`, `test-scale-run.R` and the `tools/scale_equiv.R` check, not by this
+walk). The Switch engine dialog, Cancel of a streaming run, and a table large enough for a real spill were
+not exercised. The cosmetic "0 GB budget" in the reason text comes from rounding the tiny forced budget to
+two decimals.

@@ -155,6 +155,24 @@
   list(.sr_sd_head(paste("Analysis", a$id), 2L), .sr_sd_table(df, paste("Specification of", a$id)))
 }
 
+# The engine of each analysis (scale/engine.R): the locked one after the lock, the one resolved now in a draft.
+# One row per analysis with an engine record, in id order; the resolution reason of each is a footnote. NULL
+# when no analysis has a record (a SAP locked before P1e), so such a document is unchanged.
+.sr_sd_engine_table <- function(project) {
+  eg <- .sr_sap_engines(project)
+  an <- .sr_sap_analyses(project)
+  ids <- sort(as.character(intersect(names(eg), names(an))), method = "radix")
+  if (!length(ids)) return(NULL)
+  name <- function(e) switch(as.character(e$engine %||% NA_character_), memory = "In memory", stream = "Streaming", "Not resolved")
+  df <- .sr_sd_df(Analysis = ids, Label = vapply(ids, function(i) as.character(an[[i]]$label %||% ""), ""),
+                  Route = vapply(ids, function(i) as.character(an[[i]]$route %||% ""), ""),
+                  Engine = vapply(ids, function(i) name(eg[[i]]), ""))
+  notes <- vapply(ids, function(i) .sr_sd_txt(paste0(i, ": ", eg[[i]]$reason %||% "")), "")
+  tb <- .sr_sd_table(df, "Computational engine of each analysis")
+  tb$footnotes <- unname(notes)
+  tb
+}
+
 .sr_sd_feas_table <- function(rep, k = SR_SDC_K) {
   .sr_sd_df(Analysis = rep$analysis, Contrast = rep$contrast, Measure = rep$measure, `n (complete cases)` = .sr_sd_whole(rep$n_cc),
             Events = .sr_sd_count(rep$events, k), `Half-width` = .sr_sd_num(rep$h), `Min. detectable effect` = .sr_sd_num(rep$mde),
@@ -184,6 +202,8 @@
   an <- .sr_sap_analyses(project)
   an <- an[order(names(an), method = "radix")]
   blocks <- c(blocks, list(.sr_sd_head("Analyses", 1L)))
+  eng <- .sr_sd_engine_table(project)
+  if (!is.null(eng)) blocks <- c(blocks, list(eng))
   for (a in an) blocks <- c(blocks, .sr_sd_analysis_blocks(a))
 
   fams <- project$state$sap$families %||% list()

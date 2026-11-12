@@ -34,6 +34,10 @@ sr_reducer_register("analysis.added", function(state, event) {
               table = as.character(p$table), label = as.character(p$label), family = NA_character_,
               spec = p$spec, parent = .sr_sap_chr1(p$parent), trigger = .sr_sap_chr1(p$trigger),
               addresses = character(), prespecified = FALSE, reason = .sr_sap_chr1(p$reason))
+  if (!is.null(p$engine)) {
+    rec$engine_resolved <- list(engine = .sr_sap_chr1(p$engine$engine), requested = .sr_sap_chr1(p$engine$requested),
+                                reason = .sr_sap_chr1(p$engine$reason))
+  }
   an <- state$analyses %||% list()
   an[[id]] <- rec
   state$analyses <- an
@@ -137,9 +141,15 @@ sr_analysis_add <- function(project, id, route, spec, table, label = c("explorat
          " (", paste(cc$notes, collapse = "; "), ")", call. = FALSE)
   }
   .sr_sap_compiles(r, spec, id, route)
+  # the engine is resolved now (from the sizes) and recorded; it is not part of the SAP hash
+  probe <- project
+  probe$state$analyses[[id]] <- list(route = route, table = table, spec = spec)
+  eng <- sr_engine_resolve(probe, id, spec = spec)
+  if (!is.null(eng$block)) stop(eng$block, call. = FALSE)
   sr_project_append(project, "analysis.added", list(
     id = id, route = route, route_version = as.integer(r$version), table = table, label = label, spec = spec,
-    parent = parent, trigger = trigger, reason = reason))
+    parent = parent, trigger = trigger, reason = reason,
+    engine = list(engine = eng$engine, requested = eng$requested, reason = eng$reason)))
 }
 
 # ---- the sensitivity analysis of a failed check (ruling R35) ----------------------------------------
@@ -411,7 +421,8 @@ sr_diag_apply <- function(project, analysis_id) {
 #' trigger). kind: exploratory / post_hoc (an analysis added after the lock with that label),
 #' unplanned_sensitivity (a sensitivity analysis added after the lock, by hand or by sr_diag_apply),
 #' rule_fired (a pre-specified rule acted on a diagnostic; analysis = the analysis the check failed
-#' for), lib_changed (the latest run of the analysis used a library snapshot other than the lock's).
+#' for), lib_changed (the latest run of the analysis used a library snapshot other than the lock's),
+#' computational (an engine switch, sr_engine_switch; trigger NA).
 sr_deviations <- function(project) {
   st <- project$state
   an <- st$analyses %||% list()
@@ -446,6 +457,11 @@ sr_deviations <- function(project) {
       add(id, label_of(id), "lib_changed",
           "the latest run used a library snapshot that differs from the one recorded at the SAP lock", NA_character_)
     }
+  }
+  for (id in names(st$engines %||% list())) {
+    e <- st$engines[[id]]
+    add(id, label_of(id), "computational",
+        sprintf("engine changed from %s to %s: %s; estimator unchanged", e$from, e$to, e$reason), NA_character_)
   }
   if (!length(out)) {
     return(data.frame(analysis = character(), label = character(), kind = character(), reason = character(),

@@ -229,8 +229,16 @@ SR_WR_DESIGN_TEXT <- c(cohort_prospective = "prospective cohort", cohort_retrosp
 
 # The sentence about the deviations from the locked plan (the table itself is in the supplement).
 .sr_wr_m_deviations <- function(project) {
-  if (nrow(sr_deviations(project))) {
-    "Deviations from the locked plan are listed in the supplementary material."
+  dv <- sr_deviations(project)
+  if (nrow(dv)) {
+    # an engine switch is a computational deviation: the estimator is unchanged (scale/engine.R)
+    comp <- if (any(dv$kind %in% "computational")) {
+      paste0(" An engine switch between in-memory and streaming computation is a computational deviation ",
+             "that leaves the estimator unchanged.")
+    } else {
+      ""
+    }
+    paste0("Deviations from the locked plan are listed in the supplementary material.", comp)
   } else {
     "There were no deviations from the locked plan."
   }

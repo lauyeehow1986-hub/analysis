@@ -70,7 +70,7 @@ test_that(".sr_mem_method maps a route id to an sr_mem_estimate method", {
   expect_identical(.sr_mem_method(c("lm_fit", "lm", "lmm")), rep("lm", 3L))
   expect_identical(.sr_mem_method(c("logistic", "modpois")), rep("glm", 2L))
   expect_identical(.sr_mem_method(c("cox", "rmst")), rep("cox", 2L))
-  expect_identical(.sr_mem_method(c("table1", "stub_sap", "anything")), rep("lm", 3L))
+  expect_identical(.sr_mem_method(c("table1", "stub_sap", "anything")), c("table1", "lm", "lm"))
   expect_identical(.sr_mem_method("cox"), "cox")
 })
 
@@ -342,17 +342,20 @@ test_that("a table that is not ready refuses the lock, naming the table", {
   expect_true(sr_blind(p))
 })
 
-test_that("an analysis too large for an in-memory fit refuses the lock; a warn row does not", {
+test_that("an analysis too large for an in-memory fit is a stream engine row, not a block; a warn row does not", {
   p <- .sap_drafted()
   expect_true(any(sr_readiness(p, "t")$status == "warn"))      # no data dictionary is attached
   expect_false(any(sr_sap_check(.fx_feasible(p))$status == "block"))
   .sap_mock("sr_mem_estimate", function(project, table, cols, method = "glm", ...) {
-    list(fits = FALSE, reason = "mock", need_gb = 99, budget_gb = 1, route = "bigglm", rows = 1, p = 1)
+    list(fits = FALSE, reason = "mock", need_gb = 99, budget_gb = 1, route = "stream", rows = 1, p = 1)
   })
-  chk <- sr_sap_check(p)
-  expect_true(any(chk$status == "block" & grepl("too large for an in-memory fit", chk$detail)))
-  expect_true(any(chk$status == "block" & grepl("P1e", chk$detail)))
-  expect_error(sr_sap_lock(p), "in-memory")
+  # P1e.1: auto resolves a too-large analysis to the streaming engine; it no longer blocks the lock
+  chk <- sr_sap_check(.fx_feasible(p))
+  eng <- chk[chk$item == "engine", , drop = FALSE]
+  expect_true(length(eng$status) >= 1L && all(eng$status == "ok"))
+  expect_match(eng$detail[1L], "^a1: stream engine [(]auto -> stream: ")
+  expect_false(any(chk$status == "block"))
+  expect_false(any(grepl("P1e[^.]", chk$detail)))
 })
 
 test_that("sr_mem_estimate is asked about the columns of the spec with the method of the route", {

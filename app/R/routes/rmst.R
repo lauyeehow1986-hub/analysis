@@ -50,6 +50,7 @@
   .sr_exclude_refuse(spec, "rmst")
   .sr_surv_check(spec)
   .sr_outcome_cov_refuse(spec)
+  .sr_engine_check(spec, "rmst")
   if (isTRUE(spec[["layers"]][["clustered"]])) {
     stop("clustered RMST is not supported in P1c", call. = FALSE)
   }
@@ -325,6 +326,7 @@
     status_event = list(type = "num|chr", required = FALSE),
     exposure = list(type = "chr", required = TRUE),
     tau = list(type = "num", required = TRUE),
+    engine = list(type = "chr", required = FALSE),
     layers = list(type = "list", required = TRUE),
     seed = list(type = "num", required = TRUE)
   )
