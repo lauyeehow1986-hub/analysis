@@ -91,6 +91,31 @@ test_that("manuscript Methods carry the engine sentence through placeholders", {
   expect_match(dt, "fitted by streaming iteratively reweighted least squares", fixed = TRUE)
 })
 
+test_that("every stream-capable route has an engine sentence kind; Cox and RMST have none", {
+  for (r in c("lm", "lm_describe", "logistic", "logistic_describe", "modpois", "table1")) {
+    expect_false(is.null(.sr_engine_kind(r)), info = r)
+  }
+  expect_identical(.sr_engine_kind("lm_describe"), "lm")
+  for (r in c("cox", "cox_describe", "rmst")) expect_null(.sr_engine_kind(r), info = r)
+})
+
+test_that("a streamed lm_describe carries the engine sentence through placeholders", {
+  p <- .scw_project(.scw_spec(outcome = "yc", purpose = "describe", engine = "stream"), route = "lm_describe",
+                    env = environment())
+  expect_match(sr_result(p, "a1")$fragments$engine, "least squares", fixed = TRUE)
+  m <- sr_doc_model(p)
+  tpl <- .scw_methods(m)
+  expect_identical(sr_ph_digits(tpl), character(0))
+  txt <- sr_ph_resolve(tpl, m$reg, cite = sr_cite_fn(m$main[[length(m$main)]]$keys))
+  expect_match(txt, "fitted by streaming least squares", fixed = TRUE)
+  expect_match(txt, "in chunks of 1000 rows", fixed = TRUE)
+  expect_true(any(grepl("^fragment:a1:engine", sr_ph_table(m$reg)$source)))
+  v <- sr_ph_verify(m$reg, p)
+  expect_true(all(v$ok), info = paste(v$source[!v$ok], v$got[!v$ok], collapse = "; "))
+  g <- sr_claim_guard(m)
+  expect_identical(nrow(g), 0L, info = paste(g$block, g$rule, g$detail, collapse = "\n"))
+})
+
 test_that("a memory analysis has no engine sentence in the Methods", {
   p <- .scw_project(.scw_spec(), env = environment())
   m <- sr_doc_model(p)

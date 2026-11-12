@@ -12,7 +12,7 @@ section 12 of it holds the plan rulings that win over the body.
 
 ## 1. The engine field
 
-Every analysis of the five routes `lm`, `logistic`, `logistic_describe`, `modpois` and `table1` has an
+Every analysis of the six routes `lm`, `lm_describe`, `logistic`, `logistic_describe`, `modpois` and `table1` has an
 `engine` field. Its values are `auto` (the default), `memory` and `stream`. In the SAP form it is the Engine
 select: Auto, In memory, Streaming. `cox` and `rmst` accept `auto` and `memory` only (section 6).
 
@@ -45,7 +45,8 @@ is the data bytes alone.
 
 ## 2. Switching the engine after the lock
 
-`sr_engine_switch(project, analysis_id, engine, reason)` records an `engine.switched` event. It is a
+`sr_engine_switch(project, analysis_id, engine, reason)` records an `engine.switched` event. It is refused
+until the SAP is locked (before the lock, edit the analysis engine instead). It is a
 **computational deviation**, not a change to the pre-specified method: the estimator is unchanged, the SAP
 hash is unchanged, and the Deviations card and the Methods text list it ("engine changed from <from> to <to>:
 <reason>; estimator unchanged").
@@ -87,7 +88,7 @@ registry):
 |---|---|---|
 | `stream_chunk_rows` (option `sr.stream_chunk_rows`) | 250000 | Rows per chunk. It is copied into the run spec as `stream_chunk` and is part of the stream run key, so changing it reruns streaming analyses that did not fix a chunk in their spec. |
 | `stream_knot_rows` (option `sr.stream_knot_rows`) | 5e7 | The largest (value, count) table the knot step may expand (section 7). |
-| `SR_RAM_BUDGET_GB` (option `sr.ram_budget_gb`) | the hardware profile's budget | Overrides the RAM budget `auto` compares against. Tests and the browser walk use it to force `stream`. |
+| `SR_RAM_BUDGET_GB` (option `sr.ram_budget_gb`) | the hardware profile's budget | Overrides the RAM budget `auto` compares against. Tests and the browser walk use it to force `stream`. A value that is not a number > 0 is ignored with a warning (once per value) and the profile's budget is used. |
 
 Memory and disk:
 

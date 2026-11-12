@@ -42,3 +42,17 @@ test_that("switch refusals", {
   expect_error(sr_engine_switch(ps, "a1", "memory", "r"), "does not fit in memory")
   expect_error(sr_engine_switch(pm, "a1", "stream", "r"), "P1e.3")
 })
+
+test_that("switch is refused before the SAP lock and works after it", {
+  p <- .fx_ready_project(.sc_frame(2000L), "t", c(id = "id", y = "outcome", sex = "exposure"))
+  p <- sr_sap_add(p, "a1", "logistic", .scw_spec(), "t", label = "primary")
+  n0 <- length(sr_events_read(p$paths$events))
+  expect_error(sr_engine_switch(p, "a1", "stream", "moved to locked16"),
+               "the SAP is not locked; an engine switch is recorded only after the lock", fixed = TRUE)
+  expect_identical(length(sr_events_read(p$paths$events)), n0)
+  p <- sr_sap_lock(.fx_feasible(p))
+  p2 <- sr_engine_switch(p, "a1", "stream", "moved to locked16")
+  evs <- sr_events_read(p2$paths$events)
+  expect_identical(evs[[length(evs)]]$type, "engine.switched")
+  expect_identical(.sr_engine_effective(p2, "a1"), "stream")
+})

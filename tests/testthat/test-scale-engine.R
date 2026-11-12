@@ -111,6 +111,28 @@ test_that("sr_mem_estimate table1 counts data bytes only", {
   expect_identical(.sr_mem_method("table1"), "table1")
 })
 
+test_that("an invalid RAM budget override warns once and falls back to the profile budget", {
+  p <- .fx_ready_project(.sc_frame(200L), "t", c(id = "id", y = "outcome", sex = "exposure"))
+  prof <- sr_profile_caps(p$meta$profile)$ram_budget_gb
+  est <- function() sr_mem_estimate(p, "t", c("id", "x1"), "glm")
+  for (bad in c("abc", "0", "-2", "NA")) {
+    rm(list = ls(.sr_budget_warned, all.names = TRUE), envir = .sr_budget_warned)
+    withr::local_envvar(SR_RAM_BUDGET_GB = bad)
+    expect_warning(e <- est(), sprintf("ignoring SR_RAM_BUDGET_GB = \"%s\"", bad), fixed = TRUE)
+    expect_equal(e$budget_gb, prof, info = bad)
+    expect_no_warning(e2 <- est())   # once per value
+    expect_equal(e2$budget_gb, prof, info = bad)
+  }
+  rm(list = ls(.sr_budget_warned, all.names = TRUE), envir = .sr_budget_warned)
+  withr::local_envvar(SR_RAM_BUDGET_GB = "")
+  withr::local_options(sr.ram_budget_gb = -1)
+  expect_warning(e <- est(), "ignoring option sr.ram_budget_gb = \"-1\"", fixed = TRUE)
+  expect_equal(e$budget_gb, prof)
+  withr::local_options(sr.ram_budget_gb = 3)
+  expect_no_warning(e <- est())
+  expect_equal(e$budget_gb, 3)
+})
+
 test_that("auto resolves to memory when it fits and to stream when it does not", {
   p <- .sc_locked(.sce_spec("glm"))
   r <- sr_engine_resolve(p, "a1")

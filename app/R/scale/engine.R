@@ -120,11 +120,16 @@ sr_reducer_register("engine.switched", function(state, event) {
 
 #' Switch an analysis between the in-memory and the streaming engine. The estimator is unchanged, so the SAP
 #' hash is too; the switch is listed by sr_deviations as a computational deviation. Refused for a read-only
-#' project, an unknown analysis, an engine other than "memory"/"stream", no reason, the engine it already
-#' uses, "memory" for an analysis that does not fit, and "stream" for one the streaming engine cannot run yet.
+#' project, a SAP that is not locked (before the lock the engine is part of the analysis spec), an unknown
+#' analysis, an engine other than "memory"/"stream", no reason, the engine it already uses, "memory" for an
+#' analysis that does not fit, and "stream" for one the streaming engine cannot run yet.
 #' @return the project
 sr_engine_switch <- function(project, analysis_id, engine, reason) {
   if (isTRUE(project$readonly)) stop("project is read-only", call. = FALSE)
+  if (sr_blind(project)) {
+    stop("the SAP is not locked; an engine switch is recorded only after the lock (before it, edit the ",
+         "analysis engine)", call. = FALSE)
+  }
   a <- project$state$analyses[[analysis_id]]
   if (is.null(a)) stop("unknown analysis '", analysis_id, "'", call. = FALSE)
   if (!(is.character(engine) && length(engine) == 1L && !is.na(engine) && engine %in% c("memory", "stream"))) {
@@ -192,9 +197,10 @@ sr_engine_switch <- function(project, analysis_id, engine, reason) {
 }
 
 #' The kind of engine Methods sentence a route gets ("lm", "glm" or "table1"), or NULL for a route that
-#' has no streaming engine (the five routes whose schema carries `engine` and `stream_chunk`).
+#' has no streaming engine (the six routes whose schema carries `engine` and `stream_chunk`).
 .sr_engine_kind <- function(route_id) {
-  kinds <- c(lm = "lm", logistic = "glm", logistic_describe = "glm", modpois = "glm", table1 = "table1")
+  kinds <- c(lm = "lm", lm_describe = "lm", logistic = "glm", logistic_describe = "glm", modpois = "glm",
+             table1 = "table1")
   id <- as.character(route_id)[1L]
   if (is.na(id) || !(id %in% names(kinds))) return(NULL)
   kinds[[id]]
