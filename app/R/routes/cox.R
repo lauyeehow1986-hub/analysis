@@ -59,8 +59,8 @@
   cu <- .sr_pem_cuts_of(spec)
   if (identical(cu[["rule"]], "explicit")) {
     at <- vapply(as.numeric(cu[["at"]]), function(x) format(x, digits = 15, trim = TRUE), "")
-    k <- length(at) + 1L
-    rule <- paste0("rule explicit: ", paste(at, collapse = ", "))
+    return(paste0("Hazard ratios were estimated by a piecewise-exponential Poisson model (rule explicit: ",
+                  paste(at, collapse = ", "), "); listed cuts at or beyond the longest observed time are dropped."))
   } else {
     k <- cu[["k"]]
     rule <- "rule quantile"
@@ -470,7 +470,7 @@
   rownames(effects) <- NULL
   prim_rows <- effects[effects$role == "primary", , drop = FALSE]
   if (!nrow(prim_rows) || !all(is.finite(c(prim_rows$est, prim_rows$lo, prim_rows$hi)))) {
-    stop("The estimate or interval for the exposure \"", exposure, "\" is not finite: the partial likelihood has no ",
+    stop("The estimate or interval for the exposure \"", exposure, "\" is not finite: the ", if (identical(value$method, "pem")) "Poisson" else "partial", " likelihood has no ",
          "finite maximum for it (for example because it perfectly separates the events), so the hazard ratio cannot be reported.",
          call. = FALSE)
   }
@@ -501,15 +501,17 @@
     "unadjusted (no model terms besides the exposure)"
   }
   st_suffix <- if (length(strata) && n_other > 0L) paste0("; baseline hazard stratified by ", st_text) else ""
-  frag <- list(cox_note = sprintf(
-    paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
-           "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
-    spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
-    as.integer(round(value$n_total - value$n)),
-    st_suffix,
-    .sr_cox_se_text(value)))
   pem <- identical(value$method, "pem")
-  if (pem) {
+  frag <- list()
+  if (!pem) {
+    frag$cox_note <- sprintf(
+      paste0("Cox proportional hazards regression of time to %s on %s (%s ties), %s; ",
+             "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),
+      spec[["status"]], exposure, value$ties, adj_text, as.integer(round(value$n)), as.integer(round(value$events)),
+      as.integer(round(value$n_total - value$n)),
+      st_suffix,
+      .sr_cox_se_text(value))
+  } else {
     frag$cox_note <- sprintf(
       paste0("Hazard ratios from piecewise-exponential Poisson regression of time to %s on %s, %s; ",
              "%d row(s) analysed (%d events), %d excluded for a missing value%s; %s."),

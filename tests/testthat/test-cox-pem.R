@@ -28,9 +28,9 @@
 }
 
 # the hand-built reference: survSplit + glm on the rows complete in the columns
-.pm_ref <- function(df, cuts, cov, strata = NULL, cluster = NULL) {
+.pm_ref <- function(df, cuts, cov, strata = NULL, cluster = NULL, cols = cov) {
   Surv <- survival::Surv
-  df <- df[stats::complete.cases(df[c("time", "status", cov, strata, cluster)]), ]
+  df <- df[stats::complete.cases(df[c("time", "status", cols, strata, cluster)]), ]
   df$.time <- df$time
   df$.event <- as.integer(df$status == 2)
   sp <- survival::survSplit(Surv(.time, .event) ~ ., data = df, cut = cuts, episode = ".int")
@@ -41,7 +41,8 @@
   fit <- stats::glm(stats::as.formula(paste(lhs, paste(cov, collapse = " + "), "+ offset(log(.pt))")),
                     data = sp, family = stats::poisson())
   V <- if (is.null(cluster)) stats::vcov(fit) else sandwich::vcovCL(fit, cluster = sp[[cluster]], type = "HC1")
-  list(est = unname(stats::coef(fit)[cov]), se = unname(sqrt(diag(V))[cov]), n = nrow(df))
+  keep <- !startsWith(names(stats::coef(fit)), "factor(.int)") & !startsWith(names(stats::coef(fit)), "droplevels(") & names(stats::coef(fit)) != "(Intercept)"
+  list(est = unname(stats::coef(fit)[keep]), se = unname(sqrt(diag(V))[keep]), n = nrow(df))
 }
 
 test_that("memory pem equals a hand-built survSplit + glm", {
@@ -146,4 +147,39 @@ test_that("two strata columns form one baseline per combination and interval", {
   ref <- .pm_ref(lg, c(150, 300), "sex", strata = c("ph.ecog", "inst"))
   expect_equal(v$coef$est, ref$est, tolerance = 1e-10)
   expect_equal(v$coef$se, ref$se, tolerance = 1e-10)
+})
+test_that("a factor exposure with a reference level matches the hand-built model", {
+  lg <- survival::lung
+  spec <- .pm_spec(exposure = "ph.ecog", exposure_ref = "0", pem_cuts = list(rule = "explicit", at = c(150, 300)))
+  v <- .pm_value(lg, spec)
+  ref <- .pm_ref(lg, c(150, 300), "factor(ph.ecog)", cols = "ph.ecog")
+  expect_length(v$coef$est, 3L)
+  expect_equal(v$coef$est, ref$est, tolerance = 1e-10)
+  expect_equal(v$coef$se, ref$se, tolerance = 1e-10)
+  r <- .pm_route()
+  p <- sr_result_check(r$present(v, spec), r)
+  expect_equal(p$effects$term, c("ph.ecog: 1 vs 0", "ph.ecog: 2 vs 0", "ph.ecog: 3 vs 0"))
+})
+
+test_that("tied quantile cuts give fewer intervals than requested and k reports them", {
+  set.seed(5)
+  d <- data.frame(time = c(rep(c(1, 2), each = 40), runif(40, 3, 6)), status = 2, sex = rbinom(120, 1, 0.5))
+  v <- .pm_value(d, .pm_spec(pem_cuts = list(rule = "quantile", k = 10)))
+  expect_lt(v$k, 10L)
+  expect_identical(v$k, length(v$cuts) - 1L)
+  expect_false(anyDuplicated(v$cuts) > 0L)
+  r <- .pm_route()
+  p <- sr_result_check(r$present(v, .pm_spec()), r)
+  expect_match(p$fragments$pem_method, sprintf("with %d intervals", v$k), fixed = TRUE)
+})
+
+test_that("a perfectly separating exposure stops with the Poisson likelihood wording", {
+  set.seed(3)
+  d <- data.frame(time = stats::rexp(200, 1) + 0.1, sex = rep(0:1, each = 100))
+  d$status <- ifelse(d$sex == 1, 1, 2)   # exposure 1 never has an event
+  spec <- .pm_spec(pem_cuts = list(rule = "explicit", at = c(0.5, 1)))
+  v <- .pm_value(d, spec)
+  r <- .pm_route()
+  expect_error(r$present(v, spec), "the Poisson likelihood has no finite maximum", fixed = TRUE)
+  expect_false(grepl("partial", tryCatch(r$present(v, spec), error = conditionMessage), fixed = TRUE))
 })
