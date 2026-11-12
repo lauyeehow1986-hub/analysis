@@ -135,6 +135,55 @@ test_that("the deferred S2 identity holds", {
   }
 })
 
+test_that("the information stays accurate when max|eta| is large", {
+  set.seed(31)
+  n <- 300L
+  d <- data.frame(time = rexp(n), status = rbinom(n, 1L, 0.9), x1 = rnorm(n, sd = 2))
+  d$time <- round(d$time * exp(-1.5 * d$x1), 2)   # some ties, so Efron differs from Breslow
+  d$s <- sample(c("a", "b"), n, replace = TRUE)
+  y <- data.frame(time = round(rexp(200L), 1), status = rbinom(200L, 1L, 0.8),
+                  yr = 2000 + rnorm(200L, sd = 3), x1 = rnorm(200L))
+  y$s <- rep(c("a", "b"), each = 100L)
+  cases <- list(list(d, "x1", 4, NULL), list(d, "x1", 6, NULL), list(d, "x1", 6, "s"),
+                list(y, c("yr", "x1"), c(2.5, 0.5), NULL), list(y, c("yr", "x1"), c(2.5, 0.5), "s"))
+  for (cs in cases) {
+    df <- cs[[1L]]
+    xc <- cs[[2L]]
+    beta <- cs[[3L]]
+    stv <- cs[[4L]]
+    X <- as.matrix(df[, xc, drop = FALSE])
+    X <- sweep(X, 2L, colMeans(X))
+    info <- paste(xc[1L], paste(beta, collapse = ","), if (is.null(stv)) "" else "strata")
+    expect_gt(max(abs(X %*% beta)), 20)          # the fixture really has a large max|eta|
+    for (ties in c("efron", "breslow")) {
+      ref <- cox_ref(beta, df, xc, ties, stv)
+      so <- .cox_sorted(df, stv)
+      dr <- .cs_direct(beta, so$df, xc, ties, so$s)
+      expect_true(all(is.finite(ref$V)))
+      for (ch in c(7L, 1e5L)) {
+        got <- cox_eval(beta, df, xc, ties, chunk = ch, strata = stv)
+        expect_equal(got$loglik, ref$loglik, tolerance = 1e-10, info = paste(info, ties, ch))
+        expect_equal(solve(got$I), ref$V, tolerance = 1e-10, info = paste(info, ties, ch))
+        expect_equal(got$I, dr$I, tolerance = 1e-10, info = paste(info, ties, ch))
+      }
+    }
+  }
+})
+
+test_that("the Efron weights of one huge tied block equal the term-by-term sum", {
+  S0 <- c(5000, 40, 12, 7)
+  E0 <- c(3000, 10, 3, 0)
+  d <- c(2500, 1, 3, 0)
+  w <- .h_st_cox_wts(S0, E0, d, "efron")
+  for (k in 1:3) {
+    f <- (0:(d[k] - 1)) / d[k]
+    D <- S0[k] - f * E0[k]
+    ref <- c(sum(1 / D), sum(f / D), sum(1 / D^2), sum(f / D^2), sum(f^2 / D^2), sum(log(D)))
+    expect_equal(unname(w[k, ]), ref, tolerance = 1e-12)
+  }
+  expect_identical(unname(w[4L, ]), rep(0, 6))
+})
+
 test_that("the Cox step helpers are self-contained and inline cleanly", {
   fns <- c(".h_st_chol2", ".h_st_chsolve2", ".h_st_chinv2", ".h_st_cox_wts", ".h_st_cox_new",
            ".h_st_cox_blocks", ".h_st_cox_step", ".h_st_cox_close")

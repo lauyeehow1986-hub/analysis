@@ -16,15 +16,18 @@
 #
 # Information. With D_l = S0 - f E0 and a_l = S1 - f E1, f = l/d (Efron) or 0 (Breslow), l = 0..d-1:
 #   I = sum_blocks sum_l (S2 - f E2) / D_l - a_l a_l' / D_l^2.
-# The S2 part is deferred (S12): its block weight is w1 = sum_l 1/D_l = dLam, so
-#   sum_k w1_k S2(t_k) = sum_i r_i x_i x_i' (Lam_stratum - W_after(t_i)),
-# with W_after(t_i) the Lam accumulated before row i's block. Per chunk A += X' r X and
-# B += X' (r W_after) X; at the stratum end I += Lam_stratum A - B.
+# The S2 part is never stored per block. Its block weight is w1 = sum_l 1/D_l = dLam, and a row read in
+# the stratum is in the risk set of its own block and of every block read after it, so
+#   sum_k w1_k S2(t_k) = sum_i r_i x_i x_i' (sum of w1 from row i's block to the stratum end).
+# Per run of complete blocks: I += W S2c + X' (r wrow) X, then S2c += X' r X, where S2c is the carried
+# sum of r x x' over the stratum's rows already completed, W the run's sum of w1 and wrow the reverse
+# cumulative w1 from the row's block to the run's end. Every term is positive, so nothing cancels (a
+# Lam A - B form loses I entirely once max|eta| is large).
 #
 # Chunk carries. The last block of a chunk may continue into the next one, so it is held back as its
-# block sums (st$pend), not as rows: R0 = sum r, R1 = sum r x, E0, E1, d, the event sums of eta and x, and
-# E2 = sum over its events of r x x'. Its rows enter A and B at once, because their W_after (the Lam
-# before the block) is already known. The stratum carries are S0, S1, Lam, A and B.
+# block sums (st$pend), not as rows: R0 = sum r, R1 = sum r x, E0, E1, d, the event sums of eta and x,
+# E2 = sum over its events of r x x' and S2 = sum over its rows of r x x'. The stratum carries are S0,
+# S1, S2c and Lam (the stratum's cumulative dLam).
 
 #' The generalised Cholesky (LDL') of the symmetric matrix M, as survival's cholesky2: list(L, D, sing).
 #' L is unit lower triangular, D the pivots. A pivot that is not finite or below toler * max(diag(M))
@@ -115,10 +118,12 @@
   w[e, "w1"] <- 1 / S0[e]
   w[e, "q1"] <- 1 / S0[e]^2
   w[e, "lg"] <- log(S0[e])
-  dm <- max(c(0, d))
+  # l = 1..d-1: blocks with a few events share one pass per l; a block with many is summed on its own
+  small <- 16
+  dm <- max(c(0, d[d <= small]))
   if (dm > 1) {
     for (l in seq_len(dm - 1)) {
-      j <- which(d > l)
+      j <- which(d > l & d <= small)
       f <- l / d[j]
       D <- S0[j] - f * E0[j]
       w[j, "w1"] <- w[j, "w1"] + 1 / D
@@ -129,24 +134,31 @@
       w[j, "lg"] <- w[j, "lg"] + log(D)
     }
   }
+  for (j in which(d > small)) {
+    f <- seq_len(d[j] - 1) / d[j]
+    D <- S0[j] - f * E0[j]
+    w[j, ] <- w[j, ] + c(sum(1 / D), sum(f / D), sum(1 / D^2), sum(f / D^2), sum(f^2 / D^2), sum(log(D)))
+  }
   w
 }
 
 #' The per-pass state of the streamed Cox step for p columns and ties "efron" or "breslow": the sums
-#' loglik, U and I; the stratum carries S0, S1, Lam, A and B; the current stratum cur; the pending block
-#' pend (NULL, or its block sums); and sumabs, the column sums of |X| (S1).
+#' loglik, U and I; the stratum carries S0, S1, S2c (sum of r x x' over the stratum's completed rows) and
+#' Lam; the current stratum cur; the pending block pend (NULL, or its block sums); and sumabs, the column
+#' sums of |X| (S1).
 .h_st_cox_new <- function(p, ties) {
   p <- as.integer(p)
   if (!ties %in% c("efron", "breslow")) stop("ties must be \"efron\" or \"breslow\"")
   list(p = p, ties = ties, loglik = 0, U = numeric(p), I = matrix(0, p, p), S0 = 0, S1 = numeric(p),
-       Lam = 0, A = matrix(0, p, p), B = matrix(0, p, p), cur = NULL, pend = NULL, sumabs = numeric(p))
+       S2c = matrix(0, p, p), Lam = 0, cur = NULL, pend = NULL, sumabs = numeric(p))
 }
 
 #' Internal to the step: process the tie blocks with sums ag (list(s, t, R0, R1, E0, E1, d, LE, XE), one
 #' element or row per block, in reading order). Blocks 1..ncomp are complete; a block after them is the
-#' pending one. X, r, ev and blk are the chunk's rows of these blocks (blk the block of each row, none
-#' for a replayed pending block). E2x, when not NULL, is the E2 of block 1 held from earlier chunks.
-.h_st_cox_blocks <- function(st, ag, ncomp, X, r, ev, blk, E2x = NULL) {
+#' pending one, whose rows are left to the caller. X, r, ev and blk are the chunk's rows of these blocks
+#' (blk the block of each row, none for a replayed pending block). ex, when not NULL, is list(E2, S2) of
+#' block 1's rows held from earlier chunks.
+.h_st_cox_blocks <- function(st, ag, ncomp, X, r, ev, blk, ex = NULL) {
   nb <- length(ag$t)
   if (!nb) return(st)
   bend <- cumsum(tabulate(blk, nb))
@@ -156,51 +168,49 @@
     kb <- which(sid == k)
     s <- ag$s[kb[1L]]
     if (is.null(st$cur) || s != st$cur) {
-      st$I <- st$I + st$Lam * st$A - st$B
       st$S0 <- 0
       st$S1[] <- 0
+      st$S2c[] <- 0
       st$Lam <- 0
-      st$A[] <- 0
-      st$B[] <- 0
       st$cur <- s
     }
     kc <- kb[kb <= ncomp]
     nc <- length(kc)
-    w <- NULL
-    w1 <- numeric()
-    if (nc) {
-      S0 <- cumsum(c(st$S0, ag$R0[kc]))[-1L]
-      S1 <- apply(rbind(st$S1, ag$R1[kc, , drop = FALSE]), 2L, cumsum)
-      S1 <- matrix(S1, nc + 1L, st$p)[-1L, , drop = FALSE]
-      E1 <- ag$E1[kc, , drop = FALSE]
-      w <- .h_st_cox_wts(S0, ag$E0[kc], ag$d[kc], st$ties)
-      w1 <- w[, "w1"]
-      st$loglik <- st$loglik + sum(ag$LE[kc]) - sum(w[, "lg"])
-      st$U <- st$U + colSums(ag$XE[kc, , drop = FALSE]) - colSums(S1 * w1) + colSums(E1 * w[, "w2"])
-      st$I <- st$I - (crossprod(S1, w[, "q1"] * S1) - crossprod(S1, w[, "q2"] * E1) -
-                        crossprod(E1, w[, "q2"] * S1) + crossprod(E1, w[, "q3"] * E1))
-      if (!is.null(E2x) && kc[1L] == 1L) st$I <- st$I - w[1L, "w2"] * E2x
-      st$S0 <- S0[nc]
-      st$S1 <- S1[nc, ]
+    if (!nc) next
+    S0 <- cumsum(c(st$S0, ag$R0[kc]))[-1L]
+    S1 <- apply(rbind(st$S1, ag$R1[kc, , drop = FALSE]), 2L, cumsum)
+    S1 <- matrix(S1, nc + 1L, st$p)[-1L, , drop = FALSE]
+    E1 <- ag$E1[kc, , drop = FALSE]
+    w <- .h_st_cox_wts(S0, ag$E0[kc], ag$d[kc], st$ties)
+    w1 <- w[, "w1"]
+    rc <- rev(cumsum(rev(w1)))
+    st$loglik <- st$loglik + sum(ag$LE[kc]) - sum(w[, "lg"])
+    st$U <- st$U + colSums(ag$XE[kc, , drop = FALSE]) - colSums(S1 * w1) + colSums(E1 * w[, "w2"])
+    st$I <- st$I - (crossprod(S1, w[, "q1"] * S1) - crossprod(S1, w[, "q2"] * E1) -
+                      crossprod(E1, w[, "q2"] * S1) + crossprod(E1, w[, "q3"] * E1))
+    st$I <- st$I + rc[1L] * st$S2c
+    if (!is.null(ex) && kc[1L] == 1L) {
+      st$I <- st$I + rc[1L] * ex$S2 - w[1L, "w2"] * ex$E2
+      st$S2c <- st$S2c + ex$S2
     }
-    Lb <- cumsum(c(st$Lam, w1))
-    lo <- if (kb[1L] > 1L) bend[kb[1L] - 1L] + 1L else 1L
-    hi <- bend[kb[length(kb)]]
+    lo <- if (kc[1L] > 1L) bend[kc[1L] - 1L] + 1L else 1L
+    hi <- bend[kc[nc]]
     if (hi >= lo) {
       i <- lo:hi
       Xr <- X[i, , drop = FALSE]
       rr <- r[i]
-      wa <- Lb[blk[i] - kb[1L] + 1L]
-      st$A <- st$A + crossprod(Xr, rr * Xr)
-      st$B <- st$B + crossprod(Xr, (rr * wa) * Xr)
-      e <- i[ev[i] == 1 & blk[i] <= ncomp]
+      lb <- blk[i] - kc[1L] + 1L
+      st$I <- st$I + crossprod(Xr, (rr * rc[lb]) * Xr)
+      st$S2c <- st$S2c + crossprod(Xr, rr * Xr)
+      e <- which(ev[i] == 1)
       if (length(e) && !identical(st$ties, "breslow")) {
-        we <- w[blk[e] - kb[1L] + 1L, "w2"]
-        Xe <- X[e, , drop = FALSE]
-        st$I <- st$I - crossprod(Xe, (r[e] * we) * Xe)
+        Xe <- Xr[e, , drop = FALSE]
+        st$I <- st$I - crossprod(Xe, (rr[e] * w[lb[e], "w2"]) * Xe)
       }
     }
-    st$Lam <- Lb[length(Lb)]
+    st$S0 <- S0[nc]
+    st$S1 <- S1[nc, ]
+    st$Lam <- cumsum(c(st$Lam, w1))[nc + 1L]
   }
   st
 }
@@ -224,34 +234,41 @@
   rs <- function(v) rowsum(v, blk, reorder = FALSE)
   ag <- list(s = strat[brk], t = time[brk], R0 = rs(r)[, 1L], R1 = rs(rx), E0 = rs(ev * r)[, 1L],
              E1 = rs(ev * rx), d = rs(ev)[, 1L], LE = rs(ev * eta)[, 1L], XE = rs(ev * X))
-  last <- which(blk == nb & ev == 1)
-  E2last <- crossprod(X[last, , drop = FALSE], r[last] * X[last, , drop = FALSE])
-  E2first <- NULL
+  lr <- which(blk == nb)
+  le <- lr[ev[lr] == 1]
+  ex_last <- list(E2 = crossprod(X[le, , drop = FALSE], r[le] * X[le, , drop = FALSE]),
+                  S2 = crossprod(X[lr, , drop = FALSE], r[lr] * X[lr, , drop = FALSE]))
+  ex_first <- NULL
   pe <- st$pend
   st$pend <- NULL
   if (!is.null(pe)) {
     if (ag$s[1L] == pe$s && ag$t[1L] == pe$t) {
       for (v in c("R0", "E0", "d", "LE")) ag[[v]][1L] <- ag[[v]][1L] + pe[[v]]
       for (v in c("R1", "E1", "XE")) ag[[v]][1L, ] <- ag[[v]][1L, ] + pe[[v]][1L, ]
-      if (nb == 1L) E2last <- E2last + pe$E2 else E2first <- pe$E2
+      if (nb == 1L) {
+        ex_last$E2 <- ex_last$E2 + pe$E2
+        ex_last$S2 <- ex_last$S2 + pe$S2
+      } else {
+        ex_first <- list(E2 = pe$E2, S2 = pe$S2)
+      }
     } else {
-      st <- .h_st_cox_blocks(st, pe, 1L, X[0L, , drop = FALSE], numeric(), numeric(), integer(), pe$E2)
+      st <- .h_st_cox_blocks(st, pe, 1L, X[0L, , drop = FALSE], numeric(), numeric(), integer(),
+                             list(E2 = pe$E2, S2 = pe$S2))
     }
   }
-  st <- .h_st_cox_blocks(st, ag, nb - 1L, X, r, ev, blk, E2first)
+  st <- .h_st_cox_blocks(st, ag, nb - 1L, X, r, ev, blk, ex_first)
   st$pend <- list(s = ag$s[nb], t = ag$t[nb], R0 = ag$R0[nb], R1 = ag$R1[nb, , drop = FALSE],
                   E0 = ag$E0[nb], E1 = ag$E1[nb, , drop = FALSE], d = ag$d[nb], LE = ag$LE[nb],
-                  XE = ag$XE[nb, , drop = FALSE], E2 = E2last)
+                  XE = ag$XE[nb, , drop = FALSE], E2 = ex_last$E2, S2 = ex_last$S2)
   st
 }
 
-#' Flush the pending block, close the stratum and return list(loglik, U, I) of the pass.
+#' Flush the pending block and return list(loglik, U, I) of the pass.
 .h_st_cox_close <- function(st) {
   pe <- st$pend
   if (!is.null(pe)) {
-    st <- .h_st_cox_blocks(st, pe, 1L, matrix(0, 0L, st$p), numeric(), numeric(), integer(), pe$E2)
-    st$pend <- NULL
+    st <- .h_st_cox_blocks(st, pe, 1L, matrix(0, 0L, st$p), numeric(), numeric(), integer(),
+                           list(E2 = pe$E2, S2 = pe$S2))
   }
-  st$I <- st$I + st$Lam * st$A - st$B
   list(loglik = st$loglik, U = st$U, I = st$I)
 }
