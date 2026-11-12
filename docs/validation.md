@@ -409,8 +409,9 @@ compared with the in-memory routes on synthetic data. Nothing here is a clinical
 
 ### Tolerances
 
-Relative to max(1, |x|). Counts, `n`, `events`, `n_clusters`, `aliased`, `levels`, warnings, KM and risk-table
-counts and the PEM cuts must be identical.
+Relative to max(1, |x|). Counts, `n`, `events`, `n_clusters`, `aliased`, `levels`, KM and risk-table
+counts and the PEM cuts must be identical. Warnings must be identical between stream and memory, except the glm
+null-deviance refit warning, which the streamed PEM does not reproduce.
 
 | Comparison | Tolerance |
 |---|---|

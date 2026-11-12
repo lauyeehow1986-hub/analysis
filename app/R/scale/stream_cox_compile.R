@@ -328,6 +328,7 @@
       ".S$cl <- .h_st_cluster_flush(.S$cl)",
       "if (.S$cn != .nsp) stop(\"the cluster pass read \", .h_st_count(.S$cn), \" rows, the fit used \", .h_st_count(.nsp))",
       ".ncl <- .S$cl$G",
+      # defensive only: the one-cluster stop (.A$cl2) already fired for fewer than two clusters
       "if (.ncl < 2L) stop(\"layers$clustered needs at least two clusters (found \", .ncl, \")\")",
       ".V <- .h_st_vcov_finish(\"cluster\", .fit$B, .S$cl$S, .nsp, .fit$rank, .ncl)[.nm, .nm, drop = FALSE]"
     )

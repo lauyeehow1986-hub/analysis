@@ -81,7 +81,7 @@ test_that("the near-tie map is built per group (S13)", {
   for (ch in c(4L, 7L, 100000L)) .rs_expect(.ssc_stream(df, spec, "rmst", ch), mem, paste("chunk", ch))
   # a larger frame with three groups, every group with its own near ties
   d2 <- .ssc_surv_frame(900L, 33L)
-  d2$grp <- ifelse(d2$grp == "é", "C", d2$grp)
+  d2$grp <- ifelse(d2$grp == "\u00e9", "C", d2$grp)
   d2$sex <- d2$grp
   d2$time[seq(2L, 900L, by = 17L)] <- d2$time[seq(2L, 900L, by = 17L)] + 3e-9
   d2$time[seq(3L, 900L, by = 19L)] <- d2$time[seq(3L, 900L, by = 19L)] - 5e-9

@@ -54,7 +54,9 @@
 # The method sentence the SAP records for a cox analysis.
 .sr_cox_method_text <- function(spec) {
   if (!identical(.sr_cox_method_of(spec), "pem")) {
-    return("Hazard ratios were estimated by a Cox proportional hazards model (partial likelihood, Efron/Breslow ties).")
+    ties <- if (identical(.sr_cox_ties_of(spec), "breslow")) "Breslow" else "Efron"
+    return(paste0("Hazard ratios were estimated by a Cox proportional hazards model (partial likelihood, ", ties,
+                  " ties)."))
   }
   cu <- .sr_pem_cuts_of(spec)
   if (identical(cu[["rule"]], "explicit")) {
@@ -63,10 +65,9 @@
                   paste(at, collapse = ", "), "); listed cuts at or beyond the longest observed time are dropped."))
   } else {
     k <- cu[["k"]]
-    rule <- "rule quantile"
   }
   paste0("Hazard ratios were estimated by a piecewise-exponential Poisson model with ", format(k, trim = TRUE),
-         " intervals (", rule, ").")
+         " intervals at event-time quantiles.")
 }
 
 # The PEM field checks of .sr_cox_check: pem_cuts needs the pem method, the rule and its values are valid, and

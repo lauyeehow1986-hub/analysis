@@ -202,10 +202,10 @@ test_that("the SAP text names the cox method only when the spec stores one", {
   tb <- b[[2L]]$data %||% b[[2L]]$df
   expect_true(is.data.frame(tb))
   expect_identical(tb$Value[tb$Field == "Method"],
-                   "Hazard ratios were estimated by a piecewise-exponential Poisson model with 10 intervals (rule quantile).")
+                   "Hazard ratios were estimated by a piecewise-exponential Poisson model with 10 intervals at event-time quantiles.")
   pem <- sr_sap_docx(pem)
   txt <- .sv_docx_text(file.path(pem$paths$out, "sap", "SAP_v1.docx"))
-  expect_true(any(grepl("piecewise-exponential Poisson model with 10 intervals (rule quantile)", txt, fixed = TRUE)))
+  expect_true(any(grepl("piecewise-exponential Poisson model with 10 intervals at event-time quantiles", txt, fixed = TRUE)))
   # no cox_method stored (the form never stores the default): no Method row, the table is as before
   ex <- .sv_locked(.sv_spec(), "cox", env = environment())
   b0 <- .sr_sd_analysis_blocks(ex$state$analyses$a1)
@@ -215,6 +215,14 @@ test_that("the SAP text names the cox method only when the spec stores one", {
   txt0 <- .sv_docx_text(file.path(ex$paths$out, "sap", "SAP_v1.docx"))
   expect_false("Method" %in% txt0)
   expect_false(any(grepl("Hazard ratios were estimated", txt0, fixed = TRUE)))
+  # cox_describe gets the row too
+  dsc <- .sv_locked(.sv_spec(cox_method = "pem", purpose = "describe"), "cox_describe", env = environment())
+  bd <- .sr_sd_analysis_blocks(dsc$state$analyses$a1)
+  tbd <- bd[[2L]]$data %||% bd[[2L]]$df
+  expect_match(tbd$Value[tbd$Field == "Method"], "with 10 intervals at event-time quantiles", fixed = TRUE)
+  dsx <- .sv_locked(.sv_spec(purpose = "describe"), "cox_describe", env = environment())
+  bx <- .sr_sd_analysis_blocks(dsx$state$analyses$a1)
+  expect_false("Method" %in% (bx[[2L]]$data %||% bx[[2L]]$df)$Field)
 })
 
 test_that("old cox project reopens unchanged", {

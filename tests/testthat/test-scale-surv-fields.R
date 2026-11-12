@@ -119,13 +119,13 @@ test_that("pem estimand summary names the piecewise baseline", {
 
 test_that("SAP text names the method", {
   expect_match(.sr_cox_method_text(.sf_spec("cox")),
-               "Cox proportional hazards model (partial likelihood, Efron/Breslow ties)", fixed = TRUE)
-  expect_match(.sr_cox_method_text(.sf_spec("cox", cox_method = "exact")),
-               "Cox proportional hazards model (partial likelihood, Efron/Breslow ties)", fixed = TRUE)
+               "Cox proportional hazards model (partial likelihood, Efron ties)", fixed = TRUE)
+  expect_match(.sr_cox_method_text(.sf_spec("cox", cox_method = "exact", ties = "breslow")),
+               "Cox proportional hazards model (partial likelihood, Breslow ties)", fixed = TRUE)
   expect_match(.sr_cox_method_text(.sf_spec("cox", cox_method = "pem", pem_cuts = list(rule = "quantile", k = 10))),
-               "piecewise-exponential Poisson model with 10 intervals (rule quantile)", fixed = TRUE)
+               "piecewise-exponential Poisson model with 10 intervals at event-time quantiles", fixed = TRUE)
   expect_match(.sr_cox_method_text(.sf_spec("cox", cox_method = "pem")),
-               "with 10 intervals (rule quantile)", fixed = TRUE)
+               "with 10 intervals at event-time quantiles", fixed = TRUE)
   expect_match(.sr_cox_method_text(.sf_spec("cox", cox_method = "pem",
                                             pem_cuts = list(rule = "explicit", at = c(1, 2)))),
                "(rule explicit: 1, 2)", fixed = TRUE)

@@ -132,6 +132,9 @@ chunk plus the p x p accumulators and, for a clustered fit, a DuckDB table of th
 The progress line shows the pass number and its maximum; the maximum is lowered to the passes run when the fit
 converges.
 
+R memory also holds one row per distinct (group, time) for the KM and RMST counts and the near-tie map, and
+every analysed event time in PEM pass 0 (hundreds of MB for continuous times on 20M+ rows).
+
 ### Choosing exact Cox or PEM
 
 Use the exact method unless a reason says otherwise: it is the in-memory Cox, and the streamed result matches
