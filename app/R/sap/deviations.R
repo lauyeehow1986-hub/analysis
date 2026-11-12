@@ -460,8 +460,10 @@ sr_deviations <- function(project) {
   }
   for (id in names(st$engines %||% list())) {
     e <- st$engines[[id]]
-    add(id, label_of(id), "computational",
-        sprintf("engine changed from %s to %s: %s; estimator unchanged", e$from, e$to, e$reason), NA_character_)
+    for (h in (e$history %||% list(e))) {
+      add(id, label_of(id), "computational",
+          sprintf("engine changed from %s to %s: %s; estimator unchanged", h$from, h$to, h$reason), NA_character_)
+    }
   }
   if (!length(out)) {
     return(data.frame(analysis = character(), label = character(), kind = character(), reason = character(),

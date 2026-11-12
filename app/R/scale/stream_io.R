@@ -21,6 +21,8 @@
   run <- function(sql) DBI::dbExecute(con, sql)
   loc <- function(x) DBI::dbQuoteString(con, normalizePath(x, winslash = "/", mustWork = FALSE))
   run(paste0("SET extension_directory = ", loc(ext)))
+  run(paste0("SET custom_extension_repository = ", loc(ext)))
+  run(paste0("SET autoinstall_extension_repository = ", loc(ext)))
   run("SET autoinstall_known_extensions = false")
   run("SET autoload_known_extensions = false")
   run("SET allow_community_extensions = false")
@@ -31,8 +33,11 @@
   run("SET lock_configuration = true")
   got <- DBI::dbGetQuery(con, paste(
     "SELECT current_setting('autoload_known_extensions') AS a,",
-    "current_setting('autoinstall_known_extensions') AS b"))
-  if (!identical(c(as.logical(got$a), as.logical(got$b)), c(FALSE, FALSE))) {
+    "current_setting('autoinstall_known_extensions') AS b,",
+    "current_setting('allow_community_extensions') AS c,",
+    "current_setting('lock_configuration') AS l"))
+  if (!identical(c(as.logical(got$a), as.logical(got$b), as.logical(got$c), as.logical(got$l)),
+                 c(FALSE, FALSE, FALSE, TRUE))) {
     stop("DuckDB lockdown did not take effect")
   }
   ok <- TRUE

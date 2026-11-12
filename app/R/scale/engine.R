@@ -113,7 +113,9 @@ sr_reducer_register("engine.switched", function(state, event) {
   id <- .sr_sap_chr1(p$analysis)
   if (is.na(id)) stop("engine.switched needs an analysis id", call. = FALSE)
   eg <- state$engines %||% list()
-  eg[[id]] <- list(from = .sr_sap_chr1(p$from), to = .sr_sap_chr1(p$to), reason = .sr_sap_chr1(p$reason))
+  one <- list(from = .sr_sap_chr1(p$from), to = .sr_sap_chr1(p$to), reason = .sr_sap_chr1(p$reason))
+  # from/to/reason stay the latest switch (what .sr_engine_effective reads); history keeps every switch
+  eg[[id]] <- c(one, list(history = c(eg[[id]]$history %||% list(), list(one))))
   state$engines <- eg
   state
 })
